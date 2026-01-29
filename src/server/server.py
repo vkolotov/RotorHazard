@@ -3660,6 +3660,22 @@ def start(port_val=RaceContext.serverconfig.get_item('GENERAL', 'HTTP_PORT'), ar
             print("Error restarting server: " + str(ex))
 
 @catchLogExceptionsWrapper
+def autostart_open_practice_handler(args):
+    def autostart_task():
+        if RaceContext.serverconfig.get_item('GENERAL', 'AUTOSTART_OPEN_PRACTICE'):
+            if RaceContext.race.format and RaceContext.race.format.name == 'Open Practice':
+                logger.info("Autostart Open Practice enabled and current format is Open Practice.")
+                # Check if there's an active race to handle
+                if RaceContext.race.race_status != RHRace.RaceStatus.READY:
+                    logger.info("Saving previous race before autostarting Open Practice.")
+                    RaceContext.race.save()
+                    gevent.sleep(1) # Small delay to allow the save action to process
+
+                logger.info("Staging new Open Practice session.")
+                RaceContext.race.stage()
+    gevent.spawn(autostart_task)
+
+@catchLogExceptionsWrapper
 def rh_program_initialize(reg_endpoints_flag=True):
     with RaceContext.rhdata.get_db_session_handle():  # make sure DB session/connection is cleaned up
 
@@ -4070,6 +4086,8 @@ def rh_program_initialize(reg_endpoints_flag=True):
         RaceContext.heat_generate_manager = HeatGeneratorManager(RaceContext, RHAPI, Events)
 
         gevent.spawn(clock_check_thread_function)  # start thread to monitor system clock
+
+        Events.on(Evt.STARTUP, 'autostart_open_practice', autostart_open_practice_handler)
 
         # register endpoints
         if reg_endpoints_flag:  # flag may be disabled when run via unit test
