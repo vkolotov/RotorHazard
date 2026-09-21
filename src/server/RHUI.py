@@ -764,6 +764,39 @@ class RHUI():
         else:
             self._socket.emit('enter_and_exit_at_levels', emit_payload)
 
+    def emit_equalisation_values(self, **params):
+        '''Emits per-node RSSI equalisation constants.'''
+        profile = self._racecontext.race.profile
+        num = self._racecontext.race.num_nodes
+        raw_off = getattr(profile, 'floor_offsets', None)
+        raw_fac = getattr(profile, 'scale_factors', None)
+        offsets = json.loads(raw_off) if raw_off else {"v": []}
+        factors = json.loads(raw_fac) if raw_fac else {"v": []}
+
+        def pad(vals, default):
+            out = list(vals["v"][:num])
+            while len(out) < num:
+                out.append(default)
+            return [default if v is None else v for v in out]
+
+        emit_payload = {
+            'floor_offsets': pad(offsets, 0),
+            'scale_factors': pad(factors, 256)
+        }
+        if ('nobroadcast' in params):
+            emit('equalisation_values', emit_payload)
+        else:
+            self._socket.emit('equalisation_values', emit_payload)
+
+    def emit_eq_wizard_state(self, **params):
+        '''Emits the equalisation wizard's next step.'''
+        emit_payload = self._racecontext.calibration.eq_wizard_state()
+        emit_payload['captured'] = self._racecontext.calibration.eq_capture_table()
+        if ('nobroadcast' in params):
+            emit('eq_wizard_state', emit_payload)
+        else:
+            self._socket.emit('eq_wizard_state', emit_payload)
+
     def emit_cluster_status(self, **params):
         '''Emits cluster status information.'''
         if self._racecontext.cluster:

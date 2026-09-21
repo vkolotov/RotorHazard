@@ -959,6 +959,7 @@ def on_load_data(data):
             RaceContext.rhui.emit_node_tuning(nobroadcast=True)
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
+            RaceContext.rhui.emit_equalisation_values(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -1202,6 +1203,79 @@ def on_set_start_thresh_lower_duration(data):
 def on_set_language(data):
     '''Set interface language.'''
     RaceContext.serverconfig.set_item('UI', 'currentLanguage', data['language'])
+
+@SOCKET_IO.on('set_floor_offset')
+@catchLogExcWithDBWrapper
+def on_set_floor_offset(data):
+    '''Set per-node RSSI equalisation floor offset.'''
+    RaceContext.calibration.set_floor_offset(data['node'], data['floor_offset'])
+@SOCKET_IO.on('set_scale_factor')
+@catchLogExcWithDBWrapper
+def on_set_scale_factor(data):
+    '''Set per-node RSSI equalisation scale factor (Q8).'''
+    RaceContext.calibration.set_scale_factor(data['node'], data['scale_factor'])
+@SOCKET_IO.on('capture_eq_level')
+@catchLogExcWithDBWrapper
+def on_capture_eq_level(data):
+    '''Record current readings as one of the calibration levels.'''
+    RaceContext.calibration.capture_eq_level(data['level'])
+@SOCKET_IO.on('apply_eq_piecewise')
+@catchLogExcWithDBWrapper
+def on_apply_eq_piecewise(_data=None):
+    '''Fit and apply the two-segment correction.'''
+    RaceContext.calibration.apply_eq_piecewise()
+@SOCKET_IO.on('calibrate_floor')
+@catchLogExcWithDBWrapper
+def on_calibrate_floor(_data=None):
+    '''Set only the floor offsets, from the captured nadirs.'''
+    RaceContext.calibration.calibrate_floor()
+@SOCKET_IO.on('calibrate_scale')
+@catchLogExcWithDBWrapper
+def on_calibrate_scale(_data=None):
+    '''Set only the scale factors, from the captured peaks.'''
+    RaceContext.calibration.calibrate_scale()
+@SOCKET_IO.on('equalise_nodes')
+@catchLogExcWithDBWrapper
+def on_equalise_nodes(_data=None):
+    '''Compute equalisation constants from captured nodeNadir/nodePeak.'''
+    RaceContext.calibration.equalise_nodes()
+@SOCKET_IO.on('reset_equalisation')
+@catchLogExcWithDBWrapper
+def on_reset_equalisation(_data=None):
+    '''Clear equalisation constants back to identity.'''
+    RaceContext.calibration.reset_equalisation()
+@SOCKET_IO.on('reset_node_extremums')
+@catchLogExcWithDBWrapper
+def on_reset_node_extremums(_data=None):
+    '''Restart node peak/nadir tracking before an equalisation capture step.'''
+    RaceContext.calibration.reset_node_extremums()
+    RaceContext.rhui.emit_priority_message(__("Node peak/nadir tracking reset"))
+
+@SOCKET_IO.on('eq_wizard_capture')
+@catchLogExcWithDBWrapper
+def on_eq_wizard_capture(_data=None):
+    '''Capture the wizard's next step.'''
+    RaceContext.calibration.eq_wizard_capture()
+@SOCKET_IO.on('eq_wizard_back')
+@catchLogExcWithDBWrapper
+def on_eq_wizard_back(_data=None):
+    '''Undo the last captured step.'''
+    RaceContext.calibration.eq_wizard_back()
+@SOCKET_IO.on('eq_wizard_reset')
+@catchLogExcWithDBWrapper
+def on_eq_wizard_reset(_data=None):
+    '''Discard the in-progress calibration.'''
+    RaceContext.calibration.eq_wizard_reset()
+@SOCKET_IO.on('eq_wizard_apply')
+@catchLogExcWithDBWrapper
+def on_eq_wizard_apply(_data=None):
+    '''Fit and apply the captured calibration.'''
+    RaceContext.calibration.eq_wizard_apply()
+@SOCKET_IO.on('eq_wizard_query')
+@catchLogExcWithDBWrapper
+def on_eq_wizard_query(_data=None):
+    '''Report the wizard's current position.'''
+    RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
 
 @SOCKET_IO.on('cap_enter_at_btn')
 @requires_socketio_auth
@@ -1564,6 +1638,7 @@ def on_set_profile(data, emit_vals=True):
         if emit_vals:
             RaceContext.rhui.emit_node_tuning()
             RaceContext.rhui.emit_enter_and_exit_at_levels()
+            RaceContext.rhui.emit_equalisation_values()
             RaceContext.rhui.emit_frequency_data()
             if Use_imdtabler_jar_flag:
                 heartbeat_thread_function.imdtabler_flag = True
@@ -1571,6 +1646,8 @@ def on_set_profile(data, emit_vals=True):
         RaceContext.interface.set_all_frequencies(freqs)
         RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
         RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
+        RaceContext.calibration.hardware_set_all_equalisation()
+        RaceContext.calibration.hardware_set_all_eq_piecewise()
 
     else:
         logger.warning('Invalid set_profile value: ' + str(profile_val))

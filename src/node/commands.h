@@ -4,7 +4,7 @@
 #include "io.h"
 
 // API level for node; increment when commands are modified
-#define NODE_API_LEVEL 36
+#define NODE_API_LEVEL 40
 
 class Message
 {
@@ -35,6 +35,11 @@ public:
 #define READ_ENTER_AT_LEVEL 0x31
 #define READ_EXIT_AT_LEVEL 0x32
 #define READ_TIME_MILLIS 0x33      // read current 'millis()' value
+#define READ_FLOOR_OFFSET 0x34     // read RSSI equalisation floor offset
+#define READ_SCALE_FACTOR 0x35     // read RSSI equalisation scale factor (Q8)
+#define READ_EQ_PIVOT 0x36         // read equalisation pivot (raw ADC at PIT level)
+#define READ_EQ_KUP 0x37           // read equalisation slope above pivot (Q8)
+#define READ_EQ_KLO 0x38           // read equalisation slope below pivot (Q8)
 #define READ_MULTINODE_COUNT 0x39  // read # of nodes handled by this processor
 #define READ_CURNODE_INDEX 0x3A    // read index of current node for this processor
 #define READ_NODE_SLOTIDX 0x3C     // read node slot index (for multi-node setup)
@@ -46,9 +51,15 @@ public:
 #define WRITE_FREQUENCY 0x51
 #define WRITE_ENTER_AT_LEVEL 0x71
 #define WRITE_EXIT_AT_LEVEL 0x72
+#define WRITE_FLOOR_OFFSET 0x73    // write RSSI equalisation floor offset
+#define WRITE_SCALE_FACTOR 0x74    // write RSSI equalisation scale factor (Q8)
+#define WRITE_EQ_PIVOT 0x66        // write equalisation pivot (raw ADC at PIT level)
+#define WRITE_EQ_KUP 0x67          // write equalisation slope above pivot (Q8)
+#define WRITE_EQ_KLO 0x68          // write equalisation slope below pivot (Q8)
 #define WRITE_CURNODE_INDEX 0x7A   // write index of current node for this processor
 
 #define SEND_STATUS_MESSAGE 0x75   // send status message from server to node
+#define RESET_NODE_EXTREMUMS 0x77  // restart node peak/nadir tracking
 #define FORCE_END_CROSSING 0x78    // kill current crossing flag regardless of RSSI value
 #define RESET_PAIRED_NODE 0x79     // command to reset node for ISP
 #define JUMP_TO_BOOTLOADER 0x7E    // jump to bootloader for flash update

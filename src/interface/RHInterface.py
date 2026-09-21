@@ -21,6 +21,11 @@ READ_NODE_RSSI_PEAK = 0x23   # read 'nodeRssiPeak' value
 READ_NODE_RSSI_NADIR = 0x24  # read 'nodeRssiNadir' value
 READ_ENTER_AT_LEVEL = 0x31
 READ_EXIT_AT_LEVEL = 0x32
+READ_FLOOR_OFFSET = 0x34
+READ_SCALE_FACTOR = 0x35
+READ_EQ_PIVOT = 0x36
+READ_EQ_KUP = 0x37
+READ_EQ_KLO = 0x38
 READ_TIME_MILLIS = 0x33      # read current 'millis()' time value
 READ_MULTINODE_COUNT = 0x39  # read # of nodes handled by processor
 READ_CURNODE_INDEX = 0x3A    # read index of current node for processor
@@ -34,6 +39,11 @@ WRITE_FREQUENCY = 0x51       # Sets frequency (2 byte)
 # WRITE_FILTER_RATIO = 0x70   # node API_level>=10 uses 16-bit value
 WRITE_ENTER_AT_LEVEL = 0x71
 WRITE_EXIT_AT_LEVEL = 0x72
+WRITE_FLOOR_OFFSET = 0x73
+WRITE_SCALE_FACTOR = 0x74
+WRITE_EQ_PIVOT = 0x66
+WRITE_EQ_KUP = 0x67
+WRITE_EQ_KLO = 0x68
 WRITE_CURNODE_INDEX = 0x7A  # write index of current node for processor
 SEND_STATUS_MESSAGE = 0x75  # send status message from server to node
 FORCE_END_CROSSING = 0x78   # kill current crossing flag regardless of RSSI value
@@ -584,6 +594,48 @@ class RHInterface(BaseHardwareInterface):
         if node.api_valid_flag and node.is_valid_rssi(level):
             if self.transmit_exit_at_level(node, level):
                 node.exit_at_level = level
+
+    def transmit_floor_offset(self, node, offset):
+        return self.set_and_validate_value_16(node,
+            WRITE_FLOOR_OFFSET,
+            READ_FLOOR_OFFSET,
+            offset)
+    def set_floor_offset(self, node_index, offset):
+        '''Set per-node RSSI equalisation floor offset (node API >= 38).'''
+        node = self.nodes[node_index]
+        if node.api_valid_flag and node.api_level >= 38:
+            if self.transmit_floor_offset(node, offset) is not None:
+                node.floor_offset = offset
+    def transmit_scale_factor(self, node, factor):
+        return self.set_and_validate_value_16(node,
+            WRITE_SCALE_FACTOR,
+            READ_SCALE_FACTOR,
+            factor)
+    def set_scale_factor(self, node_index, factor):
+        '''Set per-node RSSI equalisation scale factor, Q8 (node API >= 38).'''
+        node = self.nodes[node_index]
+        if node.api_valid_flag and node.api_level >= 38:
+            if self.transmit_scale_factor(node, factor) is not None:
+                node.scale_factor = factor
+    def reset_node_extremums(self, node_index):
+        '''Restart node peak/nadir tracking on the node itself (API >= 39).'''
+        node = self.nodes[node_index]
+        if node.api_valid_flag and node.api_level >= 39:
+            self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
+            node.node_peak_rssi = 0
+            node.node_nadir_rssi = node.max_rssi_value
+    def set_eq_piecewise(self, node_index, pivot, kup, klo):
+        '''Set the piecewise equalisation constants (node API >= 40).
+
+        pivot is the raw ADC reading at the PIT level; kup and klo are Q8
+        slopes above and below it. pivot 0 disables the piecewise path.
+        '''
+        node = self.nodes[node_index]
+        if node.api_valid_flag and node.api_level >= 40:
+            self.set_and_validate_value_16(node, WRITE_EQ_PIVOT, READ_EQ_PIVOT, pivot)
+            self.set_and_validate_value_16(node, WRITE_EQ_KUP, READ_EQ_KUP, kup)
+            self.set_and_validate_value_16(node, WRITE_EQ_KLO, READ_EQ_KLO, klo)
+            node.eq_pivot, node.eq_kup, node.eq_klo = pivot, kup, klo
 
     def force_end_crossing(self, node_index):
         node = self.nodes[node_index]

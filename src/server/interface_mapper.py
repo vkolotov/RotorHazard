@@ -170,6 +170,29 @@ class InterfaceMapper:
         local_index = mapped_node.index
         return mapped_node.interface.set_exit_at_level(local_index, level)
 
+
+
+    def set_floor_offset(self, node_index, offset):
+        mapped_node = self._node_map[node_index]
+        local_index = mapped_node.index
+        if hasattr(mapped_node.interface, "set_floor_offset"):
+            return mapped_node.interface.set_floor_offset(local_index, offset)
+    def set_scale_factor(self, node_index, factor):
+        mapped_node = self._node_map[node_index]
+        local_index = mapped_node.index
+        if hasattr(mapped_node.interface, "set_scale_factor"):
+            return mapped_node.interface.set_scale_factor(local_index, factor)
+    def reset_node_extremums(self, node_index):
+        mapped_node = self._node_map[node_index]
+        local_index = mapped_node.index
+        if hasattr(mapped_node.interface, "reset_node_extremums"):
+            return mapped_node.interface.reset_node_extremums(local_index)
+    def set_eq_piecewise(self, node_index, pivot, kup, klo):
+        mapped_node = self._node_map[node_index]
+        local_index = mapped_node.index
+        if hasattr(mapped_node.interface, "set_eq_piecewise"):
+            return mapped_node.interface.set_eq_piecewise(local_index, pivot, kup, klo)
+
     def force_end_crossing(self, node_index):
         mapped_node = self._node_map[node_index]
         local_index = mapped_node.index

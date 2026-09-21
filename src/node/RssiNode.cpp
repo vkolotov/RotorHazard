@@ -179,13 +179,33 @@ rssi_t RssiNode::rssiRead()
         recentSetFreqFlag = false;  // don't need to check again until next freq change
     }
 
-    // reads 5V value as 0-1023, RX5808 is 3.3V powered so RSSI pin will never output the full range
+    // read full ADC range; on STM32 the ADC is configured for 12-bit (0-4095)
+    // and 'rssi_t' is 16-bit, so no down-scaling or clamping is applied here
     int raw = analogRead(rssiInputPin);
-    // clamp upper range to fit scaling
-    if (raw > 0x01FF)
-        raw = 0x01FF;
-    // rescale to fit into a byte and remove some jitter
-    return raw >> 1;
+
+    // Per-node equalisation, applied once here so that all downstream
+    //  processing (smoothing, peak/nadir, crossing) sees corrected values.
+    //  Q8 fixed point throughout; no floating point in the sample loop.
+    int32_t adj;
+    if (settings.eqPivot)
+    {  // piecewise: two slopes meeting at the pivot (the PIT level).
+       //  Above it the fit is anchored on two real signal levels and is the
+       //  one that matters for crossing detection. Below it the slope is
+       //  only there to keep the idle trace off zero, so it stays visible.
+        if (raw >= (int)settings.eqPivot)
+            adj = PIVOT_TARGET + ((((int32_t)(raw - settings.eqPivot)) * settings.eqKUp) >> 8);
+        else
+            adj = PIVOT_TARGET - ((((int32_t)(settings.eqPivot - raw)) * settings.eqKLo) >> 8);
+    }
+    else
+    {  // legacy single-slope form; defaults (0, 256) leave the reading unchanged
+        adj = ((int32_t)(raw - settings.floorOffset) * settings.scaleFactor) >> 8;
+    }
+    if (adj < 0)
+        adj = 0;
+    else if (adj > MAX_ADC_VALUE)
+        adj = MAX_ADC_VALUE;
+    return (rssi_t) adj;
 }
 
 void RssiNode::rx5808SerialSendBit1()

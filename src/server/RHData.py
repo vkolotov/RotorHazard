@@ -2556,6 +2556,16 @@ class RHData():
             profile.enter_ats = data['enter_ats'] if isinstance(data['enter_ats'], str) else json.dumps(data['enter_ats'])
         if 'exit_ats' in data:
             profile.exit_ats = data['exit_ats'] if isinstance(data['exit_ats'], str) else json.dumps(data['exit_ats'])
+        if 'floor_offsets' in data:
+            profile.floor_offsets = data['floor_offsets'] if isinstance(data['floor_offsets'], str) else json.dumps(data['floor_offsets'])
+        if 'scale_factors' in data:
+            profile.scale_factors = data['scale_factors'] if isinstance(data['scale_factors'], str) else json.dumps(data['scale_factors'])
+        if 'eq_pivots' in data:
+            profile.eq_pivots = data['eq_pivots'] if isinstance(data['eq_pivots'], str) else json.dumps(data['eq_pivots'])
+        if 'eq_kups' in data:
+            profile.eq_kups = data['eq_kups'] if isinstance(data['eq_kups'], str) else json.dumps(data['eq_kups'])
+        if 'eq_klos' in data:
+            profile.eq_klos = data['eq_klos'] if isinstance(data['eq_klos'], str) else json.dumps(data['eq_klos'])
 
         profile = self._filters.run_filters(Flt.PROFILE_ALTER, profile, {
             'data': data

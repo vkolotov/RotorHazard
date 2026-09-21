@@ -399,6 +399,11 @@ class Profiles(Base):
     frequencies = DB.Column(DB.String(80), nullable=False)
     enter_ats = DB.Column(DB.String(80), nullable=True)
     exit_ats = DB.Column(DB.String(80), nullable=True)
+    floor_offsets = DB.Column(DB.String(256), nullable=True)
+    scale_factors = DB.Column(DB.String(256), nullable=True)
+    eq_pivots = DB.Column(DB.String(256), nullable=True)
+    eq_kups = DB.Column(DB.String(256), nullable=True)
+    eq_klos = DB.Column(DB.String(256), nullable=True)
     f_ratio = DB.Column(DB.Integer, nullable=True)
 
 class RaceFormat(Base):

@@ -203,6 +203,8 @@ void setup()
 
 #if STM32_MODE_FLAG
 
+    analogReadResolution(12);  // use full 12-bit ADC range for RSSI reads
+
     for (int nIdx=0; nIdx<MULTI_RHNODE_MAX; ++nIdx)
         RssiNode::rssiNodeArray[nIdx].initRx5808Pins(nIdx);
 
@@ -226,7 +228,7 @@ void setup()
         {  //RX5808 not installed in slot
             if (nIdx < RssiNode::multiRssiNodeCount - 1)
             {  //not last slot; shift down nodes later in array
-                for (int i=nIdx; i<RssiNode::multiRssiNodeCount; ++i)
+                for (int i=nIdx; i<RssiNode::multiRssiNodeCount-1; ++i)
                     RssiNode::rssiNodeArray[i].copyNodeData(&RssiNode::rssiNodeArray[i+1]);
             }
             --RssiNode::multiRssiNodeCount;

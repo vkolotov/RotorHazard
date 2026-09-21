@@ -84,7 +84,7 @@ class Buffer {
         }
 };
 
-#define ioBufferReadRssi(buf) (buf.read8())
-#define ioBufferWriteRssi(buf, rssi) (buf.write8(rssi))
+#define ioBufferReadRssi(buf) (buf.read16())
+#define ioBufferWriteRssi(buf, rssi) (buf.write16(rssi))
 
 #endif

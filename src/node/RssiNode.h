@@ -14,6 +14,13 @@
 
 #define MAX_DURATION 0xFFFF
 
+// full-scale value for the 12-bit ADC used for RSSI reads
+#define MAX_ADC_VALUE 4095
+
+// corrected value that the pivot (PIT) level maps to; the accurate segment
+//  runs upward from here, the cosmetic one downward
+#define PIVOT_TARGET 300
+
 #define RX5808_MIN_TUNETIME 35  // after set freq need to wait this long before read RSSI
 #define RX5808_MIN_BUSTIME 30   // after set freq need to wait this long before setting again
 
@@ -38,10 +45,21 @@
 struct Settings
 {
     uint16_t volatile vtxFreq = 5800;
-    // lap pass begins when RSSI is at or above this level
-    rssi_t volatile enterAtLevel = 96;
-    // lap pass ends when RSSI goes below this level
-    rssi_t volatile exitAtLevel = 80;
+    // lap pass begins when RSSI is at or above this level (12-bit scale)
+    rssi_t volatile enterAtLevel = 1536;
+    // lap pass ends when RSSI goes below this level (12-bit scale)
+    rssi_t volatile exitAtLevel = 1280;
+    // RSSI equalisation: corrected = (raw - floorOffset) * scaleFactor >> 8
+    //  defaults are identity (no change to the reading)
+    int16_t volatile floorOffset = 0;
+    uint16_t volatile scaleFactor = 256;
+    // piecewise equalisation: pivot is the raw reading at the PIT level, kUp
+    //  the Q8 slope above it (accurate, this is where laps happen) and kLo the
+    //  slope below (rough - keeps the idle trace alive without pinning it to 0).
+    //  pivot == 0 disables the piecewise path and falls back to floor/scale.
+    uint16_t volatile eqPivot = 0;
+    uint16_t volatile eqKUp = 256;
+    uint16_t volatile eqKLo = 256;
 };
 
 struct State
@@ -161,6 +179,16 @@ public:
     void setEnterAtLevel(rssi_t val) { settings.enterAtLevel = val; }
     rssi_t getExitAtLevel() { return settings.exitAtLevel; }
     void setExitAtLevel(rssi_t val) { settings.exitAtLevel = val; }
+    int16_t getFloorOffset() { return settings.floorOffset; }
+    void setFloorOffset(int16_t val) { settings.floorOffset = val; }
+    uint16_t getScaleFactor() { return settings.scaleFactor; }
+    void setScaleFactor(uint16_t val) { settings.scaleFactor = val; }
+    uint16_t getEqPivot() { return settings.eqPivot; }
+    void setEqPivot(uint16_t val) { settings.eqPivot = val; }
+    uint16_t getEqKUp() { return settings.eqKUp; }
+    void setEqKUp(uint16_t val) { settings.eqKUp = val; }
+    uint16_t getEqKLo() { return settings.eqKLo; }
+    void setEqKLo(uint16_t val) { settings.eqKLo = val; }
     bool rssiProcess(mtime_t millis) { return rssiProcessValue(millis, rssiRead()); }
 
     struct State & getState() { return state; }
