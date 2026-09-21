@@ -125,7 +125,9 @@ def validate_checksum(data):
     return checksum == data[-1]
 
 def unpack_rssi(node, data):
-    if node.api_level >= 18:
+    if node.api_level >= 37:
+        return unpack_16(data)
+    elif node.api_level >= 18:
         return unpack_8(data)
     else:
         return unpack_16(data) / 2
@@ -237,7 +239,12 @@ class RHInterface(BaseHardwareInterface):
         for node in self.nodes:
             if node.frequency:
                 if node.api_valid_flag or node.api_level >= 5:
-                    if node.api_level >= 32:
+                    if node.api_level >= 37:
+                        # 16-bit RSSI widens both payloads: 11 bytes each
+                        data = node.read_block(self, READ_LAP_PASS_STATS, 11)
+                        if data != None:
+                            data.extend(node.read_block(self, READ_LAP_EXTREMUMS, 11))
+                    elif node.api_level >= 32:
                         data = node.read_block(self, READ_LAP_PASS_STATS, 8)
                         if data != None:
                             data.extend(node.read_block(self, READ_LAP_EXTREMUMS, 8))
@@ -261,7 +268,22 @@ class RHInterface(BaseHardwareInterface):
                 if data != None and len(data) > 0:
                     lap_id = data[0]
 
-                    if node.api_level >= 18:
+                    if node.api_level >= 37:
+                        # 16-bit RSSI fields (12-bit ADC values)
+                        offset_rssi = 3
+                        offset_nodePeakRssi = 5
+                        offset_passPeakRssi = 7
+                        offset_loopTime = 9
+                        offset_lapStatsFlags = 11
+                        offset_passNadirRssi = 12
+                        offset_nodeNadirRssi = 14
+                        offset_peakRssi = 16
+                        offset_peakFirstTime = 18
+                        offset_peakDuration = 20
+                        offset_nadirRssi = 16
+                        offset_nadirFirstTime = 18
+                        offset_nadirDuration = 20
+                    elif node.api_level >= 18:
                         offset_rssi = 3
                         offset_nodePeakRssi = 4
                         offset_passPeakRssi = 5
@@ -519,13 +541,13 @@ class RHInterface(BaseHardwareInterface):
         return success
 
     def set_and_validate_value_rssi(self, node, write_command, read_command, in_value):
-        if node.api_level >= 18:
+        if node.api_level >= 18 and node.api_level < 37:
             return self.set_and_validate_value_8(node, write_command, read_command, in_value)
         else:
             return self.set_and_validate_value_16(node, write_command, read_command, in_value)
 
     def get_value_rssi(self, node, command):
-        if node.api_level >= 18:
+        if node.api_level >= 18 and node.api_level < 37:
             return self.get_value_8(node, command)
         else:
             return self.get_value_16(node, command)
@@ -601,9 +623,9 @@ class RHInterface(BaseHardwareInterface):
             READ_FLOOR_OFFSET,
             offset)
     def set_floor_offset(self, node_index, offset):
-        '''Set per-node RSSI equalisation floor offset (node API >= 38).'''
+        '''Set per-node RSSI equalisation floor offset (node API >= 37).'''
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 38:
+        if node.api_valid_flag and node.api_level >= 37:
             if self.transmit_floor_offset(node, offset) is not None:
                 node.floor_offset = offset
     def transmit_scale_factor(self, node, factor):
@@ -612,26 +634,26 @@ class RHInterface(BaseHardwareInterface):
             READ_SCALE_FACTOR,
             factor)
     def set_scale_factor(self, node_index, factor):
-        '''Set per-node RSSI equalisation scale factor, Q8 (node API >= 38).'''
+        '''Set per-node RSSI equalisation scale factor, Q8 (node API >= 37).'''
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 38:
+        if node.api_valid_flag and node.api_level >= 37:
             if self.transmit_scale_factor(node, factor) is not None:
                 node.scale_factor = factor
     def reset_node_extremums(self, node_index):
-        '''Restart node peak/nadir tracking on the node itself (API >= 39).'''
+        '''Restart node peak/nadir tracking on the node itself (API >= 37).'''
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 39:
+        if node.api_valid_flag and node.api_level >= 37:
             self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
             node.node_peak_rssi = 0
             node.node_nadir_rssi = node.max_rssi_value
     def set_eq_piecewise(self, node_index, pivot, kup, klo):
-        '''Set the piecewise equalisation constants (node API >= 40).
+        '''Set the piecewise equalisation constants (node API >= 37).
 
         pivot is the raw ADC reading at the PIT level; kup and klo are Q8
         slopes above and below it. pivot 0 disables the piecewise path.
         '''
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 40:
+        if node.api_valid_flag and node.api_level >= 37:
             self.set_and_validate_value_16(node, WRITE_EQ_PIVOT, READ_EQ_PIVOT, pivot)
             self.set_and_validate_value_16(node, WRITE_EQ_KUP, READ_EQ_KUP, kup)
             self.set_and_validate_value_16(node, WRITE_EQ_KLO, READ_EQ_KLO, klo)

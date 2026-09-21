@@ -78,7 +78,9 @@ class Node:
     def init(self):
         if self.api_level >= 10:
             self.api_valid_flag = True  # set flag for newer API functions supported
-        if self.api_valid_flag and self.api_level >= 18:
+        if self.api_valid_flag and self.api_level >= 37:
+            self.max_rssi_value = 4096
+        elif self.api_valid_flag and self.api_level >= 18:
             self.max_rssi_value = 255
         else:
             self.max_rssi_value = 999
