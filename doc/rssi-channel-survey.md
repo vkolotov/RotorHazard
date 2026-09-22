@@ -64,6 +64,13 @@ a node sits on the curve and for how that shifts with frequency.
 band, node 2 141, while node 3 moves 14. Shapes again differ per node, so this
 is per-node filter/antenna response, not common-mode interference.
 
+## Outcome
+
+The non-linearity in finding 3 was resolved by replacing the single-gain fit
+with a two-segment piecewise correction fitted on three levels - see
+`node-equalisation.md`. Finding 1 was not resolved and became a documented
+constraint: each node must stay on the channel it was calibrated on.
+
 ## Conclusion
 
 Equalisation constants must be stored **per node per channel** (8 x 8 = 64
