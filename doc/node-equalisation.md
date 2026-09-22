@@ -199,4 +199,5 @@ ignored by the firmware.
 - `rssi-channel-survey.md` - why constants are channel-specific, with data
 - `rssi-channel-survey.csv` - the raw 192 measurements
 - `12bit-rssi-ab-test.md` - the 12-bit pipeline this builds on
+- `12bit-measurements.md` - what that change actually bought, measured
 - `src/server/rssi_survey.py` - the capture tool used for the survey
