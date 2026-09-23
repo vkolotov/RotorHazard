@@ -75,6 +75,7 @@ class Config:
         self.config['GENERAL']['CORS_ALLOWED_HOSTS'] = '*'
         self.config['GENERAL']['ADMIN_SOCKET_AUTH'] = True
         self.config['GENERAL']['FORCE_S32_BPILL_FLAG'] = False
+        self.config['GENERAL']['FULL_RSSI_RESOLUTION'] = False
         self.config['GENERAL']['DEF_NODE_FWUPDATE_URL'] = ''
         self.config['GENERAL']['SHUTDOWN_BUTTON_GPIOPIN'] = 18
         self.config['GENERAL']['SHUTDOWN_BUTTON_DELAYMS'] = 2500
@@ -186,6 +187,7 @@ class Config:
                 'SECONDARIES',
                 'CORS_ALLOWED_HOSTS',
                 'FORCE_S32_BPILL_FLAG',
+                'FULL_RSSI_RESOLUTION',
                 'SHUTDOWN_BUTTON_GPIOPIN',
                 'SHUTDOWN_BUTTON_DELAYMS',
                 'DB_AUTOBKP_NUM_KEEP',

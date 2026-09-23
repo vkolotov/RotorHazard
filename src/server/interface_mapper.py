@@ -170,6 +170,12 @@ class InterfaceMapper:
         local_index = mapped_node.index
         return mapped_node.interface.set_exit_at_level(local_index, level)
 
+    def set_adc_resolution(self, node_index, full_resolution):
+        mapped_node = self._node_map[node_index]
+        local_index = mapped_node.index
+        if hasattr(mapped_node.interface, "set_adc_resolution"):
+            return mapped_node.interface.set_adc_resolution(local_index, full_resolution)
+
     def force_end_crossing(self, node_index):
         mapped_node = self._node_map[node_index]
         local_index = mapped_node.index

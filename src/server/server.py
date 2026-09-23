@@ -1569,6 +1569,11 @@ def on_set_profile(data, emit_vals=True):
                 heartbeat_thread_function.imdtabler_flag = True
 
         RaceContext.interface.set_all_frequencies(freqs)
+        # the width has to be settled before any threshold is sent, since it
+        #  changes what those numbers mean
+        full_res = RaceContext.serverconfig.get_item('GENERAL', 'FULL_RSSI_RESOLUTION')
+        for idx in range(RaceContext.race.num_nodes):
+            RaceContext.interface.set_adc_resolution(idx, full_res)
         RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
         RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
 
