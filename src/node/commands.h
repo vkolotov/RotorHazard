@@ -4,7 +4,7 @@
 #include "io.h"
 
 // API level for node; increment when commands are modified
-#define NODE_API_LEVEL 36
+#define NODE_API_LEVEL 37
 
 class Message
 {
@@ -35,6 +35,11 @@ public:
 #define READ_ENTER_AT_LEVEL 0x31
 #define READ_EXIT_AT_LEVEL 0x32
 #define READ_TIME_MILLIS 0x33      // read current 'millis()' value
+#define READ_EQ_PIVOT 0x34         // read equalisation pivot (raw ADC)
+#define READ_EQ_OFFSET_UP 0x35     // read equalisation offset, above pivot
+#define READ_EQ_SLOPE_UP 0x36      // read equalisation slope, above pivot (Q8)
+#define READ_EQ_OFFSET_LO 0x37     // read equalisation offset, below pivot
+#define READ_EQ_SLOPE_LO 0x38      // read equalisation slope, below pivot (Q8)
 #define READ_MULTINODE_COUNT 0x39  // read # of nodes handled by this processor
 #define READ_CURNODE_INDEX 0x3A    // read index of current node for this processor
 #define READ_NODE_SLOTIDX 0x3C     // read node slot index (for multi-node setup)
@@ -46,6 +51,12 @@ public:
 #define WRITE_FREQUENCY 0x51
 #define WRITE_ENTER_AT_LEVEL 0x71
 #define WRITE_EXIT_AT_LEVEL 0x72
+#define WRITE_EQ_PIVOT 0x64        // write equalisation pivot (raw ADC)
+#define WRITE_EQ_OFFSET_UP 0x65    // write equalisation offset, above pivot
+#define WRITE_EQ_SLOPE_UP 0x66     // write equalisation slope, above pivot (Q8)
+#define WRITE_EQ_OFFSET_LO 0x67    // write equalisation offset, below pivot
+#define WRITE_EQ_SLOPE_LO 0x68     // write equalisation slope, below pivot (Q8)
+#define RESET_NODE_EXTREMUMS 0x69  // restart node peak/nadir tracking
 #define WRITE_CURNODE_INDEX 0x7A   // write index of current node for this processor
 
 #define SEND_STATUS_MESSAGE 0x75   // send status message from server to node

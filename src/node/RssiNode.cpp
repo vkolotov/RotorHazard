@@ -185,7 +185,29 @@ rssi_t RssiNode::rssiRead()
     if (raw > 0x01FF)
         raw = 0x01FF;
     // rescale to fit into a byte and remove some jitter
-    return raw >> 1;
+    raw >>= 1;
+
+    if (!settings.eqPivot)
+        return (rssi_t) raw;  // no calibration applied
+
+    // Per-node equalisation, applied here so that everything downstream -
+    //  smoothing, peak/nadir tracking, crossing detection - works on corrected
+    //  values. Two straight segments meet at the pivot: above it the fit is
+    //  anchored on two real signal levels and is the one lap detection uses,
+    //  below it the slope only keeps an idle node off zero so it still looks
+    //  alive. Q8 fixed point; the server folds its output scale into the
+    //  offsets, so nothing here needs to know what that scale is.
+    int32_t adj;
+    if (raw >= (int)settings.eqPivot)
+        adj = ((int32_t)(raw - settings.eqOffsetUp) * settings.eqSlopeUp) >> 8;
+    else
+        adj = ((int32_t)(raw - settings.eqOffsetLo) * settings.eqSlopeLo) >> 8;
+
+    if (adj < 0)
+        adj = 0;
+    else if (adj > MAX_EQ_RSSI)
+        adj = MAX_EQ_RSSI;  // one below MAX_RSSI, which is the nadir sentinel
+    return (rssi_t) adj;
 }
 
 void RssiNode::rx5808SerialSendBit1()

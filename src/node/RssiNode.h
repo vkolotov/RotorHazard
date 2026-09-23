@@ -14,6 +14,10 @@
 
 #define MAX_DURATION 0xFFFF
 
+// Upper clamp for an equalised reading. MAX_RSSI is the 'no nadir recorded'
+//  sentinel, so a real reading must never reach it.
+#define MAX_EQ_RSSI (MAX_RSSI - 1)
+
 #define RX5808_MIN_TUNETIME 35  // after set freq need to wait this long before read RSSI
 #define RX5808_MIN_BUSTIME 30   // after set freq need to wait this long before setting again
 
@@ -42,6 +46,16 @@ struct Settings
     rssi_t volatile enterAtLevel = 96;
     // lap pass ends when RSSI goes below this level
     rssi_t volatile exitAtLevel = 80;
+    // Per-node equalisation: two straight segments meeting at eqPivot, so that
+    //  every node reports the same value for the same signal. The server owns
+    //  the output scale and sends offsets with it already folded in, so there
+    //  is no shared constant to keep in step across the protocol boundary.
+    //  eqPivot == 0 disables the correction entirely.
+    uint16_t volatile eqPivot = 0;
+    int16_t volatile eqOffsetUp = 0;
+    uint16_t volatile eqSlopeUp = 256;
+    int16_t volatile eqOffsetLo = 0;
+    uint16_t volatile eqSlopeLo = 256;
 };
 
 struct State
@@ -161,6 +175,16 @@ public:
     void setEnterAtLevel(rssi_t val) { settings.enterAtLevel = val; }
     rssi_t getExitAtLevel() { return settings.exitAtLevel; }
     void setExitAtLevel(rssi_t val) { settings.exitAtLevel = val; }
+    uint16_t getEqPivot() { return settings.eqPivot; }
+    void setEqPivot(uint16_t val) { settings.eqPivot = val; }
+    int16_t getEqOffsetUp() { return settings.eqOffsetUp; }
+    void setEqOffsetUp(int16_t val) { settings.eqOffsetUp = val; }
+    uint16_t getEqSlopeUp() { return settings.eqSlopeUp; }
+    void setEqSlopeUp(uint16_t val) { settings.eqSlopeUp = val; }
+    int16_t getEqOffsetLo() { return settings.eqOffsetLo; }
+    void setEqOffsetLo(int16_t val) { settings.eqOffsetLo = val; }
+    uint16_t getEqSlopeLo() { return settings.eqSlopeLo; }
+    void setEqSlopeLo(uint16_t val) { settings.eqSlopeLo = val; }
     bool rssiProcess(mtime_t millis) { return rssiProcessValue(millis, rssiRead()); }
 
     struct State & getState() { return state; }
