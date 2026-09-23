@@ -458,7 +458,11 @@
 				}, 1000);
 			} else {
 				$('#eq_wizard_reset').prop('disabled', false);
-				if (msg.state == 'applied') {
+				if (msg.state == 'incompatible') {
+					btn.text("{{ __('Reset calibration for this resolution') }}").data('act', '').prop('disabled', true);
+					prog.text('');
+					$('#eq_wizard_back').prop('disabled', true);
+				} else if (msg.state == 'applied') {
 					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
 					prog.text('');
 					$('#eq_wizard_back').prop('disabled', true);
@@ -508,6 +512,35 @@
 		});
 
 		socket.emit('eq_wizard_query');
+
+		socket.on('rssi_resolution_state', function (msg) {
+			var sel = $('#set_full_rssi_resolution');
+			sel.val(msg.full ? 'true' : 'false');
+			sel.data('applied', msg.full ? 'true' : 'false');
+			sel.prop('disabled', !msg.supported);
+		});
+
+		$('#set_full_rssi_resolution').change(function (event) {
+			var sel = $(this);
+			var wanted = sel.val();
+			var going_high = (wanted == 'true');
+			var warning = going_high
+				? "{{ __('Switch to High (12 bit)?') }}"
+				: "{{ __('Switch to Low (8 bit)?') }}";
+			warning += "\n\n";
+			warning += "{{ __('Every RSSI reading changes by a factor of eight. EnterAt/ExitAt will be rescaled to match, so lap detection keeps working.') }}";
+			warning += "\n\n";
+			warning += "{{ __('Node equalisation cannot be converted and will be cleared - run the Equalise wizard again to get the most out of the new scale. Saved races are left untouched, and adaptive calibration will ignore races recorded on the old scale.') }}";
+			if (confirm(warning)) {
+				socket.emit('set_config', {
+					section: 'GENERAL',
+					key: 'FULL_RSSI_RESOLUTION',
+					value: going_high
+				});
+			} else {
+				sel.val(sel.data('applied'));
+			}
+		});
 
 		socket.on('node_tuning', function (msg) {
 			$('#set_profile').empty();
@@ -2856,6 +2889,15 @@
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>
 				</div>
+			</li>
+			<li>
+				<div class="label-block">
+					<label for="set_full_rssi_resolution">{{ __('RSSI Resolution') }}</label>
+				</div>
+				<select id="set_full_rssi_resolution">
+					<option value="false">{{ __('Low (8 bit)') }}</option>
+					<option value="true">{{ __('High (12 bit)') }}</option>
+				</select>
 			</li>
 			<li>
 				<div class="label-block">
