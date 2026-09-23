@@ -203,7 +203,7 @@ void setup()
 
 #if STM32_MODE_FLAG
 
-    analogReadResolution(12);  // read the ADC at its full width
+    analogReadResolution(LEGACY_ADC_BITS);  // until the server says otherwise
 
     for (int nIdx=0; nIdx<MULTI_RHNODE_MAX; ++nIdx)
         RssiNode::rssiNodeArray[nIdx].initRx5808Pins(nIdx);
