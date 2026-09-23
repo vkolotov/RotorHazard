@@ -18,6 +18,11 @@
 //  sentinel, so a real reading must never reach it.
 #define MAX_EQ_RSSI (MAX_RSSI - 1)
 
+// ADC widths the node will accept. Legacy matches what the 8-bit pipeline
+//  always produced, so it is the default and nothing changes without opt-in.
+#define LEGACY_ADC_BITS 10
+#define FULL_ADC_BITS 12
+
 #define RX5808_MIN_TUNETIME 35  // after set freq need to wait this long before read RSSI
 #define RX5808_MIN_BUSTIME 30   // after set freq need to wait this long before setting again
 
@@ -42,10 +47,22 @@
 struct Settings
 {
     uint16_t volatile vtxFreq = 5800;
+#ifdef STM32_CORE_VERSION
+    // Reading the ADC at its full 12-bit width changes the meaning of every
+    //  stored RSSI value - saved race traces, thresholds, peak_rssi - so it is
+    //  opt-in. The server sends the resolution at startup and defaults to the
+    //  legacy 10-bit reading, leaving an existing timer's numbers unchanged
+    //  until its operator chooses otherwise.
+    uint8_t volatile adcResolution = LEGACY_ADC_BITS;
+    // defaults match the legacy scale, since that is the startup default
+    rssi_t volatile enterAtLevel = 96;
+    rssi_t volatile exitAtLevel = 80;
+#else
     // lap pass begins when RSSI is at or above this level
     rssi_t volatile enterAtLevel = 96;
     // lap pass ends when RSSI goes below this level
     rssi_t volatile exitAtLevel = 80;
+#endif
     // Per-node equalisation: two straight segments meeting at eqPivot, so that
     //  every node reports the same value for the same signal. The server owns
     //  the output scale and sends offsets with it already folded in, so there
@@ -185,6 +202,11 @@ public:
     void setEqOffsetLo(int16_t val) { settings.eqOffsetLo = val; }
     uint16_t getEqSlopeLo() { return settings.eqSlopeLo; }
     void setEqSlopeLo(uint16_t val) { settings.eqSlopeLo = val; }
+
+#ifdef STM32_CORE_VERSION
+    uint8_t getAdcResolution() { return settings.adcResolution; }
+    void setAdcResolution(uint8_t bits);
+#endif
     bool rssiProcess(mtime_t millis) { return rssiProcessValue(millis, rssiRead()); }
 
     struct State & getState() { return state; }
