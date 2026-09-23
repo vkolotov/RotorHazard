@@ -439,6 +439,76 @@
 		});
 
 		/* Profiles */
+		socket.on('eq_wizard_state', function (msg) {
+			var btn = $('#eq_wizard_action');
+			var prog = $('#eq_wizard_progress');
+			if (window.eqTick) { clearInterval(window.eqTick); window.eqTick = null; }
+
+			if (msg.busy) {
+				var left = msg.settle || 5;
+				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset').prop('disabled', true);
+				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
+				window.eqTick = setInterval(function () {
+					left -= 1;
+					if (left > 0) {
+						btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
+					} else {
+						clearInterval(window.eqTick); window.eqTick = null;
+					}
+				}, 1000);
+			} else {
+				$('#eq_wizard_reset').prop('disabled', false);
+				if (msg.state == 'applied') {
+					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
+					prog.text('');
+					$('#eq_wizard_back').prop('disabled', true);
+				} else if (msg.state == 'ready') {
+					btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
+					prog.text("{{ __('all steps captured') }}");
+					$('#eq_wizard_back').prop('disabled', false);
+				} else {
+					var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
+					btn.text("{{ __('Capture') }}: " + label).data('act', 'capture').prop('disabled', false);
+					prog.text(msg.index + ' / ' + msg.total);
+					$('#eq_wizard_back').prop('disabled', msg.index === 0);
+				}
+			}
+
+			if (msg.captured) {
+				for (var i = 0; i < msg.captured.length; i++) {
+					var r = msg.captured[i];
+					var lbl, a, b, d;
+					if (r.mode == 'applied') {
+						lbl = "{{ __('Eq') }}"; a = r.low; b = r.high; d = r.slope_lo;
+					} else {
+						lbl = "{{ __('Cal') }}"; a = r.noise; b = r.low; d = r.high;
+					}
+					$('#eq_lbl_' + i).text(lbl);
+					$.each({'a': a, 'b': b, 'c': d}, function (k, v) {
+						var el = $('#eq_' + k + '_' + i);
+						el.text(v === null || v === undefined ? '\u2013' : v);
+						el.toggleClass('eq-set', v !== null && v !== undefined);
+					});
+				}
+			}
+		});
+
+		$('#eq_wizard_action').click(function (event) {
+			socket.emit($(this).data('act') == 'apply' ? 'eq_wizard_apply' : 'eq_wizard_capture');
+		});
+
+		$('#eq_wizard_back').click(function (event) {
+			socket.emit('eq_wizard_back');
+		});
+
+		$('#eq_wizard_reset').click(function (event) {
+			if (confirm("{{ __('Clear the calibration on every node and start again?') }}")) {
+				socket.emit('eq_wizard_reset');
+			}
+		});
+
+		socket.emit('eq_wizard_query');
+
 		socket.on('node_tuning', function (msg) {
 			$('#set_profile').empty();
 			for (var i = 0; i < msg.profile_ids.length; i++) {
@@ -2602,6 +2672,22 @@
 	});
 
 </script>
+<style>
+/* match the flex sizing ol.form gives its inputs, so the wizard row lines up
+   with the controls below it */
+.eq-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
+             flex: 1 1 0; margin-left: 0.5em; }
+.eq-wizard button { margin: 0; }
+.eq-wizard #eq_wizard_action { flex: 1 1 auto; }
+.eq-wizard .eq-progress { opacity: 0.7; white-space: nowrap; font-style: italic;
+                          font-size: 0.9em; flex: 0 0 auto; }
+.eq-readout { display: flex; align-items: center; gap: 0.35em; font-size: 0.85em;
+              margin-top: 0.3em; }
+.eq-readout .eq-lbl { opacity: 0.6; }
+.eq-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
+          font-variant-numeric: tabular-nums; }
+.eq-cap.eq-set { opacity: 1; }
+</style>
 {% endblock %} {% block content %}
 <main class="page-settings">
 
@@ -2707,6 +2793,13 @@
 						<input type="number" id="set_exit_at_level_{{ node }}" class="set_exit_at_level" data-node="{{ node }}" min="0" max="9999">
 						<button class="cap_exit_at_btn" data-node_index="{{ node }}" title="{{ __('Capture current RSSI') }}"><svg height="1em" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M0 14h16v2H0zM10 6V0H6v6H3l5 7 5-7z"/></svg></button>
 					</div>
+
+					<div class="eq-readout" data-node="{{ node }}">
+						<span class="eq-lbl" id="eq_lbl_{{ node }}">{{ __('Cal') }}</span>
+						<span class="eq-cap" id="eq_a_{{ node }}">&ndash;</span>
+						<span class="eq-cap" id="eq_b_{{ node }}">&ndash;</span>
+						<span class="eq-cap" id="eq_c_{{ node }}">&ndash;</span>
+					</div>
 				</div>
 				<table>
 					<tr class="datarow">
@@ -2753,6 +2846,17 @@
 
 		<!--Edit system tuning values-->
 		<ol class="form">
+			<li>
+				<div class="label-block">
+					<label>{{ __('Equalise Nodes') }}</label>
+				</div>
+				<div class="eq-wizard">
+					<button id="eq_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
+					<button id="eq_wizard_back" class="alt-button">{{ __('Back') }}</button>
+					<button id="eq_wizard_action"></button>
+					<span class="eq-progress" id="eq_wizard_progress"></span>
+				</div>
+			</li>
 			<li>
 				<div class="label-block">
 					<label for="set_calibrationMode">{{ __('Calibration Mode') }}</label>

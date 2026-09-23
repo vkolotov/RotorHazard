@@ -21,6 +21,11 @@ READ_NODE_RSSI_PEAK = 0x23   # read 'nodeRssiPeak' value
 READ_NODE_RSSI_NADIR = 0x24  # read 'nodeRssiNadir' value
 READ_ENTER_AT_LEVEL = 0x31
 READ_EXIT_AT_LEVEL = 0x32
+READ_EQ_PIVOT = 0x34
+READ_EQ_OFFSET_UP = 0x35
+READ_EQ_SLOPE_UP = 0x36
+READ_EQ_OFFSET_LO = 0x37
+READ_EQ_SLOPE_LO = 0x38
 READ_TIME_MILLIS = 0x33      # read current 'millis()' time value
 READ_MULTINODE_COUNT = 0x39  # read # of nodes handled by processor
 READ_CURNODE_INDEX = 0x3A    # read index of current node for processor
@@ -34,6 +39,12 @@ WRITE_FREQUENCY = 0x51       # Sets frequency (2 byte)
 # WRITE_FILTER_RATIO = 0x70   # node API_level>=10 uses 16-bit value
 WRITE_ENTER_AT_LEVEL = 0x71
 WRITE_EXIT_AT_LEVEL = 0x72
+WRITE_EQ_PIVOT = 0x64
+WRITE_EQ_OFFSET_UP = 0x65
+WRITE_EQ_SLOPE_UP = 0x66
+WRITE_EQ_OFFSET_LO = 0x67
+WRITE_EQ_SLOPE_LO = 0x68
+RESET_NODE_EXTREMUMS = 0x69
 WRITE_CURNODE_INDEX = 0x7A  # write index of current node for processor
 SEND_STATUS_MESSAGE = 0x75  # send status message from server to node
 FORCE_END_CROSSING = 0x78   # kill current crossing flag regardless of RSSI value
@@ -584,6 +595,41 @@ class RHInterface(BaseHardwareInterface):
         if node.api_valid_flag and node.is_valid_rssi(level):
             if self.transmit_exit_at_level(node, level):
                 node.exit_at_level = level
+
+    def set_equalisation(self, node_index, pivot, offset_up, slope_up,
+                         offset_lo, slope_lo):
+        """Send one node its calibration.
+
+        pivot is a raw reading; the offsets already carry the server's output
+        scale, so the node needs no target of its own. pivot 0 disables the
+        correction.
+        """
+        node = self.nodes[node_index]
+        if not node.api_valid_flag or node.api_level < 37:
+            return
+        for cmd, read_cmd, value in (
+                (WRITE_EQ_PIVOT, READ_EQ_PIVOT, pivot),
+                (WRITE_EQ_OFFSET_UP, READ_EQ_OFFSET_UP, offset_up & 0xFFFF),
+                (WRITE_EQ_SLOPE_UP, READ_EQ_SLOPE_UP, slope_up),
+                (WRITE_EQ_OFFSET_LO, READ_EQ_OFFSET_LO, offset_lo & 0xFFFF),
+                (WRITE_EQ_SLOPE_LO, READ_EQ_SLOPE_LO, slope_lo)):
+            self.set_and_validate_value_16(node, cmd, read_cmd, value)
+        node.eq_pivot = pivot
+        node.eq_offset_up, node.eq_slope_up = offset_up, slope_up
+        node.eq_offset_lo, node.eq_slope_lo = offset_lo, slope_lo
+
+    def reset_node_extremums(self, node_index):
+        """Restart peak/nadir tracking on the node itself.
+
+        The extremes live on the node and a peak only ever rises, so clearing
+        the server's copy alone achieves nothing - the next update overwrites
+        it with whatever the node still holds.
+        """
+        node = self.nodes[node_index]
+        if node.api_valid_flag and node.api_level >= 37:
+            self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
+            node.node_peak_rssi = 0
+            node.node_nadir_rssi = node.max_rssi_value
 
     def force_end_crossing(self, node_index):
         node = self.nodes[node_index]

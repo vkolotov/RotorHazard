@@ -959,6 +959,7 @@ def on_load_data(data):
             RaceContext.rhui.emit_node_tuning(nobroadcast=True)
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
+            RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -1202,6 +1203,41 @@ def on_set_start_thresh_lower_duration(data):
 def on_set_language(data):
     '''Set interface language.'''
     RaceContext.serverconfig.set_item('UI', 'currentLanguage', data['language'])
+
+@SOCKET_IO.on('eq_wizard_capture')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_capture(_data=None):
+    '''Capture the wizard's next step.'''
+    RaceContext.calibration.eq_wizard_capture()
+
+@SOCKET_IO.on('eq_wizard_back')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_back(_data=None):
+    '''Discard the last captured step.'''
+    RaceContext.calibration.eq_wizard_back()
+
+@SOCKET_IO.on('eq_wizard_reset')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_reset(_data=None):
+    '''Clear the calibration and start again.'''
+    RaceContext.calibration.eq_wizard_reset()
+
+@SOCKET_IO.on('eq_wizard_apply')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_apply(_data=None):
+    '''Fit and apply the captured calibration.'''
+    RaceContext.calibration.eq_wizard_apply()
+
+@SOCKET_IO.on('eq_wizard_query')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_query(_data=None):
+    '''Report the wizard position to the asking client.'''
+    RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
 
 @SOCKET_IO.on('cap_enter_at_btn')
 @requires_socketio_auth
@@ -1571,6 +1607,7 @@ def on_set_profile(data, emit_vals=True):
         RaceContext.interface.set_all_frequencies(freqs)
         RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
         RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
+        RaceContext.calibration.hardware_set_all_equalisation()
 
     else:
         logger.warning('Invalid set_profile value: ' + str(profile_val))
