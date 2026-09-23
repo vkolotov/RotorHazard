@@ -35,6 +35,7 @@ public:
 #define READ_ENTER_AT_LEVEL 0x31
 #define READ_EXIT_AT_LEVEL 0x32
 #define READ_TIME_MILLIS 0x33      // read current 'millis()' value
+#define READ_ADC_RESOLUTION 0x34   // read ADC resolution in bits (10 = legacy, 12 = full)
 #define READ_MULTINODE_COUNT 0x39  // read # of nodes handled by this processor
 #define READ_CURNODE_INDEX 0x3A    // read index of current node for this processor
 #define READ_NODE_SLOTIDX 0x3C     // read node slot index (for multi-node setup)
@@ -46,6 +47,7 @@ public:
 #define WRITE_FREQUENCY 0x51
 #define WRITE_ENTER_AT_LEVEL 0x71
 #define WRITE_EXIT_AT_LEVEL 0x72
+#define WRITE_ADC_RESOLUTION 0x64  // write ADC resolution in bits (10 = legacy, 12 = full)
 #define WRITE_CURNODE_INDEX 0x7A   // write index of current node for this processor
 
 #define SEND_STATUS_MESSAGE 0x75   // send status message from server to node

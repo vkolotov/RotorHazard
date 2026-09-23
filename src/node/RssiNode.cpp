@@ -180,9 +180,16 @@ rssi_t RssiNode::rssiRead()
     }
 
 #ifdef STM32_CORE_VERSION
-    // the ADC is configured for 12 bits and rssi_t is 16-bit, so the reading is
-    //  returned at full resolution - no clamp and no down-shift
-    return (rssi_t) analogRead(rssiInputPin);
+    // At full resolution the 12-bit reading is returned as-is. In legacy mode
+    //  the ADC is read at 10 bits and shifted, reproducing exactly what the
+    //  8-bit pipeline always produced, so an existing timer's numbers - and
+    //  the saved race traces and thresholds that go with them - are unchanged.
+    int raw = analogRead(rssiInputPin);
+    if (settings.adcResolution == FULL_ADC_BITS)
+        return (rssi_t) raw;
+    if (raw > 0x01FF)
+        raw = 0x01FF;
+    return (rssi_t) (raw >> 1);
 #else
     // reads 5V value as 0-1023, RX5808 is 3.3V powered so RSSI pin will never output the full range
     int raw = analogRead(rssiInputPin);
@@ -300,6 +307,16 @@ uint16_t RssiNode::freqMhzToRegVal(uint16_t freqInMhz)
     return (N << (uint16_t)7) + A;
 }
 
+
+#ifdef STM32_CORE_VERSION
+// Apply an ADC width to the hardware. Anything other than the full width falls
+//  back to legacy, so a bad value cannot silently change the scale.
+void RssiNode::setAdcResolution(uint8_t bits)
+{
+    settings.adcResolution = (bits == FULL_ADC_BITS) ? FULL_ADC_BITS : LEGACY_ADC_BITS;
+    analogReadResolution(settings.adcResolution);
+}
+#endif
 
 void RssiNode::rssiSetFilter(Filter<rssi_t> *f)
 {

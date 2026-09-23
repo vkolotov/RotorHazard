@@ -51,6 +51,10 @@ byte Message::getPayloadSize()
             size = 2;
             break;
 
+        case WRITE_ADC_RESOLUTION:  // ADC width in bits
+            size = 1;
+            break;
+
         case FORCE_END_CROSSING:  // kill current crossing flag regardless of RSSI value
             size = 1;
             break;
@@ -152,6 +156,13 @@ void Message::handleWriteCommand(bool serialFlag)
             handleStatusMessage((byte)(u16val >> 8), (byte)(u16val & 0x00FF));
             break;
 
+        case WRITE_ADC_RESOLUTION:  // ADC width in bits
+            u8val = buffer.read8();
+#ifdef STM32_CORE_VERSION
+            cmdRssiNodePtr->setAdcResolution(u8val);
+#endif
+            break;
+
         case FORCE_END_CROSSING:  // kill current crossing flag regardless of RSSI value
             cmdRssiNodePtr->rssiEndCrossing();
             break;
@@ -238,6 +249,14 @@ void Message::handleReadCommand(bool serialFlag)
 
         case READ_EXIT_AT_LEVEL:  // lap pass ends when RSSI goes below this level
             ioBufferWriteRssi(buffer, cmdRssiNodePtr->getExitAtLevel());
+            break;
+
+        case READ_ADC_RESOLUTION:  // ADC width in bits
+#ifdef STM32_CORE_VERSION
+            buffer.write8(cmdRssiNodePtr->getAdcResolution());
+#else
+            buffer.write8((uint8_t) LEGACY_ADC_BITS);
+#endif
             break;
 
         case READ_REVISION_CODE:  // reply with NODE_API_LEVEL and verification value

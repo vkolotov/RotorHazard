@@ -14,6 +14,11 @@
 
 #define MAX_DURATION 0xFFFF
 
+// ADC widths the node will accept. Legacy matches what the 8-bit pipeline
+//  always produced, so it is the default and nothing changes without opt-in.
+#define LEGACY_ADC_BITS 10
+#define FULL_ADC_BITS 12
+
 #define RX5808_MIN_TUNETIME 35  // after set freq need to wait this long before read RSSI
 #define RX5808_MIN_BUSTIME 30   // after set freq need to wait this long before setting again
 
@@ -39,9 +44,15 @@ struct Settings
 {
     uint16_t volatile vtxFreq = 5800;
 #ifdef STM32_CORE_VERSION
-    // 12-bit scale: the 8-bit defaults below, times eight
-    rssi_t volatile enterAtLevel = 768;
-    rssi_t volatile exitAtLevel = 640;
+    // Reading the ADC at its full 12-bit width changes the meaning of every
+    //  stored RSSI value - saved race traces, thresholds, peak_rssi - so it is
+    //  opt-in. The server sends the resolution at startup and defaults to the
+    //  legacy 10-bit reading, leaving an existing timer's numbers unchanged
+    //  until its operator chooses otherwise.
+    uint8_t volatile adcResolution = LEGACY_ADC_BITS;
+    // defaults match the legacy scale, since that is the startup default
+    rssi_t volatile enterAtLevel = 96;
+    rssi_t volatile exitAtLevel = 80;
 #else
     // lap pass begins when RSSI is at or above this level
     rssi_t volatile enterAtLevel = 96;
@@ -167,6 +178,10 @@ public:
     void setEnterAtLevel(rssi_t val) { settings.enterAtLevel = val; }
     rssi_t getExitAtLevel() { return settings.exitAtLevel; }
     void setExitAtLevel(rssi_t val) { settings.exitAtLevel = val; }
+#ifdef STM32_CORE_VERSION
+    uint8_t getAdcResolution() { return settings.adcResolution; }
+    void setAdcResolution(uint8_t bits);
+#endif
     bool rssiProcess(mtime_t millis) { return rssiProcessValue(millis, rssiRead()); }
 
     struct State & getState() { return state; }
