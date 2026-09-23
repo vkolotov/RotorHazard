@@ -26,6 +26,8 @@ class Node:
         self.eq_slope_up = 256
         self.eq_offset_lo = 0
         self.eq_slope_lo = 256
+
+        self.adc_resolution = 10
         self.max_rssi_value = 999
         self.node_lap_id = -1
         self.current_pilot_id = 0
@@ -78,7 +80,9 @@ class Node:
     def init(self):
         if self.api_level >= 10:
             self.api_valid_flag = True  # set flag for newer API functions supported
-        if self.api_valid_flag and self.api_level >= 18:
+        if self.api_valid_flag and self.has_wide_rssi():
+            self.max_rssi_value = 0xFFFF
+        elif self.api_valid_flag and self.api_level >= 18:
             self.max_rssi_value = 255
         else:
             self.max_rssi_value = 999
@@ -116,6 +120,18 @@ class Node:
             'pass_peak_rssi': self.pass_peak_rssi,
             'pass_nadir_rssi': self.pass_nadir_rssi
         }
+
+    def has_wide_rssi(self):
+        '''True if this node sends RSSI as 16 bits rather than 8.
+
+        The width is compiled into the node firmware - STM32 builds widen
+        rssi_t, AVR builds cannot - so it follows from what the node is, not
+        from any server setting. Both ends have to agree or every reading is
+        parsed wrong.
+        '''
+        return self.api_level >= 37 and \
+               bool(self.firmware_proctype_str) and \
+               self.firmware_proctype_str.upper().startswith('STM32')
 
     def is_valid_rssi(self, value):
         return value > 0 and value < self.max_rssi_value
