@@ -84,7 +84,12 @@ class Buffer {
         }
 };
 
+#ifdef STM32_CORE_VERSION
+#define ioBufferReadRssi(buf) (buf.read16())
+#define ioBufferWriteRssi(buf, rssi) (buf.write16(rssi))
+#else
 #define ioBufferReadRssi(buf) (buf.read8())
 #define ioBufferWriteRssi(buf, rssi) (buf.write8(rssi))
+#endif
 
 #endif
