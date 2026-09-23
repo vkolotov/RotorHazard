@@ -959,6 +959,7 @@ def on_load_data(data):
             RaceContext.rhui.emit_node_tuning(nobroadcast=True)
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
+            RaceContext.rhui.emit_rssi_resolution_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -2698,6 +2699,38 @@ def on_set_option(data):
         'value': data['value'],
         })
 
+def apply_rssi_resolution(full_resolution):
+    """Push the ADC width to every node and say what it means.
+
+    Changing the width multiplies every reading by about eight, so existing
+    EnterAt/ExitAt values and any saved race trace were recorded on the other
+    scale. Nothing is rewritten - the operator re-runs calibration - but they
+    are told plainly rather than left to discover it mid-race.
+    """
+    applied = 0
+    for idx in range(RaceContext.race.num_nodes):
+        node = RaceContext.interface.nodes[idx]
+        if getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
+            RaceContext.interface.set_adc_resolution(idx, full_resolution)
+            applied += 1
+
+    if applied:
+        logger.info("RSSI resolution set to %s on %d node(s)",
+                    "full" if full_resolution else "legacy", applied)
+        RaceContext.rhui.set_ui_message(
+            'rssi-resolution',
+            __("RSSI resolution changed. Existing EnterAt/ExitAt values and saved "
+               "race data were recorded on the previous scale - re-run calibration "
+               "before racing."),
+            header='Warning', subclass='rssi-scale')
+    elif full_resolution:
+        logger.info("Full RSSI resolution requested but no node supports it")
+        RaceContext.rhui.set_ui_message(
+            'rssi-resolution',
+            __("No connected node supports full RSSI resolution; the setting has "
+               "no effect."),
+            header='Notice', subclass='rssi-scale')
+
 @SOCKET_IO.on('set_config')
 @requires_socketio_auth
 @catchLogExceptionsWrapper
@@ -2705,6 +2738,9 @@ def on_set_config(data):
     RaceContext.serverconfig.set_item(data['section'], data['key'], data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'ADMIN_SOCKET_AUTH':
         AdminAuth.set_admin_socket_auth_enabled(data['value'])
+    if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
+        apply_rssi_resolution(data['value'])
+        RaceContext.rhui.emit_rssi_resolution_state()
     if data['section'] == 'GENERAL' and data['key'] == 'DEBUG' and data['value'] is False:
         apply_default_admin_creds_if_blank()
     elif data['section'] == 'SECRETS' and not RaceContext.serverconfig.get_item('GENERAL', 'DEBUG'):
