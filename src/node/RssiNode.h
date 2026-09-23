@@ -38,10 +38,16 @@
 struct Settings
 {
     uint16_t volatile vtxFreq = 5800;
+#ifdef STM32_CORE_VERSION
+    // 12-bit scale: the 8-bit defaults below, times eight
+    rssi_t volatile enterAtLevel = 768;
+    rssi_t volatile exitAtLevel = 640;
+#else
     // lap pass begins when RSSI is at or above this level
     rssi_t volatile enterAtLevel = 96;
     // lap pass ends when RSSI goes below this level
     rssi_t volatile exitAtLevel = 80;
+#endif
 };
 
 struct State

@@ -179,6 +179,11 @@ rssi_t RssiNode::rssiRead()
         recentSetFreqFlag = false;  // don't need to check again until next freq change
     }
 
+#ifdef STM32_CORE_VERSION
+    // the ADC is configured for 12 bits and rssi_t is 16-bit, so the reading is
+    //  returned at full resolution - no clamp and no down-shift
+    return (rssi_t) analogRead(rssiInputPin);
+#else
     // reads 5V value as 0-1023, RX5808 is 3.3V powered so RSSI pin will never output the full range
     int raw = analogRead(rssiInputPin);
     // clamp upper range to fit scaling
@@ -186,6 +191,7 @@ rssi_t RssiNode::rssiRead()
         raw = 0x01FF;
     // rescale to fit into a byte and remove some jitter
     return raw >> 1;
+#endif
 }
 
 void RssiNode::rx5808SerialSendBit1()
