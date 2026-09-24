@@ -52,7 +52,7 @@ class RssiIntegrationTest(unittest.TestCase):
                 cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'), ([v] for v in values)))
                 self.assertTrue(cal.eq_wizard_apply())
                 _, pivot, ou, su, ol, sl = ctx.interface.set_equalisation.call_args.args
-                targets = cal._eq_targets(0)
+                targets = cal._eq_destination([(values[1]-values[0], values[2]-values[1])])
                 def corrected(raw):
                     return ((raw-ou)*su if raw >= pivot else (raw-ol)*sl) >> 8
                 for raw, target in zip(values, targets):
@@ -63,31 +63,44 @@ class RssiIntegrationTest(unittest.TestCase):
                 cal.hardware_set_all_equalisation()
                 self.assertEqual(ctx.interface.set_equalisation.call_args.args[1], 0)
 
-    def test_decision_band_is_not_compressed_in_either_mode(self):
-        """The pass/miss band must not shrink through the correction.
+    def test_no_node_is_compressed_in_either_mode(self):
+        """The correction must never shrink a node's captured spans.
 
-        The upper segment spans the levels lap detection decides between, so a
-        slope below 1.0 there throws away resolution the ADC did supply. Equal
-        fractions of a 255-count and a 4095-count range look alike but are not:
-        the input span shrinks by eight as well, so the narrow pipeline needs
-        proportionally wider fractions to hold the same slope.
+        The destination comes from the widest span in the fleet, so the best
+        node maps onto itself (slope 1.0) and every other node is stretched up
+        to meet it. This holds at either ADC width without a per-width
+        constant, because a narrower pipeline reports proportionally narrower
+        spans and the destination shrinks with them.
         """
-        # Measured on an eight-node fleet, 12-bit counts: floor -> low -> high.
-        floor_span, band_span = 427.0, 350.0
+        # Measured on an eight-node fleet, 12-bit counts: (low_span, band_span).
+        wide = [(566, 464), (396, 299), (260, 428), (374, 412),
+                (294, 464), (442, 332), (431, 365), (452, 364)]
         for full in (True, False):
             with self.subTest(full=full):
                 _, _, cal = self.context(full)
-                t_floor, t_low, t_high = cal._eq_targets(0)
-                div = 1.0 if full else 8.0
-                upper = (t_high - t_low) / (band_span / div)
-                lower = (t_low - t_floor) / (floor_span / div)
-                self.assertGreater(
-                    upper, 1.0,
-                    'decision band compressed at {} bits'.format(12 if full else 8))
-                self.assertGreater(lower, 0.0)
-                # a quad closer than the calibration spot must still fit
-                scale = 4095 if full else 255
-                self.assertLess(t_high * 2, scale)
+                div = 1 if full else 8
+                spans = [(lo / div, band / div) for lo, band in wide]
+                t_floor, t_low, t_high = cal._eq_destination(spans)
+                # Nothing is compressed except by the headroom cap, and the
+                #  cap applies equally to every node, so the worst slope in
+                #  the fleet is exactly how much the cap had to shrink things.
+                scale = cal._eq_scale(0)
+                widest = max(l for l, _ in spans) + max(b for _, b in spans)
+                shrink = min(1.0, (scale * 0.5) / (widest * 1.01))
+                # Targets are whole counts, so allow the half-count the
+                #  rounding can take off the widest span.
+                for lo_span, band_span in spans:
+                    self.assertGreaterEqual(
+                        (t_high - t_low) / band_span,
+                        shrink - 0.5 / band_span,
+                        'band compressed at {} bits'.format(12 if full else 8))
+                    self.assertGreaterEqual(
+                        (t_low - t_floor) / lo_span, shrink - 0.5 / lo_span)
+                # a typical node still gains real range
+                bands = sorted(b for _, b in spans)
+                self.assertGreater((t_high - t_low) / bands[len(bands) // 2], 1.0)
+                # a quad closer than the calibration spot must stay on scale
+                self.assertLessEqual(t_high, cal._eq_scale(0) * 0.5)
 
     def test_capture_rejects_noise_only_signal(self):
         ctx, _, cal = self.context()

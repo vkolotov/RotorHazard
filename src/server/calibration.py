@@ -10,27 +10,19 @@ from filtermanager import Flt
 
 logger = logging.getLogger(__name__)
 
-# Where the calibrated levels land on the corrected scale, as a fraction of the
-#  node's full range. Fractions rather than fixed numbers because the range
-#  depends on how wide the node's pipeline is - an 8-bit node tops out at 255
-#  and would clamp against absolute targets meant for a 12-bit one.
-#  These live here, not in the node: the offsets sent to a node already carry
-#  them, so no constant is duplicated across the protocol boundary and changing
-#  the scale never needs a firmware rebuild.
-#  The 8-bit set is not the 12-bit set: the fractions are of a 255-count
-#  range rather than a 4095-count one, but the *input* span the node sees
-#  shrinks by the same factor of eight, so equal fractions give the narrow
-#  pipeline a proportionally narrower output and compress the very band lap
-#  detection depends on. Measured on an eight-node fleet, 0.07/0.20 stretched
-#  the pass/miss band 1.52x at 12 bits but squeezed it to 0.75x at 8 bits.
-#  The 8-bit numbers below reproduce the 12-bit slopes instead, and still
-#  leave ~150% headroom above the calibrated pass level for a close quad.
-EQ_FRACTION_FLOOR = 0.007   # just clear of zero, so an idle node still moves
-EQ_FRACTION_LOW = 0.07
-EQ_FRACTION_HIGH = 0.20
-EQ_FRACTION_FLOOR_BYTE = 0.007
-EQ_FRACTION_LOW_BYTE = 0.133
-EQ_FRACTION_HIGH_BYTE = 0.394
+# Where the calibrated levels land on the corrected scale is derived from the
+#  captures themselves, not from fixed fractions: every fleet has different
+#  receivers, so any constant chosen here would be right for one timer and
+#  wrong for the next. The destination is the widest span any node showed, so
+#  the node that already resolves best is left alone and every other node is
+#  stretched up to match it. No node is ever compressed, and the result scales
+#  automatically with the ADC width, since a narrower pipeline reports
+#  proportionally narrower spans.
+#
+# The one thing that cannot come from the captures is headroom: "high" is the
+#  quad at the gate, not saturation, and a closer pass has to stay on scale.
+#  Cap the top of the mapped range at this fraction of full scale.
+EQ_HEADROOM_FRACTION = 0.5
 
 # What a node's reading can reach: a byte for the classic pipeline, the 12-bit
 #  ADC range where the node reads at full width.
@@ -183,23 +175,37 @@ class Calibration:
                 steps.append(('high', label))
         return steps
 
-    def _eq_targets(self, node_index):
-        """Output levels for one node, scaled to the width of its pipeline.
-
-        Based on what the ADC can actually produce, not on max_rssi_value -
-        that is the "no nadir recorded" sentinel and sits above the real range.
-        """
+    def _eq_scale(self, node_index):
+        """What a node's corrected reading can reach."""
         node = self._racecontext.interface.nodes[node_index]
-        if node_full_resolution(node):
-            full = EQ_FULL_SCALE_WIDE
-            fl, lo, hi = EQ_FRACTION_FLOOR, EQ_FRACTION_LOW, EQ_FRACTION_HIGH
-        else:
-            full = EQ_FULL_SCALE_BYTE
-            fl, lo, hi = (EQ_FRACTION_FLOOR_BYTE, EQ_FRACTION_LOW_BYTE,
-                          EQ_FRACTION_HIGH_BYTE)
-        return (int(round(full * fl)),
-                int(round(full * lo)),
-                int(round(full * hi)))
+        return EQ_FULL_SCALE_WIDE if node_full_resolution(node) else EQ_FULL_SCALE_BYTE
+
+    def _eq_destination(self, spans):
+        """Where every node's levels should land, from the captured spans.
+
+        `spans` is (low_span, band_span) per node - noise-to-low and
+        low-to-high as that node actually reported them. The widest of each
+        becomes the common destination, so the best node keeps its own scale
+        and the rest are stretched onto it. Scaled down only if the result
+        would not leave room above the calibrated high for a closer quad:
+        headroom wins over stretch, because a reading that clips is lost
+        outright while a slightly compressed one is merely coarser.
+        """
+        low_span = max(s[0] for s in spans)
+        band_span = max(s[1] for s in spans)
+        # The floor sits just clear of zero so an idle node still reads alive,
+        #  and it counts against the headroom like everything else.
+        floor_frac = 0.01
+        top = (low_span + band_span) * (1.0 + floor_frac)
+        limit = self._eq_scale(0) * EQ_HEADROOM_FRACTION
+        if top > limit and top > 0:
+            shrink = limit / top
+            low_span *= shrink
+            band_span *= shrink
+        t_floor = max(1, int(round((low_span + band_span) * floor_frac)))
+        return (t_floor,
+                t_floor + int(round(low_span)),
+                t_floor + int(round(low_span + band_span)))
 
     def eq_wizard_state(self):
         """Where the wizard is: the next step, or done."""
@@ -349,7 +355,9 @@ class Calibration:
         labels = self._eq_node_channels()
         noise = captured['noise']
 
-        pivots, offset_ups, slope_ups, offset_los, slope_los = [], [], [], [], []
+        # Read every node's captures first: the destination is the widest span
+        #  in the fleet, so no node can be fitted until all of them are known.
+        levels = []
         for idx in range(num):
             label = labels[idx]
             lo = captured.get('low:{0}'.format(label), [None] * num)[idx]
@@ -369,8 +377,16 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
+            levels.append((fl, lo, hi))
 
-            t_floor, t_low, t_high = self._eq_targets(idx)
+        destination = self._eq_destination([(lo - fl, hi - lo) for fl, lo, hi in levels])
+        logger.info('Equalisation destination from captured spans: %s', destination)
+
+        pivots, offset_ups, slope_ups, offset_los, slope_los = [], [], [], [], []
+        for idx in range(num):
+            fl, lo, hi = levels[idx]
+
+            t_floor, t_low, t_high = destination
             s_up = max(1, min(65535, int(round(
                 (t_high - t_low) * 256.0 / (hi - lo)))))
             s_lo = max(1, min(65535, int(round(
