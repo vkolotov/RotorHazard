@@ -660,8 +660,13 @@ class RHInterface(BaseHardwareInterface):
         node = self.nodes[node_index]
         if node.api_valid_flag and node.api_level >= 37:
             self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
+            # Mirror what the node clears, or the stale server-side copies keep
+            #  being drawn until the next pass replaces them.
             node.node_peak_rssi = 0
             node.node_nadir_rssi = node.max_rssi_value
+            node.pass_peak_rssi = 0
+            node.pass_nadir_rssi = node.max_rssi_value
+            node.debug_pass_count = 0
 
     def set_adc_resolution(self, node_index, full_resolution):
         """Choose the ADC width the node reads at.
