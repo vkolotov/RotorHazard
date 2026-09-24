@@ -408,6 +408,13 @@ class Calibration:
         gevent.sleep(0.5)
         self.eq_reset_extremums()
 
+    def current_adc_bits(self):
+        """The width the nodes are sampling at right now."""
+        nodes = self._racecontext.interface.nodes
+        if not nodes:
+            return None
+        return 12 if any(node_full_resolution(node) for node in nodes) else 10
+
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
         logger.debug("Sending enter-at values to nodes: " + str(enter_at_levels))
@@ -444,6 +451,20 @@ class Calibration:
         logger.info('Updated calibration with best discovered values')
         self._racecontext.rhui.emit_enter_and_exit_at_levels()  # one broadcast for all nodes
 
+    def _race_matches_resolution(self, race):
+        """True if this saved race was timed at the width now in use.
+
+        Races saved before the width became switchable carry no tag; they are
+        8-bit, because that is all the firmware of the time could produce.
+        """
+        current = self.current_adc_bits()
+        if current is None:
+            return True
+        tagged = self._racecontext.rhdata.get_savedrace_attribute_value(
+            race, 'adc_bits', None)
+        stored = int(tagged) if tagged else 10
+        return stored == current
+
     def find_best_calibration_values(self, node, seat_index):
         ''' Search race history for best tuning values '''
 
@@ -453,7 +474,20 @@ class Calibration:
         current_class = heat.class_id
         races = self._racecontext.rhdata.get_savedRaceMetas()
         races.sort(key=lambda x: x.id, reverse=True)
-        pilotRaces = self._racecontext.rhdata.get_savedPilotRaces()
+        # Drop races timed at the other ADC width; their thresholds are eight
+        #  times off and would put every node permanently in or out of crossing.
+        usable_race_ids = set()
+        skipped = 0
+        for race in list(races):
+            if self._race_matches_resolution(race):
+                usable_race_ids.add(race.id)
+            else:
+                races.remove(race)
+                skipped += 1
+        if skipped:
+            logger.debug('Ignoring %d saved race(s) recorded at a different ADC width', skipped)
+        pilotRaces = [p for p in self._racecontext.rhdata.get_savedPilotRaces()
+                      if p.race_id in usable_race_ids]
         pilotRaces.sort(key=lambda x: x.id, reverse=True)
 
         # test for disabled node

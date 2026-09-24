@@ -516,7 +516,30 @@
 		socket.on('rssi_resolution_state', function (msg) {
 			var sel = $('#set_full_rssi_resolution');
 			sel.val(msg.full ? 'true' : 'false');
+			sel.data('applied', msg.full ? 'true' : 'false');
 			sel.prop('disabled', !msg.supported);
+		});
+
+		$('#set_full_rssi_resolution').change(function (event) {
+			var sel = $(this);
+			var wanted = sel.val();
+			var going_high = (wanted == 'true');
+			var warning = going_high
+				? "{{ __('Switch to High (12 bit)?') }}"
+				: "{{ __('Switch to Low (8 bit)?') }}";
+			warning += "\n\n";
+			warning += "{{ __('Every RSSI reading changes by a factor of eight. Your EnterAt/ExitAt values are kept as they are, but they were set on the other scale - check them before racing.') }}";
+			warning += "\n\n";
+			warning += "{{ __('Saved races and their RSSI traces are left untouched. Adaptive calibration will ignore races recorded on the other scale until new races are run.') }}";
+			if (confirm(warning)) {
+				socket.emit('set_config', {
+					section: 'GENERAL',
+					key: 'FULL_RSSI_RESOLUTION',
+					value: going_high
+				});
+			} else {
+				sel.val(sel.data('applied'));
+			}
 		});
 
 		socket.on('node_tuning', function (msg) {
@@ -2871,7 +2894,7 @@
 				<div class="label-block">
 					<label for="set_full_rssi_resolution">{{ __('RSSI Resolution') }}</label>
 				</div>
-				<select id="set_full_rssi_resolution" class="set-config" data-type="boolean" data-section="GENERAL" data-key="FULL_RSSI_RESOLUTION">
+				<select id="set_full_rssi_resolution">
 					<option value="false">{{ __('Low (8 bit)') }}</option>
 					<option value="true">{{ __('High (12 bit)') }}</option>
 				</select>

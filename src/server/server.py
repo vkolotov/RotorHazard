@@ -2757,9 +2757,9 @@ def apply_rssi_resolution(full_resolution):
                     "high (12 bit)" if full_resolution else "low (8 bit)", applied)
         RaceContext.rhui.set_ui_message(
             'rssi-resolution',
-            __("RSSI resolution changed. Existing EnterAt/ExitAt values and saved "
-               "race data were recorded on the previous scale - re-run calibration "
-               "before racing."),
+            __("RSSI resolution changed. EnterAt/ExitAt values were kept but "
+               "belong to the previous scale - check them before racing. "
+               "Adaptive calibration will ignore races recorded on that scale."),
             header='Warning', subclass='rssi-scale')
     elif full_resolution:
         logger.info("Full RSSI resolution requested but no node supports it")
@@ -2774,8 +2774,11 @@ def apply_rssi_resolution(full_resolution):
 @catchLogExceptionsWrapper
 def on_set_config(data):
     if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
-        if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING) or getattr(RaceContext.calibration, '_eq_busy', False):
-            RaceContext.rhui.emit_priority_message(__('Stop the race or wait for calibration before changing RSSI resolution.'))
+        # DONE means a finished race is still unsaved. Switching now would
+        #  staple new-scale thresholds onto history recorded on the old one.
+        if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE) \
+                or getattr(RaceContext.calibration, '_eq_busy', False):
+            RaceContext.rhui.emit_priority_message(__('Save or discard the current race, and wait for calibration to finish, before changing RSSI resolution.'))
             RaceContext.rhui.emit_rssi_resolution_state()
             return
     RaceContext.serverconfig.set_item(data['section'], data['key'], data['value'])
@@ -2788,6 +2791,7 @@ def on_set_config(data):
         RaceContext.calibration.eq_reset_extremums()
         RaceContext.rhui.emit_eq_wizard_state()
         RaceContext.rhui.emit_rssi_resolution_state()
+        RaceContext.rhui.emit_enter_and_exit_at_levels()
     if data['section'] == 'GENERAL' and data['key'] == 'DEBUG' and data['value'] is False:
         apply_default_admin_creds_if_blank()
     elif data['section'] == 'SECRETS' and not RaceContext.serverconfig.get_item('GENERAL', 'DEBUG'):
