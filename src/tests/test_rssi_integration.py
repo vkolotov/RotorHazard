@@ -5,6 +5,8 @@ import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -109,6 +111,50 @@ class RssiIntegrationTest(unittest.TestCase):
         for name, value in names:
             if hasattr(RHInterface, name):
                 self.assertEqual(getattr(RHInterface, name), int(value, 16), name)
+
+    @unittest.skipUnless(shutil.which('g++'), 'host C++ compiler required')
+    def test_firmware_threshold_frames_match_rssi_width(self):
+        # Compile the actual framing function, buffer and RSSI types for both
+        # targets. Arduino pin definitions are irrelevant to this wire test.
+        code = (SRC / 'node/commands.cpp').read_text()
+        function = 'byte Message::getPayloadSize()' + code.split(
+            'byte Message::getPayloadSize()', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        harness = r'''#include <cassert>
+#include <cstdint>
+using byte = uint8_t;
+#include "util/rhtypes.h"
+#define config_h
+class RssiNode;
+#include "commands.h"
+''' + function + r'''
+int main() {
+    Message message;
+    for (int index = 0; index < 2; ++index) {
+        message.command = index == 0 ? WRITE_ENTER_AT_LEVEL : WRITE_EXIT_AT_LEVEL;
+        const rssi_t threshold = sizeof(rssi_t) == 2 ? (index == 0 ? 540 : 490)
+                                                   : (index == 0 ? 96 : 80);
+        Buffer frame;
+        ioBufferWriteRssi(frame, threshold);
+        assert(message.getPayloadSize() == frame.size);
+        frame.writeChecksum();
+        assert(frame.size == message.getPayloadSize() + 1);
+        assert(frame.data[frame.size - 1] == frame.calculateChecksum(frame.size - 1));
+        frame.flipForRead();
+        assert(ioBufferReadRssi(frame) == threshold);
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'threshold.cpp'
+            source.write_text(harness)
+            for mode in ('avr', 'stm32'):
+                with self.subTest(mode=mode):
+                    binary = str(Path(temp) / mode)
+                    flags = ['-DSTM32_CORE_VERSION=1'] if mode == 'stm32' else []
+                    subprocess.run(['g++', '-std=c++11', '-I', str(SRC / 'node'),
+                                    *flags, str(source), '-o', binary], check=True,
+                                   capture_output=True)
+                    subprocess.run([binary], check=True, capture_output=True)
 
     def test_existing_api37_calibration_migrates_once(self):
         with tempfile.TemporaryDirectory() as temp:

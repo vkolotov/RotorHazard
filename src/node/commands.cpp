@@ -40,11 +40,11 @@ byte Message::getPayloadSize()
             break;
 
         case WRITE_ENTER_AT_LEVEL:  // lap pass begins when RSSI is at or above this level
-            size = 1;
+            size = sizeof(rssi_t);
             break;
 
         case WRITE_EXIT_AT_LEVEL:  // lap pass ends when RSSI goes below this level
-            size = 1;
+            size = sizeof(rssi_t);
             break;
 
         case SEND_STATUS_MESSAGE:  // status message sent from server to node
