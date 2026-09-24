@@ -387,7 +387,15 @@ class Calibration:
         return True
 
     def eq_reset_extremums(self):
-        """Restart peak/nadir tracking on every node."""
+        """Restart peak/nadir tracking on every node.
+
+        The crossing is ended first: a pass peak only updates while a node is
+        crossing, so a node still in a crossing re-fills it from the live
+        signal the moment after the reset, and then freezes there once the
+        crossing ends.
+        """
+        for idx in range(self._racecontext.race.num_nodes):
+            self._racecontext.interface.force_end_crossing(idx)
         for idx in range(self._racecontext.race.num_nodes):
             self._racecontext.interface.reset_node_extremums(idx)
 

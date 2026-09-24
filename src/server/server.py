@@ -2791,6 +2791,11 @@ def on_set_config(data):
         RaceContext.calibration.rescale_thresholds_for_resolution(bool(data['value']))
         RaceContext.calibration._eq_captured = {}
         RaceContext.calibration.hardware_set_all_equalisation()
+        # Reset last, and only once the new width and thresholds have settled.
+        #  A node crossing during the change re-fills its pass peak from the
+        #  old scale, and a pass peak only updates while crossing, so an early
+        #  reset leaves that value frozen on screen.
+        gevent.sleep(0.5)
         RaceContext.calibration.eq_reset_extremums()
         RaceContext.rhui.emit_eq_wizard_state()
         RaceContext.rhui.emit_rssi_resolution_state()
