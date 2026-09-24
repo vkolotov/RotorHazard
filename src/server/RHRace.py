@@ -129,25 +129,13 @@ class RHRace():
 
         data = self._filters.run_filters(Flt.RACE_STAGE, data)
 
-        # Calibration rewrites coefficients on the nodes and clears their peak
-        #  tracking. Guard here rather than at the socket handler, so
-        #  scheduled and API starts are covered too.
+        # Calibration rewrites coefficients and thresholds on the nodes and
+        #  clears their peak tracking. Guard here rather than at the socket
+        #  handler, so scheduled and API starts are covered too.
         if getattr(self._racecontext.calibration, '_eq_busy', False):
             logger.info("Canceling staging, calibration is updating the nodes")
             self._racecontext.rhui.emit_priority_message(
                 self.__('Wait for calibration to finish before starting a race.'), True)
-            return False
-
-        # A coefficient write that was never confirmed leaves some nodes on a
-        #  correction the server cannot describe, so nothing timed against
-        #  them would mean anything.
-        if getattr(self._racecontext.calibration, 'eq_state_is_unresolved', lambda: False)():
-            nodes = self._racecontext.calibration.eq_unresolved_nodes()
-            logger.info("Canceling staging, equalisation unresolved on node(s) %s", nodes)
-            self._racecontext.rhui.emit_priority_message(
-                self.__('Equalisation is unresolved on node(s) {0}; re-run or reset '
-                        'calibration before racing.').format(
-                            ', '.join(str(n) for n in nodes)), True)
             return False
 
         for ifmeta in self._racecontext.interface.mapped_interfaces:
@@ -736,15 +724,25 @@ class RHRace():
                 new_race = self._racecontext.rhdata.add_savedRaceMeta(new_race_data)
                 self.db_id = new_race.id
 
-                # Record the correction this race was timed under. Adaptive
-                #  calibration restores thresholds out of race history, and a
-                #  threshold only means the same signal while the correction
-                #  that produced it still holds.
-                self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
-                    'race_attr': 'eq_signature',
-                    'value': json.dumps(
-                        self._racecontext.calibration._eq_signature()),
-                    })
+                # Record the ADC width this race was timed at. Adaptive
+                #  calibration reads thresholds back out of race history, and
+                #  the two widths differ by a factor of eight, so a row is only
+                #  reusable on the scale that produced it. Races saved before
+                #  this tag existed have no attribute and are treated as 8-bit,
+                #  which is all the older firmware could produce.
+                adc_bits = self._racecontext.calibration.current_adc_bits()
+                if adc_bits:
+                    self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
+                        'race_attr': 'adc_bits',
+                        'value': str(adc_bits),
+                        })
+                    # The correction too: the width alone does not identify the
+                    #  axis a threshold was measured on.
+                    self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
+                        'race_attr': 'eq_signature',
+                        'value': json.dumps(
+                            self._racecontext.calibration._eq_signature(adc_bits)),
+                        })
 
                 race_data = {}
 
