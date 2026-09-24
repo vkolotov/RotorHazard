@@ -384,7 +384,11 @@ class RHInterface(BaseHardwareInterface):
                             if node.is_valid_rssi(rssi_val):
                                 node.node_peak_rssi = rssi_val
                             rssi_val = unpack_rssi(node, data[offset_passPeakRssi:])
-                            if node.is_valid_rssi(rssi_val):
+                            # Zero is the node's "no pass peak" marker, not a
+                            #  bad read: it is what rssiStateReset() leaves
+                            #  behind. Accepting it lets a reset actually show
+                            #  up instead of leaving the previous pass on screen.
+                            if rssi_val == 0 or node.is_valid_rssi(rssi_val):
                                 node.pass_peak_rssi = rssi_val
                             node.loop_time = unpack_16(data[offset_loopTime:])
                             if data[offset_lapStatsFlags] & LAPSTATS_FLAG_CROSSING:
@@ -392,7 +396,12 @@ class RHInterface(BaseHardwareInterface):
                             else:
                                 cross_flag = False
                             rssi_val = unpack_rssi(node, data[offset_passNadirRssi:])
-                            if node.is_valid_rssi(rssi_val):
+                            # Likewise the nadir sentinel means "none recorded";
+                            #  surface it as zero rather than keeping the last
+                            #  pass, but never show the raw 0xFFFF.
+                            if rssi_val >= node.max_rssi_value:
+                                node.pass_nadir_rssi = 0
+                            elif node.is_valid_rssi(rssi_val):
                                 node.pass_nadir_rssi = rssi_val
 
                             if node.api_level >= 13:
