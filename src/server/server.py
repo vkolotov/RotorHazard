@@ -2,7 +2,7 @@
 RELEASE_VERSION = "4.5.1-dev.3" # Public release version code
 SERVER_API = 49 # Server API version
 NODE_API_SUPPORTED = 18 # Minimum supported node version
-NODE_API_BEST = 37 # Most recent node API
+NODE_API_BEST = 38 # Most recent node API
 JSON_API = 3 # JSON API version
 MIN_PYTHON_MAJOR_VERSION = 3 # minimum python version (3.10)
 MIN_PYTHON_MINOR_VERSION = 10
@@ -2769,7 +2769,7 @@ def apply_rssi_resolution(full_resolution):
     applied = 0
     for idx in range(RaceContext.race.num_nodes):
         node = RaceContext.interface.nodes[idx]
-        if node.api_level >= 37 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
+        if node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
             RaceContext.interface.set_adc_resolution(idx, full_resolution)
             applied += 1
 
