@@ -1,0 +1,140 @@
+"""Regression tests for combined equalisation and runtime ADC resolution."""
+import gevent.event
+import gevent.lock
+import importlib.util
+import json
+from pathlib import Path
+import sqlite3
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+SRC = Path(__file__).resolve().parents[1]
+for folder in ('interface', 'server'):
+    sys.path.insert(0, str(SRC / folder))
+
+from Node import Node
+from calibration import Calibration
+import RHInterface
+import serial_node
+
+spec = importlib.util.spec_from_file_location('eq_migration', SRC / 'server/util/add_equalisation_columns.py')
+migration = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(migration)
+
+
+class RssiIntegrationTest(unittest.TestCase):
+    def context(self, full=True):
+        node = Node()
+        node.api_level = 38
+        node.firmware_proctype_str = 'STM32F4'
+        node.adc_resolution = 12 if full else 10
+        node.init()
+        profile = SimpleNamespace(id=1, frequencies=json.dumps({'b': ['R'], 'c': [1]}))
+        ctx = SimpleNamespace(race=SimpleNamespace(profile=profile, num_nodes=1),
+                              interface=Mock(nodes=[node]), rhui=Mock(), rhdata=Mock())
+        def save(data):
+            for key, value in data.items():
+                if key != 'profile_id':
+                    setattr(profile, key, json.dumps(value))
+            return profile
+        ctx.rhdata.alter_profile.side_effect = save
+        return ctx, node, Calibration(ctx)
+
+    def test_fit_anchors_in_both_adc_modes(self):
+        for full, values in ((True, [700, 1200, 1700]), (False, [88, 150, 213])):
+            with self.subTest(full=full), patch('calibration.gevent.sleep'):
+                ctx, node, cal = self.context(full)
+                cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'), ([v] for v in values)))
+                self.assertTrue(cal.eq_wizard_apply())
+                _, pivot, ou, su, ol, sl = ctx.interface.set_equalisation.call_args.args
+                targets = cal._eq_targets(0)
+                def corrected(raw):
+                    return ((raw-ou)*su if raw >= pivot else (raw-ol)*sl) >> 8
+                for raw, target in zip(values, targets):
+                    self.assertLessEqual(abs(corrected(raw)-target), 2)
+                self.assertEqual(cal.eq_wizard_state()['state'], 'applied')
+                node.adc_resolution = 10 if full else 12
+                self.assertEqual(cal.eq_wizard_state()['state'], 'incompatible')
+                cal.hardware_set_all_equalisation()
+                self.assertEqual(ctx.interface.set_equalisation.call_args.args[1], 0)
+
+    def test_capture_rejects_noise_only_signal(self):
+        ctx, _, cal = self.context()
+        cal._eq_captured = {'noise': [700], 'low:R1': [702], 'high:R1': [704]}
+        self.assertFalse(cal.eq_wizard_apply())
+        ctx.rhdata.alter_profile.assert_not_called()
+
+    def test_rssi_transport_stays_wide_in_legacy_sampling_mode(self):
+        _, node, _ = self.context(full=False)
+        self.assertTrue(node.has_wide_rssi())
+        self.assertEqual(RHInterface.unpack_rssi(node, [0x0F, 0xFF]), 4095)
+        node.firmware_proctype_str = 'ATmega328P'
+        node.init()
+        self.assertFalse(node.has_wide_rssi())
+        self.assertEqual(node.max_rssi_value, 255)
+        self.assertEqual(RHInterface.unpack_rssi(node, [123]), 123)
+
+    def test_multinode_discovery_propagates_processor_type(self):
+        config = Mock()
+        config.get_item.return_value = ['/dev/ttyAMA0']
+        def read(node, interface, command, *args):
+            return {serial_node.READ_REVISION_CODE: [0x25, 38],
+                    serial_node.READ_MULTINODE_COUNT: [8]}.get(command)
+        def firmware(node):
+            node.firmware_version_str = '1.2.0'
+        def processor(node):
+            node.firmware_proctype_str = 'STM32F4'
+        with patch.object(serial_node.serial, 'Serial'), patch.object(serial_node.gevent, 'sleep'), \
+             patch.object(serial_node.SerialNode, 'read_block', read), \
+             patch.object(serial_node.SerialNode, 'read_firmware_version', firmware), \
+             patch.object(serial_node.SerialNode, 'read_firmware_proctype', processor), \
+             patch.object(serial_node.SerialNode, 'read_firmware_timestamp'), \
+             patch.object(serial_node.SerialNode, 'read_node_slot_index'):
+            nodes = serial_node.discover(0, config, isS32BPillFlag=True)
+        self.assertEqual(len(nodes), 8)
+        for node in nodes:
+            node.init()
+            self.assertTrue(node.has_wide_rssi())
+            self.assertEqual(node.max_rssi_value, 65535)
+
+    def test_combined_opcodes_match_and_are_unique(self):
+        import re
+        header = (SRC / 'node/commands.h').read_text()
+        names = re.findall(r'^#define ((?:READ_|WRITE_|RESET_NODE_)\w+) (0x[0-9A-F]+)', header, re.M)
+        values = [int(value, 16) for _, value in names]
+        self.assertEqual(len(values), len(set(values)))
+        for name, value in names:
+            if hasattr(RHInterface, name):
+                self.assertEqual(getattr(RHInterface, name), int(value, 16), name)
+
+    def test_existing_api37_calibration_migrates_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = str(Path(temp) / 'database.db')
+            c = sqlite3.connect(db)
+            c.execute('CREATE TABLE profiles (id INTEGER PRIMARY KEY, eq_pivots TEXT, eq_kups TEXT, eq_klos TEXT, enter_ats TEXT)')
+            encode = lambda vals: json.dumps({'v': vals})
+            c.execute('INSERT INTO profiles VALUES (1, ?, ?, ?, ?)',
+                      [encode(v) for v in ([1222, 1416], [435, 601], [138, 134], [540, 540])])
+            c.commit()
+            self.assertEqual(migration.main(db), 0)
+            first = c.execute('SELECT * FROM profiles').fetchone()
+            self.assertEqual(migration.main(db), 0)
+            self.assertEqual(c.execute('SELECT * FROM profiles').fetchone(), first)
+            row = dict(zip([d[0] for d in c.execute('SELECT * FROM profiles').description], first))
+            pivots = json.loads(row['eq_pivots'])['v']
+            for i, pivot in enumerate(pivots):
+                for raw in (pivot-300, pivot, pivot+200):
+                    above = raw >= pivot
+                    slope = json.loads(row['eq_slope_ups' if above else 'eq_slope_los'])['v'][i]
+                    offset = json.loads(row['eq_offset_ups' if above else 'eq_offset_los'])['v'][i]
+                    old = 300+(((raw-pivot)*slope)>>8) if above else 300-(((pivot-raw)*slope)>>8)
+                    self.assertLessEqual(abs(((raw-offset)*slope >> 8)-old), 2)
+            self.assertEqual(json.loads(row['enter_ats'])['v'], [540, 540])
+            c.close()
+
+
+if __name__ == '__main__':
+    unittest.main()

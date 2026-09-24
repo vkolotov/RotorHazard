@@ -72,6 +72,7 @@ byte Message::getPayloadSize()
             break;
 
         case RESET_NODE_EXTREMUMS:  // restart node peak/nadir tracking
+        case WRITE_ADC_RESOLUTION:  // ADC width in bits
             size = 1;
             break;
 
@@ -200,6 +201,13 @@ void Message::handleWriteCommand(bool serialFlag)
             cmdRssiNodePtr->rssiStateReset();
             break;
 
+        case WRITE_ADC_RESOLUTION:  // ADC width in bits
+            u8val = buffer.read8();
+#ifdef STM32_CORE_VERSION
+            cmdRssiNodePtr->setAdcResolution(u8val);
+#endif
+            break;
+
         case FORCE_END_CROSSING:  // kill current crossing flag regardless of RSSI value
             cmdRssiNodePtr->rssiEndCrossing();
             break;
@@ -306,6 +314,14 @@ void Message::handleReadCommand(bool serialFlag)
 
         case READ_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
             buffer.write16(cmdRssiNodePtr->getEqSlopeLo());
+            break;
+
+        case READ_ADC_RESOLUTION:  // ADC width in bits
+#ifdef STM32_CORE_VERSION
+            buffer.write8(cmdRssiNodePtr->getAdcResolution());
+#else
+            buffer.write8((uint8_t) LEGACY_ADC_BITS);
+#endif
             break;
 
         case READ_REVISION_CODE:  // reply with NODE_API_LEVEL and verification value

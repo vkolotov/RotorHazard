@@ -40,3 +40,6 @@ venv
 .DS_Store
 .AppleDouble
 .LSOverride
+
+# locally built node firmware (upstream ships only the two release .bin files)
+firmware/RH_S32_BPill_node_STM32F4_v*.bin

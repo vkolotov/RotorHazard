@@ -179,13 +179,15 @@ rssi_t RssiNode::rssiRead()
         recentSetFreqFlag = false;  // don't need to check again until next freq change
     }
 
-    // reads 5V value as 0-1023, RX5808 is 3.3V powered so RSSI pin will never output the full range
     int raw = analogRead(rssiInputPin);
-    // clamp upper range to fit scaling
-    if (raw > 0x01FF)
-        raw = 0x01FF;
-    // rescale to fit into a byte and remove some jitter
-    raw >>= 1;
+#ifdef STM32_CORE_VERSION
+    if (settings.adcResolution != FULL_ADC_BITS)
+#endif
+    {
+        if (raw > 0x01FF)
+            raw = 0x01FF;
+        raw >>= 1;
+    }
 
     if (!settings.eqPivot)
         return (rssi_t) raw;  // no calibration applied
@@ -199,9 +201,9 @@ rssi_t RssiNode::rssiRead()
     //  offsets, so nothing here needs to know what that scale is.
     int32_t adj;
     if (raw >= (int)settings.eqPivot)
-        adj = ((int32_t)(raw - settings.eqOffsetUp) * settings.eqSlopeUp) >> 8;
+        adj = (((int32_t)raw - settings.eqOffsetUp) * settings.eqSlopeUp) >> 8;
     else
-        adj = ((int32_t)(raw - settings.eqOffsetLo) * settings.eqSlopeLo) >> 8;
+        adj = (((int32_t)raw - settings.eqOffsetLo) * settings.eqSlopeLo) >> 8;
 
     if (adj < 0)
         adj = 0;
@@ -316,6 +318,16 @@ uint16_t RssiNode::freqMhzToRegVal(uint16_t freqInMhz)
     return (N << (uint16_t)7) + A;
 }
 
+
+#ifdef STM32_CORE_VERSION
+// Apply an ADC width to the hardware. Anything other than the full width falls
+//  back to legacy, so a bad value cannot silently change the scale.
+void RssiNode::setAdcResolution(uint8_t bits)
+{
+    settings.adcResolution = (bits == FULL_ADC_BITS) ? FULL_ADC_BITS : LEGACY_ADC_BITS;
+    analogReadResolution(settings.adcResolution);
+}
+#endif
 
 void RssiNode::rssiSetFilter(Filter<rssi_t> *f)
 {

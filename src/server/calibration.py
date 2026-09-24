@@ -39,6 +39,10 @@ EQ_MIN_LEVEL_GAP = 60
 #  being changed.
 EQ_SETTLE_SECONDS = 5.0
 
+def node_full_resolution(node):
+    return bool(getattr(node, 'has_wide_rssi', lambda: False)()) and node.adc_resolution == 12
+
+
 class Calibration:
     def __init__(self, racecontext):
         self._racecontext = racecontext
@@ -134,6 +138,13 @@ class Calibration:
             out.append(default if v is None else v)
         return out
 
+    def _eq_resolution_matches(self):
+        raw = getattr(self._racecontext.race.profile, 'eq_pivots', None)
+        stored_bits = json.loads(raw).get('adc_bits') if raw else None
+        return stored_bits is None or stored_bits == [
+            12 if node_full_resolution(node) else 10
+            for node in self._racecontext.interface.nodes]
+
     def _eq_node_channels(self):
         """The channel label each node is tuned to, one per node."""
         freqs = json.loads(self._racecontext.race.profile.frequencies)
@@ -168,8 +179,7 @@ class Calibration:
         that is the "no nadir recorded" sentinel and sits above the real range.
         """
         node = self._racecontext.interface.nodes[node_index]
-        wide = getattr(node, 'has_wide_rssi', None)
-        full = EQ_FULL_SCALE_WIDE if (wide and wide()) else EQ_FULL_SCALE_BYTE
+        full = EQ_FULL_SCALE_WIDE if node_full_resolution(node) else EQ_FULL_SCALE_BYTE
         return (int(round(full * EQ_FRACTION_FLOOR)),
                 int(round(full * EQ_FRACTION_LOW)),
                 int(round(full * EQ_FRACTION_HIGH)))
@@ -183,7 +193,7 @@ class Calibration:
         if not captured and any(self._eq_stored('eq_pivots', 0)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration
-            return {'state': 'applied', 'level': None, 'channel': None,
+            return {'state': 'applied' if self._eq_resolution_matches() else 'incompatible', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
                     'settle': EQ_SETTLE_SECONDS}
 
@@ -297,7 +307,8 @@ class Calibration:
         profile = self._racecontext.race.profile
         self._racecontext.race.profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
-            'eq_pivots': {"v": pivots},
+            'eq_pivots': {"v": pivots, 'adc_bits': [12 if node_full_resolution(node) else 10
+                         for node in self._racecontext.interface.nodes]},
             'eq_offset_ups': {"v": offset_ups},
             'eq_slope_ups': {"v": slope_ups},
             'eq_offset_los': {"v": offset_los},
@@ -333,7 +344,9 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            if (hi - lo) < EQ_MIN_LEVEL_GAP or (lo - fl) < EQ_MIN_LEVEL_GAP:
+            # Legacy readings are about eight times smaller than 12-bit raw.
+            min_gap = EQ_MIN_LEVEL_GAP if node_full_resolution(self._racecontext.interface.nodes[idx]) else max(1, round(EQ_MIN_LEVEL_GAP / 8))
+            if (hi - lo) < min_gap or (lo - fl) < min_gap:
                 msg = ('Node {0} levels are too close together '
                        '(noise={1}, low={2}, high={3})').format(idx + 1, fl, lo, hi)
                 logger.warning(msg)
@@ -346,13 +359,13 @@ class Calibration:
             s_lo = max(1, min(65535, int(round(
                 (t_low - t_floor) * 256.0 / (lo - fl)))))
             # fold the target into the offset: corrected = (raw - offset)*slope>>8
-            #  passes through (lo -> EQ_TARGET_LOW) for both segments, so they
+            #  passes through (lo -> t_low) for both segments, so they
             #  meet at the pivot
             pivots.append(lo)
             slope_ups.append(s_up)
             slope_los.append(s_lo)
-            offset_ups.append(int(round(lo - EQ_TARGET_LOW * 256.0 / s_up)))
-            offset_los.append(int(round(lo - EQ_TARGET_LOW * 256.0 / s_lo)))
+            offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
+            offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
         self._eq_store(pivots, offset_ups, slope_ups, offset_los, slope_los)
         for idx in range(num):
@@ -381,6 +394,8 @@ class Calibration:
     def hardware_set_all_equalisation(self):
         """Re-send the stored calibration; nodes keep nothing across a power cycle."""
         pivots = self._eq_stored('eq_pivots', 0)
+        if not self._eq_resolution_matches():
+            pivots = [0] * len(pivots)
         offset_ups = self._eq_stored('eq_offset_ups', 0)
         slope_ups = self._eq_stored('eq_slope_ups', 256)
         offset_los = self._eq_stored('eq_offset_los', 0)
@@ -389,6 +404,9 @@ class Calibration:
             self._racecontext.interface.set_equalisation(
                 idx, pivots[idx], offset_ups[idx], slope_ups[idx],
                 offset_los[idx], slope_los[idx])
+        # Let the median filter discard samples from before the coefficients changed.
+        gevent.sleep(0.5)
+        self.eq_reset_extremums()
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''

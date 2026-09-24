@@ -2,7 +2,7 @@
 RELEASE_VERSION = "4.5.1-dev.3" # Public release version code
 SERVER_API = 49 # Server API version
 NODE_API_SUPPORTED = 18 # Minimum supported node version
-NODE_API_BEST = 36 # Most recent node API
+NODE_API_BEST = 38 # Most recent node API
 JSON_API = 3 # JSON API version
 MIN_PYTHON_MAJOR_VERSION = 3 # minimum python version (3.10)
 MIN_PYTHON_MINOR_VERSION = 10
@@ -960,6 +960,8 @@ def on_load_data(data):
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
             RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
+
+            RaceContext.rhui.emit_rssi_resolution_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -1605,6 +1607,11 @@ def on_set_profile(data, emit_vals=True):
                 heartbeat_thread_function.imdtabler_flag = True
 
         RaceContext.interface.set_all_frequencies(freqs)
+        # the width has to be settled before any threshold is sent, since it
+        #  changes what those numbers mean
+        full_res = RaceContext.serverconfig.get_item('GENERAL', 'FULL_RSSI_RESOLUTION')
+        for idx in range(RaceContext.race.num_nodes):
+            RaceContext.interface.set_adc_resolution(idx, full_res)
         RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
         RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
         RaceContext.calibration.hardware_set_all_equalisation()
@@ -2730,13 +2737,57 @@ def on_set_option(data):
         'value': data['value'],
         })
 
+def apply_rssi_resolution(full_resolution):
+    """Push the ADC width to every node and say what it means.
+
+    Changing the width multiplies every reading by about eight, so existing
+    EnterAt/ExitAt values and any saved race trace were recorded on the other
+    scale. Nothing is rewritten - the operator re-runs calibration - but they
+    are told plainly rather than left to discover it mid-race.
+    """
+    applied = 0
+    for idx in range(RaceContext.race.num_nodes):
+        node = RaceContext.interface.nodes[idx]
+        if node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
+            RaceContext.interface.set_adc_resolution(idx, full_resolution)
+            applied += 1
+
+    if applied:
+        logger.info("RSSI resolution set to %s on %d node(s)",
+                    "full" if full_resolution else "legacy", applied)
+        RaceContext.rhui.set_ui_message(
+            'rssi-resolution',
+            __("RSSI resolution changed. Existing EnterAt/ExitAt values and saved "
+               "race data were recorded on the previous scale - re-run calibration "
+               "before racing."),
+            header='Warning', subclass='rssi-scale')
+    elif full_resolution:
+        logger.info("Full RSSI resolution requested but no node supports it")
+        RaceContext.rhui.set_ui_message(
+            'rssi-resolution',
+            __("No connected node supports full RSSI resolution; the setting has "
+               "no effect."),
+            header='Notice', subclass='rssi-scale')
+
 @SOCKET_IO.on('set_config')
 @requires_socketio_auth
 @catchLogExceptionsWrapper
 def on_set_config(data):
+    if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
+        if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING) or getattr(RaceContext.calibration, '_eq_busy', False):
+            RaceContext.rhui.emit_priority_message(__('Stop the race or wait for calibration before changing RSSI resolution.'))
+            RaceContext.rhui.emit_rssi_resolution_state()
+            return
     RaceContext.serverconfig.set_item(data['section'], data['key'], data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'ADMIN_SOCKET_AUTH':
         AdminAuth.set_admin_socket_auth_enabled(data['value'])
+    if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
+        apply_rssi_resolution(data['value'])
+        RaceContext.calibration._eq_captured = {}
+        RaceContext.calibration.hardware_set_all_equalisation()
+        RaceContext.calibration.eq_reset_extremums()
+        RaceContext.rhui.emit_eq_wizard_state()
+        RaceContext.rhui.emit_rssi_resolution_state()
     if data['section'] == 'GENERAL' and data['key'] == 'DEBUG' and data['value'] is False:
         apply_default_admin_creds_if_blank()
     elif data['section'] == 'SECRETS' and not RaceContext.serverconfig.get_item('GENERAL', 'DEBUG'):

@@ -458,7 +458,11 @@
 				}, 1000);
 			} else {
 				$('#eq_wizard_reset').prop('disabled', false);
-				if (msg.state == 'applied') {
+				if (msg.state == 'incompatible') {
+					btn.text("{{ __('Reset calibration for this resolution') }}").data('act', '').prop('disabled', true);
+					prog.text('');
+					$('#eq_wizard_back').prop('disabled', true);
+				} else if (msg.state == 'applied') {
 					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
 					prog.text('');
 					$('#eq_wizard_back').prop('disabled', true);
@@ -508,6 +512,20 @@
 		});
 
 		socket.emit('eq_wizard_query');
+
+		socket.on('rssi_resolution_state', function (msg) {
+			var sel = $('#set_full_rssi_resolution');
+			sel.val(msg.full ? 'true' : 'false');
+			if (msg.supported) {
+				sel.prop('disabled', false);
+				$('#rssi_resolution_note').text(
+					"{{ __('Full resolution multiplies every RSSI value by about eight. EnterAt/ExitAt and saved race data recorded on the other scale stay as they are - re-run calibration after changing this.') }}");
+			} else {
+				sel.prop('disabled', true);
+				$('#rssi_resolution_note').text(
+					"{{ __('Requires an STM32 node; Arduino nodes always use the legacy scale.') }}");
+			}
+		});
 
 		socket.on('node_tuning', function (msg) {
 			$('#set_profile').empty();
@@ -2856,6 +2874,19 @@
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>
 				</div>
+			</li>
+			<li>
+				<div class="label-block">
+					<label for="set_full_rssi_resolution">{{ __('RSSI Resolution') }}</label>
+				</div>
+				<select id="set_full_rssi_resolution" class="set-config" data-type="boolean" data-section="GENERAL" data-key="FULL_RSSI_RESOLUTION">
+					<option value="false">{{ __('Legacy') }}</option>
+					<option value="true">{{ __('Full') }}</option>
+				</select>
+			</li>
+			<li id="rssi_resolution_note_row">
+				<div class="label-block"></div>
+				<p class="form-note" id="rssi_resolution_note"></p>
 			</li>
 			<li>
 				<div class="label-block">

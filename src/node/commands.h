@@ -4,7 +4,7 @@
 #include "io.h"
 
 // API level for node; increment when commands are modified
-#define NODE_API_LEVEL 37
+#define NODE_API_LEVEL 38
 
 class Message
 {
@@ -40,6 +40,8 @@ public:
 #define READ_EQ_SLOPE_UP 0x36      // read equalisation slope, above pivot (Q8)
 #define READ_EQ_OFFSET_LO 0x37     // read equalisation offset, below pivot
 #define READ_EQ_SLOPE_LO 0x38      // read equalisation slope, below pivot (Q8)
+
+#define READ_ADC_RESOLUTION 0x41   // read ADC resolution in bits (10 = legacy, 12 = full)
 #define READ_MULTINODE_COUNT 0x39  // read # of nodes handled by this processor
 #define READ_CURNODE_INDEX 0x3A    // read index of current node for this processor
 #define READ_NODE_SLOTIDX 0x3C     // read node slot index (for multi-node setup)
@@ -57,6 +59,8 @@ public:
 #define WRITE_EQ_OFFSET_LO 0x67    // write equalisation offset, below pivot
 #define WRITE_EQ_SLOPE_LO 0x68     // write equalisation slope, below pivot (Q8)
 #define RESET_NODE_EXTREMUMS 0x69  // restart node peak/nadir tracking
+
+#define WRITE_ADC_RESOLUTION 0x6A  // write ADC resolution in bits (10 = legacy, 12 = full)
 #define WRITE_CURNODE_INDEX 0x7A   // write index of current node for this processor
 
 #define SEND_STATUS_MESSAGE 0x75   // send status message from server to node
