@@ -415,6 +415,50 @@ class Calibration:
             return None
         return 12 if any(node_full_resolution(node) for node in nodes) else 10
 
+    def rescale_thresholds_for_resolution(self, to_full):
+        """Move stored EnterAt/ExitAt onto the new ADC scale.
+
+        The low path clamps the 10-bit reading and halves it, so a reading is
+        exactly eight times larger at 12 bits than at 8. Thresholds are
+        compared straight against that reading and carry no other scaling, so
+        the same factor of eight converts them. Going up is lossless; coming
+        back down discards the low three bits, which is the resolution the
+        operator asked to give up.
+
+        Equalisation is deliberately left alone - see
+        eq_rescale_is_lossy() for why it is re-run rather than converted.
+        """
+        profile = self._racecontext.race.profile
+        node_count = self._racecontext.race.num_nodes
+
+        def convert(raw):
+            vals = json.loads(raw)["v"] if raw else []
+            out = []
+            for idx in range(node_count):
+                v = vals[idx] if idx < len(vals) else None
+                if not v:
+                    out.append(v)
+                elif to_full:
+                    out.append(int(v) * 8)
+                else:
+                    out.append(max(1, int(v) // 8))
+            return out
+
+        enter_ats = convert(getattr(profile, 'enter_ats', None))
+        exit_ats = convert(getattr(profile, 'exit_ats', None))
+        bits = 12 if to_full else 10
+        self._racecontext.rhdata.alter_profile({
+            'profile_id': profile.id,
+            'enter_ats': {"v": enter_ats, 'adc_bits': bits},
+            'exit_ats': {"v": exit_ats, 'adc_bits': bits},
+        })
+        self._racecontext.race.profile = self._racecontext.rhdata.get_profile(profile.id)
+        self.hardware_set_all_enter_ats(enter_ats)
+        self.hardware_set_all_exit_ats(exit_ats)
+        logger.info("Rescaled EnterAt/ExitAt for %s-bit sampling: enter=%s",
+                    bits, enter_ats)
+        return enter_ats, exit_ats
+
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
         logger.debug("Sending enter-at values to nodes: " + str(enter_at_levels))

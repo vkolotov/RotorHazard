@@ -2757,9 +2757,9 @@ def apply_rssi_resolution(full_resolution):
                     "high (12 bit)" if full_resolution else "low (8 bit)", applied)
         RaceContext.rhui.set_ui_message(
             'rssi-resolution',
-            __("RSSI resolution changed. EnterAt/ExitAt values were kept but "
-               "belong to the previous scale - check them before racing. "
-               "Adaptive calibration will ignore races recorded on that scale."),
+            __("RSSI resolution changed. EnterAt/ExitAt were rescaled to match. "
+               "Node equalisation was cleared and must be run again, and "
+               "adaptive calibration will ignore races recorded on the old scale."),
             header='Warning', subclass='rssi-scale')
     elif full_resolution:
         logger.info("Full RSSI resolution requested but no node supports it")
@@ -2786,6 +2786,9 @@ def on_set_config(data):
         AdminAuth.set_admin_socket_auth_enabled(data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
         apply_rssi_resolution(data['value'])
+        # Thresholds convert exactly; equalisation does not, so it is cleared
+        #  and re-run rather than carried across.
+        RaceContext.calibration.rescale_thresholds_for_resolution(bool(data['value']))
         RaceContext.calibration._eq_captured = {}
         RaceContext.calibration.hardware_set_all_equalisation()
         RaceContext.calibration.eq_reset_extremums()
