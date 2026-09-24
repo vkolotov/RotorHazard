@@ -2754,7 +2754,7 @@ def apply_rssi_resolution(full_resolution):
 
     if applied:
         logger.info("RSSI resolution set to %s on %d node(s)",
-                    "full" if full_resolution else "legacy", applied)
+                    "high (12 bit)" if full_resolution else "low (8 bit)", applied)
         RaceContext.rhui.set_ui_message(
             'rssi-resolution',
             __("RSSI resolution changed. Existing EnterAt/ExitAt values and saved "

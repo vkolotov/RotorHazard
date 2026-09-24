@@ -519,11 +519,10 @@
 			if (msg.supported) {
 				sel.prop('disabled', false);
 				$('#rssi_resolution_note').text(
-					"{{ __('Full resolution multiplies every RSSI value by about eight. EnterAt/ExitAt and saved race data recorded on the other scale stay as they are - re-run calibration after changing this.') }}");
+					"{{ __('High resolution multiplies every RSSI value by about eight. EnterAt/ExitAt and saved race data recorded on the other scale stay as they are - re-run calibration after changing this.') }}");
 			} else {
 				sel.prop('disabled', true);
-				$('#rssi_resolution_note').text(
-					"{{ __('Requires an STM32 node; Arduino nodes always use the legacy scale.') }}");
+				$('#rssi_resolution_note').text('');
 			}
 		});
 
@@ -2880,8 +2879,8 @@
 					<label for="set_full_rssi_resolution">{{ __('RSSI Resolution') }}</label>
 				</div>
 				<select id="set_full_rssi_resolution" class="set-config" data-type="boolean" data-section="GENERAL" data-key="FULL_RSSI_RESOLUTION">
-					<option value="false">{{ __('Legacy') }}</option>
-					<option value="true">{{ __('Full') }}</option>
+					<option value="false">{{ __('Low (8 bit)') }}</option>
+					<option value="true">{{ __('High (12 bit)') }}</option>
 				</select>
 			</li>
 			<li id="rssi_resolution_note_row">
