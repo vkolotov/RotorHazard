@@ -63,6 +63,32 @@ class RssiIntegrationTest(unittest.TestCase):
                 cal.hardware_set_all_equalisation()
                 self.assertEqual(ctx.interface.set_equalisation.call_args.args[1], 0)
 
+    def test_decision_band_is_not_compressed_in_either_mode(self):
+        """The pass/miss band must not shrink through the correction.
+
+        The upper segment spans the levels lap detection decides between, so a
+        slope below 1.0 there throws away resolution the ADC did supply. Equal
+        fractions of a 255-count and a 4095-count range look alike but are not:
+        the input span shrinks by eight as well, so the narrow pipeline needs
+        proportionally wider fractions to hold the same slope.
+        """
+        # Measured on an eight-node fleet, 12-bit counts: floor -> low -> high.
+        floor_span, band_span = 427.0, 350.0
+        for full in (True, False):
+            with self.subTest(full=full):
+                _, _, cal = self.context(full)
+                t_floor, t_low, t_high = cal._eq_targets(0)
+                div = 1.0 if full else 8.0
+                upper = (t_high - t_low) / (band_span / div)
+                lower = (t_low - t_floor) / (floor_span / div)
+                self.assertGreater(
+                    upper, 1.0,
+                    'decision band compressed at {} bits'.format(12 if full else 8))
+                self.assertGreater(lower, 0.0)
+                # a quad closer than the calibration spot must still fit
+                scale = 4095 if full else 255
+                self.assertLess(t_high * 2, scale)
+
     def test_capture_rejects_noise_only_signal(self):
         ctx, _, cal = self.context()
         cal._eq_captured = {'noise': [700], 'low:R1': [702], 'high:R1': [704]}

@@ -17,9 +17,20 @@ logger = logging.getLogger(__name__)
 #  These live here, not in the node: the offsets sent to a node already carry
 #  them, so no constant is duplicated across the protocol boundary and changing
 #  the scale never needs a firmware rebuild.
+#  The 8-bit set is not the 12-bit set: the fractions are of a 255-count
+#  range rather than a 4095-count one, but the *input* span the node sees
+#  shrinks by the same factor of eight, so equal fractions give the narrow
+#  pipeline a proportionally narrower output and compress the very band lap
+#  detection depends on. Measured on an eight-node fleet, 0.07/0.20 stretched
+#  the pass/miss band 1.52x at 12 bits but squeezed it to 0.75x at 8 bits.
+#  The 8-bit numbers below reproduce the 12-bit slopes instead, and still
+#  leave ~150% headroom above the calibrated pass level for a close quad.
 EQ_FRACTION_FLOOR = 0.007   # just clear of zero, so an idle node still moves
 EQ_FRACTION_LOW = 0.07
 EQ_FRACTION_HIGH = 0.20
+EQ_FRACTION_FLOOR_BYTE = 0.007
+EQ_FRACTION_LOW_BYTE = 0.133
+EQ_FRACTION_HIGH_BYTE = 0.394
 
 # What a node's reading can reach: a byte for the classic pipeline, the 12-bit
 #  ADC range where the node reads at full width.
@@ -179,10 +190,16 @@ class Calibration:
         that is the "no nadir recorded" sentinel and sits above the real range.
         """
         node = self._racecontext.interface.nodes[node_index]
-        full = EQ_FULL_SCALE_WIDE if node_full_resolution(node) else EQ_FULL_SCALE_BYTE
-        return (int(round(full * EQ_FRACTION_FLOOR)),
-                int(round(full * EQ_FRACTION_LOW)),
-                int(round(full * EQ_FRACTION_HIGH)))
+        if node_full_resolution(node):
+            full = EQ_FULL_SCALE_WIDE
+            fl, lo, hi = EQ_FRACTION_FLOOR, EQ_FRACTION_LOW, EQ_FRACTION_HIGH
+        else:
+            full = EQ_FULL_SCALE_BYTE
+            fl, lo, hi = (EQ_FRACTION_FLOOR_BYTE, EQ_FRACTION_LOW_BYTE,
+                          EQ_FRACTION_HIGH_BYTE)
+        return (int(round(full * fl)),
+                int(round(full * lo)),
+                int(round(full * hi)))
 
     def eq_wizard_state(self):
         """Where the wizard is: the next step, or done."""
