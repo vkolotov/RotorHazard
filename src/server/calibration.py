@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 #  wrong for the next. The destination is the widest span any node showed, so
 #  the node that already resolves best is left alone and every other node is
 #  stretched up to match it. No node is ever compressed, and the result scales
-#  automatically with the width of the pipeline, since a narrower one reports
+#  automatically with the ADC width, since a narrower pipeline reports
 #  proportionally narrower spans.
 #
 # The one thing that cannot come from the captures is headroom: "high" is the
@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 #  Cap the top of the mapped range at this fraction of full scale.
 EQ_HEADROOM_FRACTION = 0.5
 
-# What a node's reading can reach. The node pipeline is a byte wide, so this is
-#  a byte; a wider pipeline would raise it, and the destination below follows
-#  the captures rather than this number, so nothing else has to change.
-EQ_FULL_SCALE = 255
+# What a node's reading can reach: a byte for the classic pipeline, the 12-bit
+#  ADC range where the node reads at full width.
+EQ_FULL_SCALE_BYTE = 255
+EQ_FULL_SCALE_WIDE = 4095
 
 # Minimum gap between adjacent captured levels, as a fraction of full scale.
 #  A node that never saw the quad reads only noise and would otherwise get an
@@ -43,6 +43,10 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  previous step would already hold whatever the VTX did while its channel was
 #  being changed.
 EQ_SETTLE_SECONDS = 5.0
+
+def node_full_resolution(node):
+    return bool(getattr(node, 'has_wide_rssi', lambda: False)()) and node.adc_resolution == 12
+
 
 class Calibration:
     def __init__(self, racecontext):
@@ -139,6 +143,13 @@ class Calibration:
             out.append(default if v is None else v)
         return out
 
+    def _eq_resolution_matches(self):
+        raw = getattr(self._racecontext.race.profile, 'eq_pivots', None)
+        stored_bits = json.loads(raw).get('adc_bits') if raw else None
+        return stored_bits is None or stored_bits == [
+            12 if node_full_resolution(node) else 10
+            for node in self._racecontext.interface.nodes]
+
     def _eq_node_channels(self):
         """The channel label each node is tuned to, one per node."""
         freqs = json.loads(self._racecontext.race.profile.frequencies)
@@ -167,12 +178,9 @@ class Calibration:
         return steps
 
     def _eq_scale(self, node_index):
-        """What a node's corrected reading can reach.
-
-        Based on what the pipeline can actually carry, not on max_rssi_value -
-        that is the "no nadir recorded" sentinel and sits above the real range.
-        """
-        return EQ_FULL_SCALE
+        """What a node's corrected reading can reach."""
+        node = self._racecontext.interface.nodes[node_index]
+        return EQ_FULL_SCALE_WIDE if node_full_resolution(node) else EQ_FULL_SCALE_BYTE
 
     def _eq_destination(self, spans):
         """Where every node's levels should land, from the captured spans.
@@ -210,7 +218,7 @@ class Calibration:
         if not captured and any(self._eq_stored('eq_pivots', 0)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration
-            return {'state': 'applied', 'level': None, 'channel': None,
+            return {'state': 'applied' if self._eq_resolution_matches() else 'incompatible', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
                     'settle': EQ_SETTLE_SECONDS}
 
@@ -324,7 +332,8 @@ class Calibration:
         profile = self._racecontext.race.profile
         self._racecontext.race.profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
-            'eq_pivots': {"v": pivots},
+            'eq_pivots': {"v": pivots, 'adc_bits': [12 if node_full_resolution(node) else 10
+                         for node in self._racecontext.interface.nodes]},
             'eq_offset_ups': {"v": offset_ups},
             'eq_slope_ups': {"v": slope_ups},
             'eq_offset_los': {"v": offset_los},
@@ -362,6 +371,7 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
+            # Legacy readings are about eight times smaller than 12-bit raw.
             min_gap = max(1, EQ_MIN_LEVEL_FRACTION * self._eq_scale(idx))
             if (hi - lo) < min_gap or (lo - fl) < min_gap:
                 msg = ('Node {0} levels are too close together '
@@ -412,13 +422,23 @@ class Calibration:
         return True
 
     def eq_reset_extremums(self):
-        """Restart peak/nadir tracking on every node."""
+        """Restart peak/nadir tracking on every node.
+
+        The crossing is ended first: a pass peak only updates while a node is
+        crossing, so a node still in a crossing re-fills it from the live
+        signal the moment after the reset, and then freezes there once the
+        crossing ends.
+        """
+        for idx in range(self._racecontext.race.num_nodes):
+            self._racecontext.interface.force_end_crossing(idx)
         for idx in range(self._racecontext.race.num_nodes):
             self._racecontext.interface.reset_node_extremums(idx)
 
     def hardware_set_all_equalisation(self):
         """Re-send the stored calibration; nodes keep nothing across a power cycle."""
         pivots = self._eq_stored('eq_pivots', 0)
+        if not self._eq_resolution_matches():
+            pivots = [0] * len(pivots)
         offset_ups = self._eq_stored('eq_offset_ups', 0)
         slope_ups = self._eq_stored('eq_slope_ups', 256)
         offset_los = self._eq_stored('eq_offset_los', 0)
@@ -427,6 +447,60 @@ class Calibration:
             self._racecontext.interface.set_equalisation(
                 idx, pivots[idx], offset_ups[idx], slope_ups[idx],
                 offset_los[idx], slope_los[idx])
+        # Let the median filter discard samples from before the coefficients changed.
+        gevent.sleep(0.5)
+        self.eq_reset_extremums()
+
+    def current_adc_bits(self):
+        """The width the nodes are sampling at right now."""
+        nodes = self._racecontext.interface.nodes
+        if not nodes:
+            return None
+        return 12 if any(node_full_resolution(node) for node in nodes) else 10
+
+    def rescale_thresholds_for_resolution(self, to_full):
+        """Move stored EnterAt/ExitAt onto the new ADC scale.
+
+        The low path clamps the 10-bit reading and halves it, so a reading is
+        exactly eight times larger at 12 bits than at 8. Thresholds are
+        compared straight against that reading and carry no other scaling, so
+        the same factor of eight converts them. Going up is lossless; coming
+        back down discards the low three bits, which is the resolution the
+        operator asked to give up.
+
+        Equalisation is deliberately left alone - see
+        eq_rescale_is_lossy() for why it is re-run rather than converted.
+        """
+        profile = self._racecontext.race.profile
+        node_count = self._racecontext.race.num_nodes
+
+        def convert(raw):
+            vals = json.loads(raw)["v"] if raw else []
+            out = []
+            for idx in range(node_count):
+                v = vals[idx] if idx < len(vals) else None
+                if not v:
+                    out.append(v)
+                elif to_full:
+                    out.append(int(v) * 8)
+                else:
+                    out.append(max(1, int(v) // 8))
+            return out
+
+        enter_ats = convert(getattr(profile, 'enter_ats', None))
+        exit_ats = convert(getattr(profile, 'exit_ats', None))
+        bits = 12 if to_full else 10
+        self._racecontext.rhdata.alter_profile({
+            'profile_id': profile.id,
+            'enter_ats': {"v": enter_ats, 'adc_bits': bits},
+            'exit_ats': {"v": exit_ats, 'adc_bits': bits},
+        })
+        self._racecontext.race.profile = self._racecontext.rhdata.get_profile(profile.id)
+        self.hardware_set_all_enter_ats(enter_ats)
+        self.hardware_set_all_exit_ats(exit_ats)
+        logger.info("Rescaled EnterAt/ExitAt for %s-bit sampling: enter=%s",
+                    bits, enter_ats)
+        return enter_ats, exit_ats
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
@@ -464,6 +538,20 @@ class Calibration:
         logger.info('Updated calibration with best discovered values')
         self._racecontext.rhui.emit_enter_and_exit_at_levels()  # one broadcast for all nodes
 
+    def _race_matches_resolution(self, race):
+        """True if this saved race was timed at the width now in use.
+
+        Races saved before the width became switchable carry no tag; they are
+        8-bit, because that is all the firmware of the time could produce.
+        """
+        current = self.current_adc_bits()
+        if current is None:
+            return True
+        tagged = self._racecontext.rhdata.get_savedrace_attribute_value(
+            race, 'adc_bits', None)
+        stored = int(tagged) if tagged else 10
+        return stored == current
+
     def find_best_calibration_values(self, node, seat_index):
         ''' Search race history for best tuning values '''
 
@@ -473,7 +561,20 @@ class Calibration:
         current_class = heat.class_id
         races = self._racecontext.rhdata.get_savedRaceMetas()
         races.sort(key=lambda x: x.id, reverse=True)
-        pilotRaces = self._racecontext.rhdata.get_savedPilotRaces()
+        # Drop races timed at the other ADC width; their thresholds are eight
+        #  times off and would put every node permanently in or out of crossing.
+        usable_race_ids = set()
+        skipped = 0
+        for race in list(races):
+            if self._race_matches_resolution(race):
+                usable_race_ids.add(race.id)
+            else:
+                races.remove(race)
+                skipped += 1
+        if skipped:
+            logger.debug('Ignoring %d saved race(s) recorded at a different ADC width', skipped)
+        pilotRaces = [p for p in self._racecontext.rhdata.get_savedPilotRaces()
+                      if p.race_id in usable_race_ids]
         pilotRaces.sort(key=lambda x: x.id, reverse=True)
 
         # test for disabled node
