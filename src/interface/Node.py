@@ -129,7 +129,7 @@ class Node:
         from any server setting. Both ends have to agree or every reading is
         parsed wrong.
         '''
-        return self.api_level >= 37 and \
+        return self.api_level >= 38 and \
                bool(self.firmware_proctype_str) and \
                self.firmware_proctype_str.upper().startswith('STM32')
 
