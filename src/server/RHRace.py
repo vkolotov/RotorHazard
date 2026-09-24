@@ -724,6 +724,19 @@ class RHRace():
                 new_race = self._racecontext.rhdata.add_savedRaceMeta(new_race_data)
                 self.db_id = new_race.id
 
+                # Record the ADC width this race was timed at. Adaptive
+                #  calibration reads thresholds back out of race history, and
+                #  the two widths differ by a factor of eight, so a row is only
+                #  reusable on the scale that produced it. Races saved before
+                #  this tag existed have no attribute and are treated as 8-bit,
+                #  which is all the older firmware could produce.
+                adc_bits = self._racecontext.calibration.current_adc_bits()
+                if adc_bits:
+                    self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
+                        'race_attr': 'adc_bits',
+                        'value': str(adc_bits),
+                        })
+
                 race_data = {}
 
                 for node_index in range(self.num_nodes):

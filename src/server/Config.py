@@ -187,7 +187,6 @@ class Config:
                 'SECONDARIES',
                 'CORS_ALLOWED_HOSTS',
                 'FORCE_S32_BPILL_FLAG',
-                'FULL_RSSI_RESOLUTION',
                 'SHUTDOWN_BUTTON_GPIOPIN',
                 'SHUTDOWN_BUTTON_DELAYMS',
                 'DB_AUTOBKP_NUM_KEEP',
