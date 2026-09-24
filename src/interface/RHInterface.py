@@ -636,7 +636,7 @@ class RHInterface(BaseHardwareInterface):
         correction.
         """
         node = self.nodes[node_index]
-        if not node.api_valid_flag or node.api_level < 38:
+        if not node.api_valid_flag or node.api_level < 37:
             return
         for cmd, read_cmd, value in (
                 (WRITE_EQ_PIVOT, READ_EQ_PIVOT, 0),
@@ -658,7 +658,7 @@ class RHInterface(BaseHardwareInterface):
         it with whatever the node still holds.
         """
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 38:
+        if node.api_valid_flag and node.api_level >= 37:
             self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
             node.node_peak_rssi = 0
             node.node_nadir_rssi = node.max_rssi_value
@@ -671,7 +671,7 @@ class RHInterface(BaseHardwareInterface):
         about eight, so it is the operator's choice and defaults to off.
         """
         node = self.nodes[node_index]
-        if not node.api_valid_flag or node.api_level < 38 or not node.has_wide_rssi():
+        if not node.api_valid_flag or node.api_level < 37 or not node.has_wide_rssi():
             return
         bits = FULL_ADC_BITS if full_resolution else LEGACY_ADC_BITS
         if self.set_and_validate_value_8(node, WRITE_ADC_RESOLUTION,

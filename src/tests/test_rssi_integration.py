@@ -30,7 +30,7 @@ spec.loader.exec_module(migration)
 class RssiIntegrationTest(unittest.TestCase):
     def context(self, full=True):
         node = Node()
-        node.api_level = 38
+        node.api_level = 37
         node.firmware_proctype_str = 'STM32F4'
         node.adc_resolution = 12 if full else 10
         node.init()
@@ -83,7 +83,7 @@ class RssiIntegrationTest(unittest.TestCase):
         config = Mock()
         config.get_item.return_value = ['/dev/ttyAMA0']
         def read(node, interface, command, *args):
-            return {serial_node.READ_REVISION_CODE: [0x25, 38],
+            return {serial_node.READ_REVISION_CODE: [0x25, 37],
                     serial_node.READ_MULTINODE_COUNT: [8]}.get(command)
         def firmware(node):
             node.firmware_version_str = '1.2.0'

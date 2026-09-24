@@ -13,8 +13,14 @@ serial board, so all eight receivers use the correct packet width.
 
 ## Firmware protocol
 
-The combined firmware uses **API 38**. API 37 was already deployed with a
-different equalisation protocol; the new commands must not be sent to it.
+The combined firmware uses **API 37**, one step above upstream's 36. Both
+feature branches target 37 independently; whichever merges first keeps it and
+the other rebases onto it.
+
+Development builds numbered 37 and 38 carrying an earlier equalisation protocol
+were flashed to the project timer while this work was in progress. They were
+never released, so no external node runs them, and the shipped API 37 firmware
+replaces them.
 
 | Operation | Read | Write | Payload |
 |---|---|---|---|
@@ -54,7 +60,7 @@ Coefficients are specific to each receiver's calibrated channel. Retuning a
 receiver requires recalibration. See the retained measurement reports
 [12-bit measurements](12bit-measurements.md) and
 [channel survey](rssi-channel-survey.md) for the earlier hardware experiments.
-Those reports describe historical firmware, not the API 38 command layout.
+Those reports describe historical firmware, not the API 37 command layout.
 
 ## Upgrading the original integration deployment
 
@@ -71,7 +77,7 @@ Integer offsets introduce small rounding differences (up to two RSSI counts for
 the deployed calibration). Old columns remain for rollback.
 
 Keep `GENERAL.FULL_RSSI_RESOLUTION` true for this previously 12-bit deployment.
-Flash the API 38 firmware using the existing server's node-update function, then
+Flash the API 37 firmware using the existing server's node-update function, then
 restart into the new server. The updater stops hardware polling while flashing.
 Verify all eight receivers, the resolution setting, calibration, thresholds,
 heartbeat values, and communication errors. A live quad pass remains the final
