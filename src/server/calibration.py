@@ -383,7 +383,11 @@ class Calibration:
                  for l, c in self._eq_steps()]
         last = [k for k in order if k in captured][-1]
         del captured[last]
+        # Cancel a capture still settling, then re-stamp what remains: the
+        #  earlier steps are still valid for this configuration and stepping
+        #  back must not throw them away.
         self._eq_invalidate_session()
+        self._eq_note_capture_session()
         logger.info('Equalisation stepped back, discarded %s', last)
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
@@ -403,12 +407,30 @@ class Calibration:
         self._eq_busy = True
         try:
             self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
+            failed = []
             for idx in range(num):
-                self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256)
+                if not self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256):
+                    failed.append(idx + 1)
+            if not failed:
+                # Clearing the correction moves the axis just as applying one
+                #  does; convert inside the guard, since this writes to nodes.
+                self.convert_thresholds_to_scale(from_axis=previous_axis)
         finally:
             self._eq_busy = False
-        # Clearing the correction moves the axis just as applying one does.
-        self.convert_thresholds_to_scale(from_axis=previous_axis)
+
+        if failed:
+            # A node that did not confirm may still be correcting, so the axis
+            #  is unknown and the thresholds must not be moved as though it
+            #  were not.
+            self._eq_unresolved = list(failed)
+            msg = ('Equalisation reset was not accepted by node(s) {0}; '
+                   'their correction is unknown - retry before racing').format(
+                       ', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return False
+        self._eq_unresolved = []
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
@@ -513,22 +535,30 @@ class Calibration:
                         idx, pivots[idx], offset_ups[idx], slope_ups[idx],
                         offset_los[idx], slope_los[idx]):
                     failed.append(idx + 1)
+
+            if not failed:
+                # Still inside the guard: the conversion writes thresholds to
+                #  the nodes, so the window is not safe to race in either.
+                self.convert_thresholds_to_scale(from_axis=previous_axis)
         finally:
             self._eq_busy = False
 
         if failed:
             # The stored fit no longer describes the hardware, so the axis is
             #  unknown rather than merely different.
+            # Nodes that took the write are on the new correction while their
+            #  thresholds are still on the old one, and the rest are in an
+            #  unknown state. Neither is safe to time against, so record it
+            #  and keep racing blocked until a run succeeds or clears it.
+            self._eq_unresolved = list(failed)
             msg = ('Equalisation was not accepted by node(s) {0}; '
-                   'their correction is unknown - re-run calibration before '
-                   'racing').format(', '.join(str(n) for n in failed))
+                   'their correction is unknown - re-run calibration or reset '
+                   'it before racing').format(', '.join(str(n) for n in failed))
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
             self._racecontext.rhui.emit_eq_wizard_state()
             return False
-
-        # Applying a fit moves the axis every threshold is measured against.
-        self.convert_thresholds_to_scale(from_axis=previous_axis)
+        self._eq_unresolved = []
 
         gevent.sleep(0.5)
         self.eq_reset_extremums()
@@ -542,6 +572,18 @@ class Calibration:
         self._racecontext.rhui.emit_priority_message(
             'Equalisation applied to {0} nodes'.format(num))
         return True
+
+    def eq_state_is_unresolved(self):
+        """True when the correction on the nodes is not known to be correct.
+
+        Set when a coefficient write is not confirmed: some nodes may be on a
+        new correction with thresholds still on the old one, and others in an
+        unknown state. Timing against that is worse than refusing to start.
+        """
+        return bool(getattr(self, '_eq_unresolved', None))
+
+    def eq_unresolved_nodes(self):
+        return list(getattr(self, '_eq_unresolved', []) or [])
 
     def eq_reset_extremums(self):
         """Restart peak/nadir tracking on every node."""
@@ -713,6 +755,38 @@ class Calibration:
         logger.info('Updated calibration with best discovered values')
         self._racecontext.rhui.emit_enter_and_exit_at_levels()  # one broadcast for all nodes
 
+    @staticmethod
+    def _eq_signature_key(signature):
+        """A comparable form of an equalisation signature.
+
+        Stored ones arrive as JSON text, live ones as lists; None and the
+        string "null" both mean no correction.
+        """
+        if signature is None or signature == 'null':
+            return None
+        if isinstance(signature, str):
+            try:
+                signature = json.loads(signature)
+            except (TypeError, ValueError):
+                return None
+        if not signature:
+            return None
+        return json.dumps(signature, sort_keys=True)
+
+    def _race_matches_correction(self, race):
+        """True if this saved race was timed under the correction in use.
+
+        Adaptive calibration restores EnterAt/ExitAt straight out of race
+        history, and a threshold only means the same signal while the
+        correction that produced it still holds. Races saved before this was
+        tracked carry no tag and are uncorrected, which is what the code of
+        the time produced.
+        """
+        stored = self._racecontext.rhdata.get_savedrace_attribute_value(
+            race, 'eq_signature', None)
+        return self._eq_signature_key(stored) == self._eq_signature_key(
+            self._eq_signature())
+
     def find_best_calibration_values(self, node, seat_index):
         ''' Search race history for best tuning values '''
 
@@ -722,7 +796,22 @@ class Calibration:
         current_class = heat.class_id
         races = self._racecontext.rhdata.get_savedRaceMetas()
         races.sort(key=lambda x: x.id, reverse=True)
-        pilotRaces = self._racecontext.rhdata.get_savedPilotRaces()
+        # Drop races timed under a different correction; their thresholds are
+        #  on another axis and would put a node permanently in or out of
+        #  crossing.
+        usable_race_ids = set()
+        skipped = 0
+        for race in list(races):
+            if self._race_matches_correction(race):
+                usable_race_ids.add(race.id)
+            else:
+                races.remove(race)
+                skipped += 1
+        if skipped:
+            logger.debug('Ignoring %d saved race(s) timed under a different '
+                         'equalisation', skipped)
+        pilotRaces = [p for p in self._racecontext.rhdata.get_savedPilotRaces()
+                      if p.race_id in usable_race_ids]
         pilotRaces.sort(key=lambda x: x.id, reverse=True)
 
         # test for disabled node

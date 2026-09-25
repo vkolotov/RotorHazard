@@ -165,6 +165,75 @@ class EqualisationTest(unittest.TestCase):
         ctx.race.profile.id = 2
         self.assertFalse(cal._eq_captures_are_current())
 
+    def test_reset_refuses_when_a_node_does_not_confirm(self):
+        """An unconfirmed reset leaves the correction unknown."""
+        ctx, _, cal = self.context()
+        ctx.race.profile.enter_ats = json.dumps({'v': [80], 'eq': [[150, 89, 256, 89, 256]]})
+        ctx.interface.set_equalisation.return_value = False
+        self.assertFalse(cal.eq_wizard_reset())
+        # thresholds must not move as though correction were off
+        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [80])
+        self.assertTrue(cal.eq_state_is_unresolved())
+
+    def test_failed_apply_blocks_racing(self):
+        """Unresolved hardware state has to stop a race starting."""
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            ctx.interface.set_equalisation.return_value = False
+            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                        ([v] for v in (90, 150, 210))))
+            cal._eq_note_capture_session()
+            self.assertFalse(cal.eq_wizard_apply())
+            self.assertTrue(cal.eq_state_is_unresolved())
+            self.assertEqual(cal.eq_unresolved_nodes(), [1])
+
+    def test_busy_covers_threshold_writes(self):
+        """The guard must still be set while thresholds are written."""
+        seen = []
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            ctx.race.profile.enter_ats = json.dumps({'v': [169]})
+            ctx.race.profile.exit_ats = json.dumps({'v': [160]})
+            ctx.interface.set_enter_at_level.side_effect = \
+                lambda *a, **k: seen.append(cal._eq_busy)
+            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                        ([v] for v in (90, 150, 210))))
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+        self.assertTrue(seen, 'thresholds were never written')
+        self.assertTrue(all(seen), 'guard was released before threshold writes')
+
+    def test_back_keeps_the_earlier_captures(self):
+        """Stepping back cancels a pending capture, not the retained ones."""
+        ctx, _, cal = self.context()
+        cal._eq_captured = {'noise': [90], 'low:R1': [150], 'high:R1': [210]}
+        cal._eq_note_capture_session()
+        self.assertTrue(cal.eq_wizard_back())
+        self.assertTrue(cal._eq_captures_are_current())
+        # the state query must not discard what Back kept
+        cal.eq_wizard_state()
+        self.assertEqual(sorted(cal._eq_captured), ['low:R1', 'noise'])
+
+    def test_history_ignores_races_under_another_correction(self):
+        """Adaptive calibration must not restore thresholds from another axis."""
+        ctx, _, cal = self.context()
+        ctx.race.profile.eq_pivots = json.dumps({'v': [150]})
+        ctx.race.profile.eq_offset_ups = json.dumps({'v': [89]})
+        ctx.race.profile.eq_slope_ups = json.dumps({'v': [256]})
+        ctx.race.profile.eq_offset_los = json.dumps({'v': [89]})
+        ctx.race.profile.eq_slope_los = json.dumps({'v': [256]})
+        live = cal._eq_signature()
+        race = object()
+        values = {'eq_signature': json.dumps(live)}
+        ctx.rhdata.get_savedrace_attribute_value.side_effect = \
+            lambda r, name, default=None: values.get(name, default)
+        self.assertTrue(cal._race_matches_correction(race))
+        values['eq_signature'] = json.dumps([[151, 89, 256, 89, 256]])
+        self.assertFalse(cal._race_matches_correction(race))
+        # an untagged race predates equalisation: uncorrected
+        values.clear()
+        self.assertFalse(cal._race_matches_correction(race))
+
     def test_capture_rejects_noise_only_signal(self):
         ctx, _, cal = self.context()
         cal._eq_captured = {'noise': [700], 'low:R1': [702], 'high:R1': [704]}
