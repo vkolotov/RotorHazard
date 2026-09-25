@@ -639,9 +639,7 @@ class RHInterface(BaseHardwareInterface):
         if not node.api_valid_flag or node.api_level < 37:
             return False
         # Pivot 0 first so the correction is off while the coefficients are in
-        #  flux - writing the real pivot first leaves the node correcting with
-        #  a half-updated fit - and pivot last so it only comes on once they
-        #  are all in.
+        #  flux, and pivot last so it only comes on once they are all in.
         for cmd, read_cmd, value in (
                 (WRITE_EQ_PIVOT, READ_EQ_PIVOT, 0),
                 (WRITE_EQ_OFFSET_UP, READ_EQ_OFFSET_UP, offset_up & 0xFFFF),
@@ -692,14 +690,28 @@ class RHInterface(BaseHardwareInterface):
         Only STM32 nodes can do anything with this; AVR nodes report 10 bits
         and ignore the write. Full resolution multiplies every reading by
         about eight, so it is the operator's choice and defaults to off.
+
+        Returns True only when the node read the new width back. Everything
+        downstream - what a stored threshold means, whether equalisation still
+        applies - depends on the width the hardware is actually on, so a write
+        that was never acknowledged must not be recorded as one that was.
         """
         node = self.nodes[node_index]
         if not node.api_valid_flag or node.api_level < 38 or not node.has_wide_rssi():
-            return
+            return False
         bits = FULL_ADC_BITS if full_resolution else LEGACY_ADC_BITS
-        if self.set_and_validate_value_8(node, WRITE_ADC_RESOLUTION,
-                                         READ_ADC_RESOLUTION, bits) == bits:
+        self.set_and_validate_value_8(node, WRITE_ADC_RESOLUTION,
+                                      READ_ADC_RESOLUTION, bits)
+        # Read back directly: set_and_validate_value_8() reports the requested
+        #  value when every read returned nothing, which is indistinguishable
+        #  from success.
+        confirmed = self.get_value_8(node, READ_ADC_RESOLUTION)
+        if confirmed == bits:
             node.adc_resolution = bits
+            return True
+        self.log('ADC resolution not confirmed on node {0}: wanted {1}, read {2}'.format(
+            node.index + 1, bits, confirmed))
+        return False
 
     def force_end_crossing(self, node_index):
         node = self.nodes[node_index]

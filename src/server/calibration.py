@@ -547,6 +547,145 @@ class Calibration:
         self.eq_reset_extremums()
         return not failed
 
+    def current_adc_bits(self):
+        """The width the nodes are sampling at right now."""
+        nodes = self._racecontext.interface.nodes
+        if not nodes:
+            return None
+        return 12 if any(node_full_resolution(node) for node in nodes) else 10
+
+    def threshold_scale_id(self, bits=None):
+        """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
+
+        A threshold is compared against whatever rssiRead() returns, which is
+        the ADC width *after* equalisation. Both halves therefore identify the
+        axis, and a stored value only means the same thing while both match.
+        """
+        if bits is None:
+            bits = self.current_adc_bits()
+        return {'adc_bits': bits, 'eq': self._eq_signature(bits)}
+
+    def _eq_signature(self, bits):
+        """The correction in force, per node, or None where there is none."""
+        if not self._eq_resolution_matches(bits):
+            return None  # correction is disabled at this width
+        pivots = self._eq_stored('eq_pivots', 0)
+        if not any(pivots):
+            return None
+        return [[pivots[i],
+                 self._eq_stored('eq_offset_ups', 0)[i],
+                 self._eq_stored('eq_slope_ups', 256)[i],
+                 self._eq_stored('eq_offset_los', 0)[i],
+                 self._eq_stored('eq_slope_los', 256)[i]]
+                for i in range(len(pivots))]
+
+    def _corrected(self, raw, coeffs):
+        """What the node reports for a raw reading under `coeffs`."""
+        if not coeffs:
+            return raw
+        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        if not pivot:
+            return raw
+        if raw >= pivot:
+            adj = ((raw - off_up) * slope_up) >> 8
+        else:
+            adj = ((raw - off_lo) * slope_lo) >> 8
+        return max(0, adj)
+
+    def _uncorrect(self, value, coeffs):
+        """The raw reading that produces `value` under `coeffs`.
+
+        The forward transform is two straight segments, so each is inverted
+        directly; the pivot says which one applies.
+        """
+        if not coeffs:
+            return value
+        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        if not pivot:
+            return value
+        at_pivot = self._corrected(pivot, coeffs)
+        if value >= at_pivot:
+            return int(round(value * 256.0 / slope_up)) + off_up if slope_up else value
+        return int(round(value * 256.0 / slope_lo)) + off_lo if slope_lo else value
+
+    def convert_thresholds_to_scale(self, target_bits=None):
+        """Move stored EnterAt/ExitAt onto the axis the nodes are on now.
+
+        A threshold is a corrected value, not a raw one, so it cannot simply be
+        multiplied by the ratio of ADC widths: the correction in force may have
+        changed at the same moment. Undo the old correction to recover the raw
+        reading, rescale that by the ratio of widths, then apply whatever
+        correction is now in force.
+
+        Idempotent: the stored scale is recorded alongside the values, and a
+        profile already on the target axis is left untouched. That also makes
+        this safe to call when activating a profile, which is the only way a
+        profile that was not open during a switch ever gets converted.
+        """
+        profile = self._racecontext.race.profile
+        if target_bits is None:
+            target_bits = self.current_adc_bits()
+        if target_bits is None:
+            return None, None
+
+        want = self.threshold_scale_id(target_bits)
+        have = self._stored_scale_id(profile)
+        if have == want:
+            return None, None  # already on this axis
+
+        old_bits = (have or {}).get('adc_bits') or target_bits
+        old_eq = (have or {}).get('eq')
+        new_eq = want['eq']
+        ratio = (8 if target_bits == 12 else 1) / (8 if old_bits == 12 else 1)
+
+        def convert(raw_json):
+            try:
+                vals = json.loads(raw_json)["v"] if raw_json else []
+            except (TypeError, ValueError, KeyError):
+                vals = []
+            out = []
+            for idx in range(self._racecontext.race.num_nodes):
+                v = vals[idx] if idx < len(vals) else None
+                if not v:
+                    out.append(v)
+                    continue
+                raw = self._uncorrect(int(v), old_eq[idx] if old_eq else None)
+                raw = raw * ratio
+                out.append(max(1, int(round(self._corrected(
+                    int(round(raw)), new_eq[idx] if new_eq else None)))))
+            return out
+
+        enter_ats = convert(getattr(profile, 'enter_ats', None))
+        exit_ats = convert(getattr(profile, 'exit_ats', None))
+        self._racecontext.rhdata.alter_profile({
+            'profile_id': profile.id,
+            'enter_ats': dict(want, v=enter_ats),
+            'exit_ats': dict(want, v=exit_ats),
+        })
+        self._racecontext.race.profile = self._racecontext.rhdata.get_profile(profile.id)
+        self.hardware_set_all_enter_ats(enter_ats)
+        self.hardware_set_all_exit_ats(exit_ats)
+        logger.info("Converted EnterAt/ExitAt from %s-bit to %s-bit: enter=%s",
+                    old_bits, target_bits, enter_ats)
+        return enter_ats, exit_ats
+
+    def _stored_scale_id(self, profile):
+        """The axis the stored thresholds were written on, if it was recorded.
+
+        Profiles written before this was tracked carry no marker; they are
+        legacy 8-bit with no correction, which is all the older code produced.
+        """
+        raw = getattr(profile, 'enter_ats', None)
+        if not raw:
+            return None
+        try:
+            stored = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if 'adc_bits' not in stored:
+            return {'adc_bits': 10, 'eq': None}
+        return {'adc_bits': stored.get('adc_bits'), 'eq': stored.get('eq')}
+
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
         logger.debug("Sending enter-at values to nodes: " + str(enter_at_levels))
