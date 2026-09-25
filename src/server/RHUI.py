@@ -768,6 +768,7 @@ class RHUI():
         """Emits the equalisation wizard position and what it has captured."""
         emit_payload = self._racecontext.calibration.eq_wizard_state()
         emit_payload['captured'] = self._racecontext.calibration.eq_captured_table()
+        emit_payload['sweep'] = self._racecontext.calibration.eq_sweep_state()
         if ('nobroadcast' in params):
             emit('eq_wizard_state', emit_payload)
         else:
