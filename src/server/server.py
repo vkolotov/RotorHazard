@@ -582,6 +582,7 @@ def render_settings():
                            led_enabled=(RaceContext.led_manager.isEnabled() or (RaceContext.cluster and RaceContext.cluster.hasRecEventsSecondaries())),
                            led_events_enabled=RaceContext.led_manager.isEnabled(),
                            vrx_enabled=RaceContext.vrx_manager.isEnabled() if RaceContext.vrx_manager else False,
+                           pilots=RaceContext.rhdata.get_pilots(),
                            num_nodes=RaceContext.race.num_nodes,
                            server_messages=RaceContext.rhui.get_ui_server_messages_str(),
                            cluster_has_secondaries=(RaceContext.cluster and RaceContext.cluster.hasSecondaries()),
@@ -1257,6 +1258,23 @@ def on_eq_wizard_apply(_data=None):
 def on_eq_wizard_query(_data=None):
     '''Report the wizard position to the asking client.'''
     RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
+
+@SOCKET_IO.on('eq_sweep_noise')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_sweep_noise(_data=None):
+    '''Capture the noise floor for an automatic sweep.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_sweep_noise()
+
+@SOCKET_IO.on('eq_sweep_level')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_sweep_level(data=None):
+    '''Sweep every channel at one signal level, commanding the VTX.'''
+    level = (data or {}).get('level')
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_sweep_level(level)
 
 @SOCKET_IO.on('cap_enter_at_btn')
 @requires_socketio_auth

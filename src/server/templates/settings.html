@@ -493,6 +493,60 @@
 			}
 		});
 
+		/* The automatic sweep shares the wizard's state message: it captures
+		   into the same places, so what one has done the other sees. */
+		socket.on('eq_wizard_state', function (msg) {
+			var sweep = msg.sweep;
+			if (!sweep) { return; }
+
+			/* Hidden entirely where no VRx controller can command a channel,
+			   rather than shown as a button that cannot work. */
+			$('#eq_sweep_row').toggle(!!sweep.available);
+
+			var btn = $('#eq_sweep_action');
+			var prog = $('#eq_sweep_progress');
+			var notice = $('#eq_sweep_notice');
+			var total = sweep.channels.length;
+
+			if (sweep.busy) {
+				btn.prop('disabled', true).text("{{ __('Sweeping') }}…");
+			} else if (msg.state == 'applied') {
+				btn.prop('disabled', true).text("{{ __('Equalised') }}");
+			} else if (sweep.stage == 'noise') {
+				btn.prop('disabled', false).data('act', 'noise')
+					.text("{{ __('Capture noise: power the VTX off') }}");
+			} else if (sweep.stage == 'high') {
+				btn.prop('disabled', false).data('act', 'high')
+					.text("{{ __('Sweep near: quad at the gate') }}");
+			} else if (sweep.stage == 'low') {
+				btn.prop('disabled', false).data('act', 'low')
+					.text("{{ __('Sweep far: move the quad away') }}");
+			} else {
+				btn.prop('disabled', true).text("{{ __('Swept') }}");
+			}
+
+			if (sweep.stage == 'ready') {
+				prog.text("{{ __('all channels captured, ready to apply') }}");
+			} else if (sweep.stage == 'noise') {
+				prog.text(total + " {{ __('channels to sweep') }}");
+			} else {
+				prog.text(sweep.captured[sweep.stage].length + ' / ' + total);
+			}
+
+			notice.text(sweep.skipped.length
+				? "{{ __('Not captured') }}: " + sweep.skipped.join(', ')
+				: '');
+		});
+
+		$('#eq_sweep_action').click(function (event) {
+			var act = $(this).data('act');
+			if (act == 'noise') {
+				socket.emit('eq_sweep_noise');
+			} else if (act) {
+				socket.emit('eq_sweep_level', {level: act});
+			}
+		});
+
 		$('#eq_wizard_action').click(function (event) {
 			socket.emit($(this).data('act') == 'apply' ? 'eq_wizard_apply' : 'eq_wizard_capture');
 		});
@@ -2856,6 +2910,31 @@
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>
 				</div>
+			</li>
+			<li id="eq_sweep_row" style="display: none;">
+				<div class="label-block">
+					<label>{{ __('Equalise Automatically') }}</label>
+					<p class="desc">{{ __('Commands the calibration quad through every channel, so the quad only has to be placed twice.') }}</p>
+				</div>
+				<ol class="form">
+					<li>
+						<div class="label-block">
+							<label for="set_eq_sweep_pilot">{{ __('Calibration pilot') }}</label>
+							<p class="desc">{{ __('The pilot whose bind phrase addresses the calibration quad.') }}</p>
+						</div>
+						<select id="set_eq_sweep_pilot" class="set-option" data-option="eq_sweep_pilot">
+							<option value="0">{{ __('None') }}</option>
+							{% for pilot in pilots %}
+							<option value="{{ pilot.id }}">{{ pilot.callsign }}</option>
+							{% endfor %}
+						</select>
+					</li>
+				</ol>
+				<div class="eq-wizard">
+					<button id="eq_sweep_action"></button>
+					<span class="eq-progress" id="eq_sweep_progress"></span>
+				</div>
+				<div id="eq_sweep_notice"></div>
 			</li>
 			<li>
 				<div class="label-block">

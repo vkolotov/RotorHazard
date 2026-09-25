@@ -42,7 +42,17 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  before: a peak only ever rises, so extremes cleared at the end of the
 #  previous step would already hold whatever the VTX did while its channel was
 #  being changed.
-EQ_SETTLE_SECONDS = 5.0
+#
+# Three seconds rather than five: the wait only has to cover the receiver
+#  settling and a pass of the running median, and where the channel was
+#  commanded rather than set by hand the change is confirmed by polling the
+#  nodes instead of by waiting out a worst case.
+EQ_SETTLE_SECONDS = 3.0
+
+# Bands the automatic sweep is willing to command. Kept to the two in use:
+#  every extra band costs the operator nothing but costs a full pass of captures,
+#  and constants fitted on one channel do not transfer to another.
+EQ_SWEEP_BANDS = ('R', 'L')
 
 class Calibration:
     def __init__(self, racecontext):
@@ -211,6 +221,14 @@ class Calibration:
         that is the "no nadir recorded" sentinel and sits above the real range.
         """
         return EQ_FULL_SCALE
+
+    def eq_scale(self, node_index):
+        """What a node's corrected reading can reach.
+
+        Public so the VTX confirmation can size its thresholds against the same
+        scale the fit uses, rather than carrying its own copy of the number.
+        """
+        return self._eq_scale(node_index)
 
     def _eq_destination(self, spans):
         """Where every node's levels should land, from the captured spans.
@@ -595,6 +613,208 @@ class Calibration:
         """Restart peak/nadir tracking on every node."""
         for idx in range(self._racecontext.race.num_nodes):
             self._racecontext.interface.reset_node_extremums(idx)
+
+    #
+    # Automatic sweep
+    #
+    # The manual wizard needs the operator to retune the quad between every
+    #  capture. Where the VTX can be commanded, the two signal levels come from
+    #  moving the quad instead - once for the whole run rather than once per
+    #  channel - and the channel changes happen here.
+    #
+
+    def eq_sweep_channels(self):
+        """Channels the sweep visits, in the order it visits them.
+
+        Only the channels nodes are actually tuned to, and only in the bands the
+        sweep is willing to command: a capture on a channel no node is watching
+        has nothing to fit.
+        """
+        out = []
+        for label in self._eq_node_channels():
+            if not label or label in out:
+                continue
+            if label[0].upper() not in EQ_SWEEP_BANDS:
+                continue
+            out.append(label)
+        return out
+
+    def eq_sweep_state(self):
+        """What the sweep needs from the operator next, and what it has done."""
+        captured = getattr(self, '_eq_captured', None) or {}
+        channels = self.eq_sweep_channels()
+        floors = captured.get('noise')
+        done = {
+            level: [c for c in channels
+                    if '{0}:{1}'.format(level, c) in captured]
+            for level in ('low', 'high')
+        }
+
+        if not floors:
+            stage = 'noise'
+        elif len(done['high']) < len(channels):
+            stage = 'high'
+        elif len(done['low']) < len(channels):
+            stage = 'low'
+        else:
+            stage = 'ready'
+
+        return {
+            'stage': stage,
+            'channels': channels,
+            'captured': done,
+            'busy': bool(getattr(self, '_eq_busy', False)),
+            'available': self._vtx().available(),
+            'skipped': list(getattr(self, '_eq_sweep_skipped', []) or []),
+        }
+
+    def _vtx(self):
+        """The VTX controller, made on first use so import order cannot matter."""
+        vtx = getattr(self, '_vtx_controller', None)
+        if vtx is None:
+            from vtx_control import VtxController
+            vtx = self._vtx_controller = VtxController(self._racecontext)
+        return vtx
+
+    @catchLogExceptionsWrapper
+    def eq_sweep_noise(self):
+        """Capture the noise floor. No quad, no channel changes.
+
+        One capture for the whole run: the floor a node shows barely moves
+        across a band compared with how much the nodes differ from each other,
+        and the segment fitted to it is the one that matters least.
+        """
+        if getattr(self, '_eq_busy', False):
+            return False
+
+        self._eq_busy = True
+        session = self._eq_session()
+        try:
+            self._racecontext.rhui.emit_eq_wizard_state()
+            self.eq_reset_extremums()
+            gevent.sleep(EQ_SETTLE_SECONDS)
+            if self._eq_session() != session:
+                logger.info('Noise capture discarded: state changed while settling')
+                return False
+
+            nodes = self._racecontext.interface.nodes
+            vals = []
+            for idx in range(self._racecontext.race.num_nodes):
+                node = nodes[idx]
+                v = node.node_nadir_rssi
+                vals.append(int(v) if v and v < node.max_rssi_value else None)
+
+            missing = [i + 1 for i in self._eq_participants() if vals[i] is None]
+            if missing:
+                msg = 'Noise capture failed: no reading on node {0}'.format(missing[0])
+                logger.warning(msg)
+                self._racecontext.rhui.emit_priority_message(msg)
+                return False
+
+            self._eq_captured = getattr(self, '_eq_captured', {})
+            self._eq_captured['noise'] = vals
+            self._eq_sweep_skipped = []
+            self._eq_note_capture_session()
+            logger.info('Equalisation captured noise: %s', vals)
+            return True
+        finally:
+            self._eq_busy = False
+            self._racecontext.rhui.emit_eq_wizard_state()
+
+    @catchLogExceptionsWrapper
+    def eq_sweep_level(self, level):
+        """Capture one signal level across every channel, commanding the VTX.
+
+        The quad stays where the operator put it. For each channel: command it,
+        confirm the nodes agree before reading anything, then capture. A channel
+        that cannot be confirmed is recorded as skipped rather than captured -
+        a reading taken while the VTX sat somewhere else would fit a plausible
+        correction to the wrong channel, which is worse than no correction.
+
+        :param level: "high" for the near position, "low" for the far one
+        :return: True when every channel was captured
+        """
+        if level not in ('low', 'high'):
+            return False
+        if getattr(self, '_eq_busy', False):
+            return False
+
+        captured = getattr(self, '_eq_captured', None) or {}
+        floors = captured.get('noise')
+        if not floors:
+            self._racecontext.rhui.emit_priority_message(
+                'Capture the noise floor before sweeping channels')
+            return False
+
+        pilot_id = self._racecontext.rhdata.get_optionInt('eq_sweep_pilot', 0)
+        if not pilot_id:
+            self._racecontext.rhui.emit_priority_message(
+                'Set the calibration pilot before sweeping channels')
+            return False
+
+        vtx = self._vtx()
+        if not vtx.available():
+            self._racecontext.rhui.emit_priority_message(
+                'No VRx controller can command a VTX channel')
+            return False
+
+        self._eq_busy = True
+        session = self._eq_session()
+        channels = self.eq_sweep_channels()
+        node_channels = self._eq_node_channels()
+        skipped = []
+        try:
+            self._racecontext.rhui.emit_eq_wizard_state()
+            for label in channels:
+                if self._eq_session() != session:
+                    logger.info('Sweep abandoned: state changed part way through')
+                    return False
+
+                try:
+                    vtx.command_channel(pilot_id, label)
+                except Exception as exc:  # noqa: BLE001 - reported, not raised
+                    logger.warning('Could not command %s: %s', label, exc)
+                    skipped.append('{0} ({1})'.format(label, exc))
+                    continue
+
+                confirmed, detail = vtx.confirm_channel(
+                    label, floors, node_channels)
+                if not confirmed:
+                    skipped.append('{0} ({1})'.format(label, detail))
+                    self._racecontext.rhui.emit_priority_message(
+                        'Skipped {0}: {1}'.format(label, detail))
+                    continue
+
+                # Confirmation already watched the nodes settle on this channel,
+                #  so read the extremes it was tracking rather than clearing
+                #  them and waiting again.
+                nodes = self._racecontext.interface.nodes
+                vals = []
+                for idx in range(self._racecontext.race.num_nodes):
+                    node = nodes[idx]
+                    v = node.node_peak_rssi
+                    vals.append(int(v) if v and v < node.max_rssi_value else None)
+
+                self._eq_captured = getattr(self, '_eq_captured', {})
+                self._eq_captured['{0}:{1}'.format(level, label)] = vals
+                self._eq_note_capture_session()
+                logger.info('Equalisation captured %s:%s (%s): %s',
+                            level, label, detail, vals)
+
+            self._eq_sweep_skipped = skipped
+            if skipped:
+                self._racecontext.rhui.emit_priority_message(
+                    '{0} of {1} channels captured; skipped: {2}'.format(
+                        len(channels) - len(skipped), len(channels),
+                        ', '.join(skipped)))
+                return False
+
+            self._racecontext.rhui.emit_priority_message(
+                'Captured {0} on {1} channels'.format(level, len(channels)))
+            return True
+        finally:
+            self._eq_busy = False
+            self._racecontext.rhui.emit_eq_wizard_state()
 
     def hardware_set_all_equalisation(self):
         """Re-send the stored calibration; nodes keep nothing across a power cycle."""
