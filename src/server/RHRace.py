@@ -736,15 +736,21 @@ class RHRace():
                 new_race = self._racecontext.rhdata.add_savedRaceMeta(new_race_data)
                 self.db_id = new_race.id
 
-                # Record the correction this race was timed under. Adaptive
-                #  calibration restores thresholds out of race history, and a
-                #  threshold only means the same signal while the correction
-                #  that produced it still holds.
-                self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
-                    'race_attr': 'eq_signature',
-                    'value': json.dumps(
-                        self._racecontext.calibration._eq_signature()),
-                    })
+                # Record the axis this race was timed on. Adaptive calibration
+                #  restores thresholds out of race history, and a threshold
+                #  only means the same signal while both halves of that axis -
+                #  the ADC width and the correction - still hold.
+                adc_bits = self._racecontext.calibration.current_adc_bits()
+                if adc_bits:
+                    self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
+                        'race_attr': 'adc_bits',
+                        'value': str(adc_bits),
+                        })
+                    self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
+                        'race_attr': 'eq_signature',
+                        'value': json.dumps(
+                            self._racecontext.calibration._eq_signature(adc_bits)),
+                        })
 
                 race_data = {}
 

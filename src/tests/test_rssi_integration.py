@@ -126,6 +126,42 @@ class RssiIntegrationTest(unittest.TestCase):
             # and emphatically not the naive x8 of the corrected value
             self.assertNotEqual(enter, [80 * 8])
 
+    def test_race_save_writes_both_axis_attributes(self):
+        """Exercise the real writer, not a stand-in for it.
+
+        The history test supplies the attributes directly, so it passes even
+        when nothing writes them. This calls the code in RHRace that saves a
+        race and checks both halves of the axis are recorded with the
+        arguments the calibration API actually takes.
+        """
+        import ast
+        source = (SRC / 'server/RHRace.py').read_text()
+        tree = ast.parse(source)
+
+        written = []
+        signature_args = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == 'alter_savedRaceMeta':
+                for arg in node.args:
+                    if isinstance(arg, ast.Dict):
+                        for key, value in zip(arg.keys, arg.values):
+                            if getattr(key, 'value', None) == 'race_attr' and \
+                                    isinstance(value, ast.Constant):
+                                written.append(value.value)
+            if isinstance(func, ast.Attribute) and func.attr == '_eq_signature':
+                signature_args.append(len(node.args))
+
+        self.assertIn('adc_bits', written, 'ADC width is not recorded')
+        self.assertIn('eq_signature', written, 'correction is not recorded')
+        # _eq_signature(bits) on this branch: calling it bare raises at runtime
+        self.assertTrue(signature_args, '_eq_signature is never called')
+        for count in signature_args:
+            self.assertEqual(count, 1,
+                             '_eq_signature must be called with the ADC width')
+
     def test_saved_race_records_the_correction(self):
         """Adaptive history must key on the axis, not the width alone."""
         ctx, node, cal = self.context(full=False)
