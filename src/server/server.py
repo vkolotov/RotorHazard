@@ -2,7 +2,7 @@
 RELEASE_VERSION = "4.5.1-dev.3" # Public release version code
 SERVER_API = 49 # Server API version
 NODE_API_SUPPORTED = 18 # Minimum supported node version
-NODE_API_BEST = 37 # Most recent node API
+NODE_API_BEST = 38 # Most recent node API
 JSON_API = 3 # JSON API version
 MIN_PYTHON_MAJOR_VERSION = 3 # minimum python version (3.10)
 MIN_PYTHON_MINOR_VERSION = 10
@@ -960,6 +960,8 @@ def on_load_data(data):
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
             RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
+
+            RaceContext.rhui.emit_rssi_resolution_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -1624,9 +1626,24 @@ def on_set_profile(data, emit_vals=True):
                 heartbeat_thread_function.imdtabler_flag = True
 
         RaceContext.interface.set_all_frequencies(freqs)
-        RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
-        RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
+        # the width has to be settled before any threshold is sent, since it
+        #  changes what those numbers mean
+        full_res = RaceContext.serverconfig.get_item('GENERAL', 'FULL_RSSI_RESOLUTION')
+        for idx in range(RaceContext.race.num_nodes):
+            RaceContext.interface.set_adc_resolution(idx, full_res)
+        # Equalisation before thresholds: a threshold is compared against the
+        #  corrected reading, so the correction has to be in force before the
+        #  axis it belongs to is known.
         RaceContext.calibration.hardware_set_all_equalisation()
+        # A profile that was not open when the width last changed still holds
+        #  thresholds from the old axis. Convert it now; a profile already on
+        #  this axis is left alone.
+        converted = RaceContext.calibration.convert_thresholds_to_scale()
+        if converted and converted[0] is not None:
+            enter_ats, exit_ats = converted
+        else:
+            RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
+            RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
 
     else:
         logger.warning('Invalid set_profile value: ' + str(profile_val))
@@ -2751,13 +2768,88 @@ def on_set_option(data):
         'value': data['value'],
         })
 
+def apply_rssi_resolution(full_resolution):
+    """Push the ADC width to every node and say what it means.
+
+    Changing the width multiplies every reading by about eight, so existing
+    EnterAt/ExitAt values and any saved race trace were recorded on the other
+    scale. Nothing is rewritten - the operator re-runs calibration - but they
+    are told plainly rather than left to discover it mid-race.
+    """
+    applied = 0
+    refused = []
+    for idx in range(RaceContext.race.num_nodes):
+        node = RaceContext.interface.nodes[idx]
+        if node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
+            if RaceContext.interface.set_adc_resolution(idx, full_resolution):
+                applied += 1
+            else:
+                refused.append(idx + 1)
+
+    if refused:
+        msg = __("RSSI resolution was not confirmed by node(s) {0}; they are "
+                 "still on the previous width").format(
+                     ', '.join(str(n) for n in refused))
+        logger.warning(msg)
+        RaceContext.rhui.set_ui_message('rssi-resolution-partial', msg,
+                                        header='Warning', subclass='rssi-scale')
+    if applied:
+        logger.info("RSSI resolution set to %s on %d node(s)",
+                    "high (12 bit)" if full_resolution else "low (8 bit)", applied)
+        RaceContext.rhui.set_ui_message(
+            'rssi-resolution',
+            __("RSSI resolution changed. EnterAt/ExitAt were rescaled to match. "
+               "Node equalisation was cleared and must be run again, and "
+               "adaptive calibration will ignore races recorded on the old scale."),
+            header='Warning', subclass='rssi-scale')
+    elif full_resolution:
+        logger.info("Full RSSI resolution requested but no node supports it")
+        RaceContext.rhui.set_ui_message(
+            'rssi-resolution',
+            __("No connected node supports full RSSI resolution; the setting has "
+               "no effect."),
+            header='Notice', subclass='rssi-scale')
+
 @SOCKET_IO.on('set_config')
 @requires_socketio_auth
 @catchLogExceptionsWrapper
 def on_set_config(data):
+    if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
+        # DONE means a finished race is still unsaved. Switching now would
+        #  staple new-scale thresholds onto history recorded on the old one.
+        if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE) \
+                or getattr(RaceContext.calibration, '_eq_busy', False):
+            RaceContext.rhui.emit_priority_message(__('Save or discard the current race, and wait for calibration to finish, before changing RSSI resolution.'))
+            RaceContext.rhui.emit_rssi_resolution_state()
+            return
+        # Re-sending the current setting must not convert the thresholds a
+        #  second time; the conversion is keyed on the stored scale, but there
+        #  is no reason to touch the nodes at all.
+        if bool(data['value']) == bool(RaceContext.serverconfig.get_item(
+                'GENERAL', 'FULL_RSSI_RESOLUTION')):
+            RaceContext.rhui.emit_rssi_resolution_state()
+            return
     RaceContext.serverconfig.set_item(data['section'], data['key'], data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'ADMIN_SOCKET_AUTH':
         AdminAuth.set_admin_socket_auth_enabled(data['value'])
+    if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
+        apply_rssi_resolution(data['value'])
+        RaceContext.calibration._eq_captured = {}
+        # Equalisation first: a threshold is a corrected value, so the axis it
+        #  has to land on is only known once the correction in force is
+        #  settled. Equalisation itself cannot be converted and is dropped when
+        #  the width changes.
+        RaceContext.calibration.hardware_set_all_equalisation()
+        RaceContext.calibration.convert_thresholds_to_scale()
+        # Reset last, and only once the new width and thresholds have settled.
+        #  A node crossing during the change re-fills its pass peak from the
+        #  old scale, and a pass peak only updates while crossing, so an early
+        #  reset leaves that value frozen on screen.
+        gevent.sleep(0.5)
+        RaceContext.calibration.eq_reset_extremums()
+        RaceContext.rhui.emit_eq_wizard_state()
+        RaceContext.rhui.emit_rssi_resolution_state()
+        RaceContext.rhui.emit_enter_and_exit_at_levels()
     if data['section'] == 'GENERAL' and data['key'] == 'DEBUG' and data['value'] is False:
         apply_default_admin_creds_if_blank()
     elif data['section'] == 'SECRETS' and not RaceContext.serverconfig.get_item('GENERAL', 'DEBUG'):

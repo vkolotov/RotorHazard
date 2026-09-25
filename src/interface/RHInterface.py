@@ -26,6 +26,8 @@ READ_EQ_OFFSET_UP = 0x35
 READ_EQ_SLOPE_UP = 0x36
 READ_EQ_OFFSET_LO = 0x37
 READ_EQ_SLOPE_LO = 0x38
+
+READ_ADC_RESOLUTION = 0x41
 READ_TIME_MILLIS = 0x33      # read current 'millis()' time value
 READ_MULTINODE_COUNT = 0x39  # read # of nodes handled by processor
 READ_CURNODE_INDEX = 0x3A    # read index of current node for processor
@@ -45,6 +47,8 @@ WRITE_EQ_SLOPE_UP = 0x66
 WRITE_EQ_OFFSET_LO = 0x67
 WRITE_EQ_SLOPE_LO = 0x68
 RESET_NODE_EXTREMUMS = 0x69
+
+WRITE_ADC_RESOLUTION = 0x6A
 WRITE_CURNODE_INDEX = 0x7A  # write index of current node for processor
 SEND_STATUS_MESSAGE = 0x75  # send status message from server to node
 FORCE_END_CROSSING = 0x78   # kill current crossing flag regardless of RSSI value
@@ -72,6 +76,9 @@ RHFEAT_JUMPTO_BOOTLDR = 0x0008  # JUMP_TO_BOOTLOADER command supported
 RHFEAT_IAP_FIRMWARE = 0x0010    # in-application programming of firmware supported
 
 UPDATE_SLEEP = float(os.environ.get('RH_UPDATE_INTERVAL', '0.1')) # Main update loop delay
+LEGACY_ADC_BITS = 10
+FULL_ADC_BITS = 12
+
 MAX_RETRY_COUNT = 4 # Limit of I/O retries
 MAX_FREQUENCY_RETRY_COUNT = 4 # Limit of retries for frequency setting
 MIN_RSSI_VALUE = 1               # reject RSSI readings below this value
@@ -126,7 +133,9 @@ def validate_checksum(data):
     return checksum == data[-1]
 
 def unpack_rssi(node, data):
-    if node.api_level >= 18:
+    if node.has_wide_rssi():
+        return unpack_16(data)
+    elif node.api_level >= 18:
         return unpack_8(data)
     else:
         return unpack_16(data) / 2
@@ -238,7 +247,12 @@ class RHInterface(BaseHardwareInterface):
         for node in self.nodes:
             if node.frequency:
                 if node.api_valid_flag or node.api_level >= 5:
-                    if node.api_level >= 32:
+                    if node.has_wide_rssi():
+                        # 16-bit RSSI widens both payloads to 11 bytes
+                        data = node.read_block(self, READ_LAP_PASS_STATS, 11)
+                        if data != None:
+                            data.extend(node.read_block(self, READ_LAP_EXTREMUMS, 11))
+                    elif node.api_level >= 32:
                         data = node.read_block(self, READ_LAP_PASS_STATS, 8)
                         if data != None:
                             data.extend(node.read_block(self, READ_LAP_EXTREMUMS, 8))
@@ -262,7 +276,24 @@ class RHInterface(BaseHardwareInterface):
                 if data != None and len(data) > 0:
                     lap_id = data[0]
 
-                    if node.api_level >= 18:
+                    if node.has_wide_rssi():
+                        # 16-bit RSSI fields; derived from the node write order:
+                        #  lap(1) ms(2) rssi(2) nodePeak(2) passPeak(2) loopTime(2)
+                        #  then flags(1) passNadir(2) nodeNadir(2) extremum(6)
+                        offset_rssi = 3
+                        offset_nodePeakRssi = 5
+                        offset_passPeakRssi = 7
+                        offset_loopTime = 9
+                        offset_lapStatsFlags = 11
+                        offset_passNadirRssi = 12
+                        offset_nodeNadirRssi = 14
+                        offset_peakRssi = 16
+                        offset_peakFirstTime = 18
+                        offset_peakDuration = 20
+                        offset_nadirRssi = 16
+                        offset_nadirFirstTime = 18
+                        offset_nadirDuration = 20
+                    elif node.api_level >= 18:
                         offset_rssi = 3
                         offset_nodePeakRssi = 4
                         offset_passPeakRssi = 5
@@ -520,13 +551,13 @@ class RHInterface(BaseHardwareInterface):
         return success
 
     def set_and_validate_value_rssi(self, node, write_command, read_command, in_value):
-        if node.api_level >= 18:
+        if node.api_level >= 18 and not node.has_wide_rssi():
             return self.set_and_validate_value_8(node, write_command, read_command, in_value)
         else:
             return self.set_and_validate_value_16(node, write_command, read_command, in_value)
 
     def get_value_rssi(self, node, command):
-        if node.api_level >= 18:
+        if node.api_level >= 18 and not node.has_wide_rssi():
             return self.get_value_8(node, command)
         else:
             return self.get_value_16(node, command)
@@ -608,9 +639,7 @@ class RHInterface(BaseHardwareInterface):
         if not node.api_valid_flag or node.api_level < 37:
             return False
         # Pivot 0 first so the correction is off while the coefficients are in
-        #  flux - writing the real pivot first leaves the node correcting with
-        #  a half-updated fit - and pivot last so it only comes on once they
-        #  are all in.
+        #  flux, and pivot last so it only comes on once they are all in.
         for cmd, read_cmd, value in (
                 (WRITE_EQ_PIVOT, READ_EQ_PIVOT, 0),
                 (WRITE_EQ_OFFSET_UP, READ_EQ_OFFSET_UP, offset_up & 0xFFFF),
@@ -650,8 +679,46 @@ class RHInterface(BaseHardwareInterface):
         node = self.nodes[node_index]
         if node.api_valid_flag and node.api_level >= 37:
             self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
+            # Mirror what the node clears, or the stale server-side copies keep
+            #  being drawn until the next pass replaces them.
+            #  Zero, not max_rssi_value: the node uses MAX_RSSI internally to
+            #  mean "no nadir seen yet" and the read path filters that sentinel
+            #  out via is_valid_rssi(), but these fields go straight to the UI,
+            #  where it would show up as a bare 65535.
             node.node_peak_rssi = 0
-            node.node_nadir_rssi = node.max_rssi_value
+            node.node_nadir_rssi = 0
+            node.pass_peak_rssi = 0
+            node.pass_nadir_rssi = 0
+            node.debug_pass_count = 0
+
+    def set_adc_resolution(self, node_index, full_resolution):
+        """Choose the ADC width the node reads at.
+
+        Only STM32 nodes can do anything with this; AVR nodes report 10 bits
+        and ignore the write. Full resolution multiplies every reading by
+        about eight, so it is the operator's choice and defaults to off.
+
+        Returns True only when the node read the new width back. Everything
+        downstream - what a stored threshold means, whether equalisation still
+        applies - depends on the width the hardware is actually on, so a write
+        that was never acknowledged must not be recorded as one that was.
+        """
+        node = self.nodes[node_index]
+        if not node.api_valid_flag or node.api_level < 38 or not node.has_wide_rssi():
+            return False
+        bits = FULL_ADC_BITS if full_resolution else LEGACY_ADC_BITS
+        self.set_and_validate_value_8(node, WRITE_ADC_RESOLUTION,
+                                      READ_ADC_RESOLUTION, bits)
+        # Read back directly: set_and_validate_value_8() reports the requested
+        #  value when every read returned nothing, which is indistinguishable
+        #  from success.
+        confirmed = self.get_value_8(node, READ_ADC_RESOLUTION)
+        if confirmed == bits:
+            node.adc_resolution = bits
+            return True
+        self.log('ADC resolution not confirmed on node {0}: wanted {1}, read {2}'.format(
+            node.index + 1, bits, confirmed))
+        return False
 
     def force_end_crossing(self, node_index):
         node = self.nodes[node_index]

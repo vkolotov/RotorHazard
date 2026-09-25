@@ -297,6 +297,7 @@ def discover(idxOffset, config, isS32BPillFlag=False, *args, **kwargs):
                     node.api_level = api_level
                     node_version_str = None
                     node_timestamp_str = None
+                    node_proctype_str = None
                     fver_log_str = ''
                     ftyp_log_str = ''
                     ftim_log_str = ''
@@ -307,6 +308,7 @@ def discover(idxOffset, config, isS32BPillFlag=False, *args, **kwargs):
                             fver_log_str = ", fw_version=" + node.firmware_version_str
                             if node.api_level >= 35:
                                 node.read_firmware_proctype()
+                                node_proctype_str = node.firmware_proctype_str
                                 if node.firmware_proctype_str:
                                     ftyp_log_str = ", fw_type=" + node.firmware_proctype_str
                         node.read_firmware_timestamp()
@@ -345,6 +347,7 @@ def discover(idxOffset, config, isS32BPillFlag=False, *args, **kwargs):
                             node.api_level = api_level
                             node.firmware_version_str = node_version_str
                             node.firmware_timestamp_str = node_timestamp_str
+                            node.firmware_proctype_str = node_proctype_str
                             node.read_node_slot_index()
                             logger.debug("Serial (multi) node {} (slot={}) added for port '{}'".format(\
                                          index+idxOffset+1, node.multi_node_slot_index+1, node.serial.name))

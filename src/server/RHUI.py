@@ -773,6 +773,21 @@ class RHUI():
         else:
             self._socket.emit('eq_wizard_state', emit_payload)
 
+    def emit_rssi_resolution_state(self, **params):
+        """Emits the RSSI resolution setting and whether any node can honour it."""
+        supported = any(
+            node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi()
+            for node in self._racecontext.interface.nodes)
+        emit_payload = {
+            'full': bool(self._racecontext.serverconfig.get_item(
+                'GENERAL', 'FULL_RSSI_RESOLUTION')),
+            'supported': supported,
+        }
+        if ('nobroadcast' in params):
+            emit('rssi_resolution_state', emit_payload)
+        else:
+            self._socket.emit('rssi_resolution_state', emit_payload)
+
     def emit_cluster_status(self, **params):
         '''Emits cluster status information.'''
         if self._racecontext.cluster:
