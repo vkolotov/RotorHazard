@@ -37,13 +37,16 @@ class EqualisationTest(unittest.TestCase):
             id=1, frequencies=json.dumps({'b': ['R'] * count,
                                           'c': list(range(1, count + 1))}))
         ctx = SimpleNamespace(race=SimpleNamespace(profile=profile, num_nodes=count),
-                              interface=Mock(nodes=nodes), rhui=Mock(), rhdata=Mock())
+                              interface=Mock(nodes=nodes), rhui=Mock(), rhdata=Mock(),
+                              events=Mock())
         def save(data):
             for key, value in data.items():
                 if key != 'profile_id':
                     setattr(profile, key, json.dumps(value))
             return profile
         ctx.rhdata.alter_profile.side_effect = save
+        ctx.rhdata.get_profile.return_value = profile
+        ctx.interface.set_equalisation.return_value = True
         return ctx, nodes, Calibration(ctx)
 
     def test_fit_passes_through_the_captured_levels(self):
@@ -52,6 +55,7 @@ class EqualisationTest(unittest.TestCase):
             ctx, _, cal = self.context()
             cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
                                         ([v] for v in values)))
+            cal._eq_note_capture_session()
             self.assertTrue(cal.eq_wizard_apply())
             _, pivot, ou, su, ol, sl = ctx.interface.set_equalisation.call_args.args
             targets = cal._eq_destination([(values[1] - values[0],
@@ -125,6 +129,41 @@ class EqualisationTest(unittest.TestCase):
         before = cal._eq_session()
         cal._eq_invalidate_session()
         self.assertNotEqual(cal._eq_session(), before)
+
+    def test_apply_moves_thresholds_onto_the_new_axis(self):
+        """A threshold is a corrected value, so applying a fit must move it."""
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            ctx.race.profile.enter_ats = json.dumps({'v': [169]})
+            ctx.race.profile.exit_ats = json.dumps({'v': [160]})
+            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                        ([v] for v in (90, 150, 210))))
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+            stored = json.loads(ctx.race.profile.enter_ats)
+            # the raw level 169 is unchanged; its corrected value is not 169
+            self.assertIsNotNone(stored['eq'])
+            self.assertNotEqual(stored['v'], [169])
+            self.assertEqual(cal._uncorrect(stored['v'][0], stored['eq'][0]), 169)
+
+    def test_apply_refuses_when_a_node_does_not_confirm(self):
+        """An unconfirmed write leaves the axis unknown, not merely changed."""
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            ctx.interface.set_equalisation.return_value = False
+            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                        ([v] for v in (90, 150, 210))))
+            cal._eq_note_capture_session()
+            self.assertFalse(cal.eq_wizard_apply())
+
+    def test_captures_do_not_survive_a_profile_change(self):
+        """A complete capture set belongs to the configuration that made it."""
+        ctx, _, cal = self.context()
+        cal._eq_captured = {'noise': [90], 'low:R1': [150], 'high:R1': [210]}
+        cal._eq_note_capture_session()
+        self.assertTrue(cal._eq_captures_are_current())
+        ctx.race.profile.id = 2
+        self.assertFalse(cal._eq_captures_are_current())
 
     def test_capture_rejects_noise_only_signal(self):
         ctx, _, cal = self.context()

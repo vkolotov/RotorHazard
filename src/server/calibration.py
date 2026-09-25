@@ -73,6 +73,9 @@ class Calibration:
             enter_ats["v"].append(None)
 
         enter_ats["v"][seat_index] = enter_at_level
+        # Re-stamp the axis: the value just written was measured against the
+        #  correction in force now, whatever the rest of the record still says.
+        enter_ats.update(self.threshold_scale_id())
 
         profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
@@ -112,6 +115,7 @@ class Calibration:
             exit_ats["v"].append(None)
 
         exit_ats["v"][seat_index] = exit_at_level
+        exit_ats.update(self.threshold_scale_id())
 
         profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
@@ -261,6 +265,12 @@ class Calibration:
         busy = getattr(self, '_eq_busy', False)
         steps = self._eq_steps()
 
+        if captured and not self._eq_captures_are_current():
+            # measured against a configuration that is no longer loaded
+            logger.info('Discarding equalisation captures: configuration changed')
+            captured = {}
+            self._eq_captured = {}
+
         if not captured and any(self._eq_stored('eq_pivots', 0)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration
@@ -306,14 +316,36 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def _eq_session(self):
-        """Identifies the state a capture belongs to.
+        """Identifies the configuration a capture belongs to.
 
-        Includes the profile, so switching profiles mid-wizard invalidates a
-        capture in flight rather than filing it against the wrong one.
+        Actual frequencies rather than channel labels, so a retune that keeps
+        the label - or one the label cannot express - still counts as a
+        different configuration.
         """
+        try:
+            freqs = json.loads(self._racecontext.race.profile.frequencies)
+            tuning = tuple(freqs.get('f') or [])
+        except (TypeError, ValueError, AttributeError):
+            tuning = ()
         return (getattr(self, '_eq_epoch', 0),
                 getattr(self._racecontext.race.profile, 'id', None),
-                tuple(self._eq_node_channels()))
+                tuning)
+
+    def _eq_captures_are_current(self):
+        """True when the captures on hand belong to the configuration in use.
+
+        A capture set survives between steps, so it can outlive the profile it
+        was measured under; fitting it afterwards would describe the wrong
+        receivers.
+        """
+        captured = getattr(self, '_eq_captured', None)
+        if not captured:
+            return True
+        return getattr(self, '_eq_captured_session', None) == self._eq_session()
+
+    def _eq_note_capture_session(self):
+        """Record which configuration the current capture set belongs to."""
+        self._eq_captured_session = self._eq_session()
 
     def _eq_invalidate_session(self):
         """Drop any capture still settling."""
@@ -359,6 +391,7 @@ class Calibration:
 
             self._eq_captured = getattr(self, '_eq_captured', {})
             self._eq_captured[key] = vals
+            self._eq_note_capture_session()
             logger.info('Equalisation captured %s: %s', key, vals)
             return True
         finally:
@@ -390,10 +423,17 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_invalidate_session()
+        previous_axis = self.threshold_scale_id()
         num = self._racecontext.race.num_nodes
-        self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
-        for idx in range(num):
-            self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256)
+        self._eq_busy = True
+        try:
+            self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
+            for idx in range(num):
+                self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256)
+        finally:
+            self._eq_busy = False
+        # Clearing the correction moves the axis just as applying one does.
+        self.convert_thresholds_to_scale(from_axis=previous_axis)
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
@@ -489,16 +529,41 @@ class Calibration:
             offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
             offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
-        self._eq_store(pivots, offset_ups, slope_ups, offset_los, slope_los)
-        for idx in range(num):
-            self._racecontext.interface.set_equalisation(
-                idx, pivots[idx], offset_ups[idx], slope_ups[idx],
-                offset_los[idx], slope_los[idx])
+        # The axis the thresholds are on right now, before the new fit lands.
+        previous_axis = self.threshold_scale_id()
 
-        gevent.sleep(0.5)
-        self.eq_reset_extremums()
-        gevent.sleep(0.5)
-        self.eq_reset_extremums()
+        self._eq_busy = True
+        try:
+            self._eq_store(pivots, offset_ups, slope_ups, offset_los, slope_los)
+            failed = []
+            for idx in range(num):
+                if not self._racecontext.interface.set_equalisation(
+                        idx, pivots[idx], offset_ups[idx], slope_ups[idx],
+                        offset_los[idx], slope_los[idx]):
+                    failed.append(idx + 1)
+
+            gevent.sleep(0.5)
+            self.eq_reset_extremums()
+            gevent.sleep(0.5)
+            self.eq_reset_extremums()
+        finally:
+            self._eq_busy = False
+
+        if failed:
+            # The stored fit no longer describes the hardware, so the axis is
+            #  unknown rather than merely different. Say so instead of
+            #  converting thresholds onto an axis that may not exist.
+            msg = ('Equalisation was not accepted by node(s) {0}; '
+                   'their correction is unknown - re-run calibration before '
+                   'racing').format(', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return False
+
+        # Applying a fit moves the axis every threshold is measured against,
+        #  so the stored thresholds have to move with it.
+        self.convert_thresholds_to_scale(from_axis=previous_axis)
 
         self._eq_captured = {}
         self._racecontext.rhui.emit_eq_wizard_state()
@@ -548,11 +613,23 @@ class Calibration:
         return not failed
 
     def current_adc_bits(self):
-        """The width the nodes are sampling at right now."""
+        """The width the nodes are sampling at right now.
+
+        None when the fleet is not on one width. Every node on a multi-node
+        board shares its processor, so this only arises with two boards of
+        different types on separate serial ports - out of scope here, and
+        reported rather than averaged over.
+        """
         nodes = self._racecontext.interface.nodes
         if not nodes:
             return None
-        return 12 if any(node_full_resolution(node) for node in nodes) else 10
+        widths = {12 if node_full_resolution(node) else 10 for node in nodes}
+        if len(widths) > 1:
+            logger.warning('Nodes are not on one ADC width (%s); '
+                           'threshold and equalisation scaling need a single '
+                           'width and will be skipped', sorted(widths))
+            return None
+        return widths.pop()
 
     def threshold_scale_id(self, bits=None):
         """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
@@ -608,7 +685,7 @@ class Calibration:
             return int(round(value * 256.0 / slope_up)) + off_up if slope_up else value
         return int(round(value * 256.0 / slope_lo)) + off_lo if slope_lo else value
 
-    def convert_thresholds_to_scale(self, target_bits=None):
+    def convert_thresholds_to_scale(self, target_bits=None, from_axis=None):
         """Move stored EnterAt/ExitAt onto the axis the nodes are on now.
 
         A threshold is a corrected value, not a raw one, so it cannot simply be
@@ -629,7 +706,10 @@ class Calibration:
             return None, None
 
         want = self.threshold_scale_id(target_bits)
-        have = self._stored_scale_id(profile)
+        # `from_axis` is the axis the caller knows the values are on, for the
+        #  case where the stored record has already been overwritten - applying
+        #  a fit stores the new coefficients before the thresholds move.
+        have = from_axis if from_axis is not None else self._stored_scale_id(profile)
         if have == want:
             return None, None  # already on this axis
 
@@ -723,18 +803,46 @@ class Calibration:
         self._racecontext.rhui.emit_enter_and_exit_at_levels()  # one broadcast for all nodes
 
     def _race_matches_resolution(self, race):
-        """True if this saved race was timed at the width now in use.
+        """True if this saved race was timed on the axis now in use.
 
-        Races saved before the width became switchable carry no tag; they are
-        8-bit, because that is all the firmware of the time could produce.
+        Adaptive calibration restores EnterAt/ExitAt straight out of race
+        history, so a race is only reusable while the axis that produced it
+        still holds - both the ADC width and the correction, since either one
+        changes what a stored number means.
+
+        Races saved before this was tracked carry no tag; they are 8-bit with
+        no correction, which is all the firmware of the time could produce.
         """
         current = self.current_adc_bits()
         if current is None:
             return True
         tagged = self._racecontext.rhdata.get_savedrace_attribute_value(
             race, 'adc_bits', None)
-        stored = int(tagged) if tagged else 10
-        return stored == current
+        stored_bits = int(tagged) if tagged else 10
+        if stored_bits != current:
+            return False
+        stored_eq = self._racecontext.rhdata.get_savedrace_attribute_value(
+            race, 'eq_signature', None)
+        live_eq = self._eq_signature(current)
+        return self._eq_signature_key(stored_eq) == self._eq_signature_key(live_eq)
+
+    @staticmethod
+    def _eq_signature_key(signature):
+        """A comparable form of an equalisation signature.
+
+        Stored ones arrive as JSON text, live ones as lists; None and the
+        string "null" both mean no correction.
+        """
+        if signature is None or signature == 'null':
+            return None
+        if isinstance(signature, str):
+            try:
+                signature = json.loads(signature)
+            except (TypeError, ValueError):
+                return None
+        if not signature:
+            return None
+        return json.dumps(signature, sort_keys=True)
 
     def find_best_calibration_values(self, node, seat_index):
         ''' Search race history for best tuning values '''

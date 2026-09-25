@@ -36,13 +36,18 @@ class RssiIntegrationTest(unittest.TestCase):
         node.init()
         profile = SimpleNamespace(id=1, frequencies=json.dumps({'b': ['R'], 'c': [1]}))
         ctx = SimpleNamespace(race=SimpleNamespace(profile=profile, num_nodes=1),
-                              interface=Mock(nodes=[node]), rhui=Mock(), rhdata=Mock())
+                              interface=Mock(nodes=[node]), rhui=Mock(), rhdata=Mock(),
+                              events=Mock())
         def save(data):
             for key, value in data.items():
                 if key != 'profile_id':
                     setattr(profile, key, json.dumps(value))
             return profile
         ctx.rhdata.alter_profile.side_effect = save
+        ctx.rhdata.get_profile.return_value = profile
+        # The hardware accepts writes unless a test says otherwise; apply now
+        #  refuses to record a fit the nodes did not confirm.
+        ctx.interface.set_equalisation.return_value = True
         return ctx, node, Calibration(ctx)
 
     def test_fit_anchors_in_both_adc_modes(self):
@@ -50,6 +55,7 @@ class RssiIntegrationTest(unittest.TestCase):
             with self.subTest(full=full), patch('calibration.gevent.sleep'):
                 ctx, node, cal = self.context(full)
                 cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'), ([v] for v in values)))
+                cal._eq_note_capture_session()
                 self.assertTrue(cal.eq_wizard_apply())
                 _, pivot, ou, su, ol, sl = ctx.interface.set_equalisation.call_args.args
                 targets = cal._eq_destination([(values[1]-values[0], values[2]-values[1])])
@@ -81,6 +87,65 @@ class RssiIntegrationTest(unittest.TestCase):
             self.assertEqual(cal._uncorrect(cal._corrected(raw, coeffs), coeffs), raw)
         # and a naive x8 would have produced 640 rather than the raw-equivalent
         self.assertNotEqual(cal._uncorrect(80, coeffs) * 8, 80 * 8)
+
+    def test_apply_then_manual_then_switch_keeps_the_physical_level(self):
+        """The sequence the review asked for, end to end.
+
+        Apply a fit, set a threshold by hand against the corrected reading,
+        then switch resolution. The stored number has to keep meaning the same
+        physical signal, which it only does if the axis travels with it at
+        every step rather than being assumed.
+        """
+        with patch('calibration.gevent.sleep'):
+            ctx, node, cal = self.context(full=False)
+            ctx.rhdata.get_profile.return_value = ctx.race.profile
+            ctx.race.profile.enter_ats = json.dumps({'v': [None]})
+            ctx.race.profile.exit_ats = json.dumps({'v': [None]})
+            ctx.interface.set_equalisation.return_value = True
+
+            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                        ([v] for v in (90, 150, 210))))
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+
+            # a threshold set by hand is measured against the corrected reading
+            node.enter_at_level = 80
+            cal.set_enter_at_level(0, 80, emit_levels=False)
+            axis = cal._stored_scale_id(ctx.race.profile)
+            self.assertEqual(axis['adc_bits'], 10)
+            self.assertIsNotNone(axis['eq'])  # the correction is recorded
+
+            raw_before = cal._uncorrect(80, axis['eq'][0])
+
+            # switching drops the correction, so the axis becomes raw 12-bit
+            node.adc_resolution = 12
+            ctx.race.profile.eq_pivots = json.dumps(
+                {'v': [150], 'adc_bits': [10]})  # fitted at 10, now stale
+            enter, _ = cal.convert_thresholds_to_scale()
+            self.assertEqual(enter, [raw_before * 8])
+            # and emphatically not the naive x8 of the corrected value
+            self.assertNotEqual(enter, [80 * 8])
+
+    def test_saved_race_records_the_correction(self):
+        """Adaptive history must key on the axis, not the width alone."""
+        ctx, node, cal = self.context(full=False)
+        ctx.race.profile.eq_pivots = json.dumps({'v': [150], 'adc_bits': [10]})
+        ctx.race.profile.eq_offset_ups = json.dumps({'v': [89]})
+        ctx.race.profile.eq_slope_ups = json.dumps({'v': [256]})
+        ctx.race.profile.eq_offset_los = json.dumps({'v': [89]})
+        ctx.race.profile.eq_slope_los = json.dumps({'v': [256]})
+        live = cal._eq_signature(10)
+        self.assertIsNotNone(live)
+
+        race = object()
+        values = {'adc_bits': '10', 'eq_signature': json.dumps(live)}
+        ctx.rhdata.get_savedrace_attribute_value.side_effect = \
+            lambda r, name, default=None: values.get(name, default)
+        self.assertTrue(cal._race_matches_resolution(race))
+
+        # same width, different correction -> not reusable
+        values['eq_signature'] = json.dumps([[151, 89, 256, 89, 256]])
+        self.assertFalse(cal._race_matches_resolution(race))
 
     def test_resolution_conversion_is_idempotent(self):
         """Converting a profile already on the target axis must do nothing."""
