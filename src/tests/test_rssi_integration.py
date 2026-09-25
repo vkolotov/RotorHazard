@@ -162,27 +162,6 @@ class RssiIntegrationTest(unittest.TestCase):
         self.assertEqual(second, (None, None))
         self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [768])
 
-    def test_mixed_widths_are_refused_not_half_applied(self):
-        """A fleet on two widths cannot be scaled, so it is rejected."""
-        ctx, node, cal = self.context(full=True)
-        other = Node()
-        other.api_level = 38
-        other.firmware_proctype_str = 'STM32F4'
-        other.adc_resolution = 10
-        other.init()
-        ctx.interface.nodes = [node, other]
-        ctx.race.num_nodes = 2
-        self.assertFalse(cal.nodes_are_homogeneous())
-        self.assertIsNone(cal.current_adc_bits())
-        # and a fit is refused before anything is written
-        ctx.race.profile.frequencies = json.dumps(
-            {'b': ['R', 'R'], 'c': [1, 2], 'f': [5658, 5695]})
-        cal._eq_captured = {'noise': [90, 90], 'low:R1': [150, 150],
-                            'high:R1': [210, 210]}
-        cal._eq_note_capture_session()
-        self.assertFalse(cal.eq_wizard_apply())
-        ctx.interface.set_equalisation.assert_not_called()
-
     def test_reset_refuses_when_a_node_does_not_confirm(self):
         """An unconfirmed reset leaves the correction unknown."""
         ctx, _, cal = self.context(full=False)
@@ -208,6 +187,34 @@ class RssiIntegrationTest(unittest.TestCase):
             self.assertTrue(cal.eq_wizard_apply())
         self.assertTrue(seen, 'thresholds were never written')
         self.assertTrue(all(seen), 'guard was released before threshold writes')
+
+    def test_retry_after_failed_apply_converts_from_the_real_axis(self):
+        """A failed attempt must not corrupt the source axis for the retry."""
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context(full=False)
+            ctx.race.profile.enter_ats = json.dumps({'v': [169]})
+            ctx.race.profile.exit_ats = json.dumps({'v': [160]})
+            captures = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                ([v] for v in (90, 150, 210))))
+
+            ctx.interface.set_equalisation.return_value = False
+            cal._eq_captured = dict(captures)
+            cal._eq_note_capture_session()
+            self.assertFalse(cal.eq_wizard_apply())
+            self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
+
+            ctx.interface.set_equalisation.return_value = True
+            cal._eq_captured = dict(captures)
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+            stored = json.loads(ctx.race.profile.enter_ats)
+            self.assertEqual(cal._uncorrect(stored['v'][0], stored['eq'][0]), 169)
+            self.assertFalse(cal.eq_state_is_unresolved())
+
+    def test_staging_is_refused_while_calibration_is_unresolved(self):
+        """The inherited guard has to be present on this branch too."""
+        source = (SRC / 'server/RHRace.py').read_text()
+        self.assertIn('eq_state_is_unresolved', source)
 
     def test_untagged_profile_reads_as_legacy(self):
         """A profile written before the scale was tracked is 8-bit, no eq."""

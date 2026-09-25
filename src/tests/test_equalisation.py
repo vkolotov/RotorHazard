@@ -234,6 +234,68 @@ class EqualisationTest(unittest.TestCase):
         values.clear()
         self.assertFalse(cal._race_matches_correction(race))
 
+    def test_retry_after_failed_apply_converts_from_the_real_axis(self):
+        """A failed attempt must not corrupt the source axis for the retry.
+
+        The failure persists the desired coefficients while leaving the
+        thresholds alone, so the axis has to be read from the record that
+        travels with the thresholds, not from the coefficients.
+        """
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            ctx.race.profile.enter_ats = json.dumps({'v': [169]})
+            ctx.race.profile.exit_ats = json.dumps({'v': [160]})
+            captures = dict(zip(('noise', 'low:R1', 'high:R1'),
+                                ([v] for v in (90, 150, 210))))
+
+            ctx.interface.set_equalisation.return_value = False
+            cal._eq_captured = dict(captures)
+            cal._eq_note_capture_session()
+            self.assertFalse(cal.eq_wizard_apply())
+            self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
+
+            # retry, this time the nodes take it
+            ctx.interface.set_equalisation.return_value = True
+            cal._eq_captured = dict(captures)
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+            stored = json.loads(ctx.race.profile.enter_ats)
+            self.assertEqual(cal._uncorrect(stored['v'][0], stored['eq'][0]), 169)
+            self.assertNotEqual(stored['v'], [169])
+            self.assertFalse(cal.eq_state_is_unresolved())
+
+    def test_retry_after_failed_reset_converts_from_the_real_axis(self):
+        """Same for the reverse path: a failed reset then a good one."""
+        ctx, _, cal = self.context()
+        corrected = {'v': [80], 'eq': [[150, 89, 256, 89, 256]]}
+        ctx.race.profile.enter_ats = json.dumps(corrected)
+        ctx.race.profile.exit_ats = json.dumps(corrected)
+        ctx.race.profile.eq_pivots = json.dumps({'v': [150]})
+        ctx.race.profile.eq_offset_ups = json.dumps({'v': [89]})
+        ctx.race.profile.eq_slope_ups = json.dumps({'v': [256]})
+        ctx.race.profile.eq_offset_los = json.dumps({'v': [89]})
+        ctx.race.profile.eq_slope_los = json.dumps({'v': [256]})
+
+        ctx.interface.set_equalisation.return_value = False
+        self.assertFalse(cal.eq_wizard_reset())
+        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [80])
+
+        ctx.interface.set_equalisation.return_value = True
+        self.assertTrue(cal.eq_wizard_reset())
+        # correction is gone, so the threshold returns to the raw level
+        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
+        self.assertFalse(cal.eq_state_is_unresolved())
+
+    def test_reset_holds_the_guard_through_its_tracking_reset(self):
+        """The final tracking reset is a hardware mutation too."""
+        seen = []
+        ctx, _, cal = self.context()
+        ctx.interface.reset_node_extremums.side_effect = \
+            lambda *a, **k: seen.append(cal._eq_busy)
+        self.assertTrue(cal.eq_wizard_reset())
+        self.assertTrue(seen, 'tracking was never reset')
+        self.assertTrue(all(seen), 'guard released before the tracking reset')
+
     def test_capture_rejects_noise_only_signal(self):
         ctx, _, cal = self.context()
         cal._eq_captured = {'noise': [700], 'low:R1': [702], 'high:R1': [704]}

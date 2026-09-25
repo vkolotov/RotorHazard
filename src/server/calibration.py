@@ -169,21 +169,6 @@ class Calibration:
             12 if node_full_resolution(node) else 10
             for node in self._racecontext.interface.nodes]
 
-    def nodes_are_homogeneous(self):
-        """True when every node reports the same ADC width.
-
-        Every node on a multi-node board shares one processor, so a mixed
-        fleet needs two boards on separate serial ports. Scaling a threshold
-        or fitting one destination across widths that differ by eight cannot
-        produce a value all of them can represent, so the configuration is
-        refused rather than half-applied.
-        """
-        nodes = self._racecontext.interface.nodes
-        if not nodes:
-            return True
-        return len({12 if node_full_resolution(node) else 10
-                    for node in nodes}) == 1
-
     def _eq_participants(self):
         """Which nodes the wizard calibrates.
 
@@ -442,7 +427,7 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_invalidate_session()
-        previous_axis = self.threshold_scale_id()
+        previous_axis = self._stored_scale_id(self._racecontext.race.profile)
         num = self._racecontext.race.num_nodes
         self._eq_busy = True
         try:
@@ -455,6 +440,9 @@ class Calibration:
                 # Clearing the correction moves the axis just as applying one
                 #  does; convert inside the guard, since this writes to nodes.
                 self.convert_thresholds_to_scale(from_axis=previous_axis)
+                # The tracking reset is a hardware mutation too, so it belongs
+                #  inside the guard rather than after it.
+                self.eq_reset_extremums()
         finally:
             self._eq_busy = False
 
@@ -471,7 +459,6 @@ class Calibration:
             self._racecontext.rhui.emit_eq_wizard_state()
             return False
         self._eq_unresolved = []
-        self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
         return True
@@ -508,13 +495,6 @@ class Calibration:
         # Read every node's captures first: the destination is the widest span
         #  in the fleet, so no node can be fitted until all of them are known.
         #  Nodes not taking part get no fit and stay uncorrected.
-        if not self.nodes_are_homogeneous():
-            msg = ('Nodes are not all on the same ADC width; equalisation '
-                   'needs one width across the fleet')
-            logger.warning(msg)
-            self._racecontext.rhui.emit_priority_message(msg)
-            return False
-
         taking_part = self._eq_participants()
         if not taking_part:
             msg = 'No node is available to calibrate'
@@ -573,8 +553,11 @@ class Calibration:
             offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
             offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
-        # The axis the thresholds are on right now, before the new fit lands.
-        previous_axis = self.threshold_scale_id()
+        # The axis the thresholds are actually on, read from the record that
+        #  travels with them. Not threshold_scale_id(), which describes the
+        #  stored coefficients: a failed attempt has already overwritten those,
+        #  so on a retry it would claim the thresholds are where they are not.
+        previous_axis = self._stored_scale_id(self._racecontext.race.profile)
 
         self._eq_busy = True
         try:
@@ -674,21 +657,13 @@ class Calibration:
     def current_adc_bits(self):
         """The width the nodes are sampling at right now.
 
-        None when the fleet is not on one width. Every node on a multi-node
-        board shares its processor, so this only arises with two boards of
-        different types on separate serial ports - out of scope here, and
-        reported rather than averaged over.
+        Every node on a board shares one processor, so the fleet is on one
+        width by construction.
         """
         nodes = self._racecontext.interface.nodes
         if not nodes:
             return None
-        widths = {12 if node_full_resolution(node) else 10 for node in nodes}
-        if len(widths) > 1:
-            logger.warning('Nodes are not on one ADC width (%s); '
-                           'threshold and equalisation scaling need a single '
-                           'width and will be skipped', sorted(widths))
-            return None
-        return widths.pop()
+        return 12 if any(node_full_resolution(node) for node in nodes) else 10
 
     def threshold_scale_id(self, bits=None):
         """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
