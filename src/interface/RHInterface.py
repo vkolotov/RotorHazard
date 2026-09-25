@@ -606,17 +606,32 @@ class RHInterface(BaseHardwareInterface):
         """
         node = self.nodes[node_index]
         if not node.api_valid_flag or node.api_level < 37:
-            return
+            return False
+        # Pivot 0 first so the correction is off while the coefficients are in
+        #  flux - writing the real pivot first leaves the node correcting with
+        #  a half-updated fit - and pivot last so it only comes on once they
+        #  are all in.
         for cmd, read_cmd, value in (
-                (WRITE_EQ_PIVOT, READ_EQ_PIVOT, pivot),
+                (WRITE_EQ_PIVOT, READ_EQ_PIVOT, 0),
                 (WRITE_EQ_OFFSET_UP, READ_EQ_OFFSET_UP, offset_up & 0xFFFF),
                 (WRITE_EQ_SLOPE_UP, READ_EQ_SLOPE_UP, slope_up),
                 (WRITE_EQ_OFFSET_LO, READ_EQ_OFFSET_LO, offset_lo & 0xFFFF),
-                (WRITE_EQ_SLOPE_LO, READ_EQ_SLOPE_LO, slope_lo)):
+                (WRITE_EQ_SLOPE_LO, READ_EQ_SLOPE_LO, slope_lo),
+                (WRITE_EQ_PIVOT, READ_EQ_PIVOT, pivot)):
             self.set_and_validate_value_16(node, cmd, read_cmd, value)
+        # Read the pivot back rather than trusting the setter's return, which
+        #  reports the requested value when every read came back empty. A
+        #  threshold is compared against the corrected reading, so believing a
+        #  correction the node never took would misplace every threshold.
+        confirmed = self.get_value_16(node, READ_EQ_PIVOT)
+        if confirmed != pivot:
+            self.log('Equalisation not confirmed on node {0}: pivot wanted {1}, read {2}'.format(
+                node.index + 1, pivot, confirmed))
+            return False
         node.eq_pivot = pivot
         node.eq_offset_up, node.eq_slope_up = offset_up, slope_up
         node.eq_offset_lo, node.eq_slope_lo = offset_lo, slope_lo
+        return True
 
     def reset_node_extremums(self, node_index):
         """Restart peak/nadir tracking on the node itself.

@@ -132,19 +132,51 @@ class Calibration:
         """A stored per-node calibration list, padded to the node count."""
         profile = self._racecontext.race.profile
         raw = getattr(profile, field, None)
-        vals = json.loads(raw)["v"] if raw else []
+        try:
+            vals = json.loads(raw)["v"] if raw else []
+        except (TypeError, ValueError, KeyError):
+            vals = []  # never calibrated, or written by older code
         out = []
         for idx in range(self._racecontext.race.num_nodes):
             v = vals[idx] if idx < len(vals) else None
             out.append(default if v is None else v)
         return out
 
-    def _eq_node_channels(self):
-        """The channel label each node is tuned to, one per node."""
+    def _eq_participants(self):
+        """Which nodes the wizard calibrates.
+
+        A node with no frequency is not receiving anything, and a node whose
+        firmware predates the protocol will ignore the coefficients. Neither
+        can contribute a capture, so neither should be able to hold the wizard
+        open or have a fit computed for it.
+        """
         freqs = json.loads(self._racecontext.race.profile.frequencies)
-        bands, chans = freqs.get('b') or [], freqs.get('c') or []
+        f = freqs.get('f') or []
+        nodes = self._racecontext.interface.nodes
         out = []
         for idx in range(self._racecontext.race.num_nodes):
+            if idx < len(f) and not f[idx]:
+                continue
+            node = nodes[idx] if idx < len(nodes) else None
+            if node is not None and getattr(node, 'api_level', 0) < 37:
+                continue
+            out.append(idx)
+        return out
+
+    def _eq_node_channels(self):
+        """The channel label each node is tuned to, one per node.
+
+        Nodes that are not participating get None, so they raise no step of
+        their own and are skipped by the fit.
+        """
+        freqs = json.loads(self._racecontext.race.profile.frequencies)
+        bands, chans = freqs.get('b') or [], freqs.get('c') or []
+        taking_part = set(self._eq_participants())
+        out = []
+        for idx in range(self._racecontext.race.num_nodes):
+            if idx not in taking_part:
+                out.append(None)
+                continue
             band = bands[idx] if idx < len(bands) else None
             chan = chans[idx] if idx < len(chans) else None
             out.append('{0}{1}'.format(band, chan) if band and chan
@@ -160,6 +192,8 @@ class Calibration:
         steps = [('noise', None)]
         seen = []
         for label in self._eq_node_channels():
+            if label is None:
+                continue  # node is not taking part
             if label not in seen:
                 seen.append(label)
                 steps.append(('low', label))
@@ -251,6 +285,20 @@ class Calibration:
         } for i in range(num)]
 
     @catchLogExceptionsWrapper
+    def _eq_session(self):
+        """Identifies the state a capture belongs to.
+
+        Includes the profile, so switching profiles mid-wizard invalidates a
+        capture in flight rather than filing it against the wrong one.
+        """
+        return (getattr(self, '_eq_epoch', 0),
+                getattr(self._racecontext.race.profile, 'id', None),
+                tuple(self._eq_node_channels()))
+
+    def _eq_invalidate_session(self):
+        """Drop any capture still settling."""
+        self._eq_epoch = getattr(self, '_eq_epoch', 0) + 1
+
     def eq_wizard_capture(self):
         """Capture the next step: clear the extremes, settle, then read."""
         state = self.eq_wizard_state()
@@ -258,10 +306,18 @@ class Calibration:
             return False
 
         self._eq_busy = True
+        # Anything that changes what a capture would mean - a reset, a step
+        #  back, a profile change - bumps this. The sleep below is long enough
+        #  for that to happen underneath us, and a reading taken before the
+        #  change must not be filed against the state after it.
+        session = self._eq_session()
         try:
             self._racecontext.rhui.emit_eq_wizard_state()
             self.eq_reset_extremums()
             gevent.sleep(EQ_SETTLE_SECONDS)
+            if self._eq_session() != session:
+                logger.info('Equalisation capture discarded: state changed while settling')
+                return False
 
             level = state['level']
             key = level if state['channel'] is None \
@@ -273,9 +329,10 @@ class Calibration:
                 v = node.node_nadir_rssi if level == 'noise' else node.node_peak_rssi
                 vals.append(int(v) if v and v < node.max_rssi_value else None)
 
-            if level == 'noise' and any(v is None for v in vals):
-                msg = 'Noise capture failed: no reading on node {0}'.format(
-                    vals.index(None) + 1)
+            taking_part = self._eq_participants()
+            missing = [i + 1 for i in taking_part if vals[i] is None]
+            if level == 'noise' and missing:
+                msg = 'Noise capture failed: no reading on node {0}'.format(missing[0])
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
@@ -298,6 +355,7 @@ class Calibration:
                  for l, c in self._eq_steps()]
         last = [k for k in order if k in captured][-1]
         del captured[last]
+        self._eq_invalidate_session()
         logger.info('Equalisation stepped back, discarded %s', last)
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
@@ -311,6 +369,7 @@ class Calibration:
         against uncorrected readings, so a fresh run has to start from raw.
         """
         self._eq_captured = {}
+        self._eq_invalidate_session()
         num = self._racecontext.race.num_nodes
         self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
         for idx in range(num):
@@ -350,8 +409,15 @@ class Calibration:
 
         # Read every node's captures first: the destination is the widest span
         #  in the fleet, so no node can be fitted until all of them are known.
-        levels = []
-        for idx in range(num):
+        #  Nodes not taking part get no fit and stay uncorrected.
+        taking_part = self._eq_participants()
+        if not taking_part:
+            msg = 'No node is available to calibrate'
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            return False
+        levels = {}
+        for idx in taking_part:
             label = labels[idx]
             lo = captured.get('low:{0}'.format(label), [None] * num)[idx]
             hi = captured.get('high:{0}'.format(label), [None] * num)[idx]
@@ -369,13 +435,22 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            levels.append((fl, lo, hi))
+            levels[idx] = (fl, lo, hi)
 
-        destination = self._eq_destination([(lo - fl, hi - lo) for fl, lo, hi in levels])
+        destination = self._eq_destination(
+            [(lo - fl, hi - lo) for fl, lo, hi in levels.values()])
         logger.info('Equalisation destination from captured spans: %s', destination)
 
         pivots, offset_ups, slope_ups, offset_los, slope_los = [], [], [], [], []
         for idx in range(num):
+            if idx not in levels:
+                # not taking part: pivot 0 leaves this node uncorrected
+                pivots.append(0)
+                slope_ups.append(256)
+                slope_los.append(256)
+                offset_ups.append(0)
+                offset_los.append(0)
+                continue
             fl, lo, hi = levels[idx]
 
             t_floor, t_low, t_high = destination
@@ -423,10 +498,19 @@ class Calibration:
         slope_ups = self._eq_stored('eq_slope_ups', 256)
         offset_los = self._eq_stored('eq_offset_los', 0)
         slope_los = self._eq_stored('eq_slope_los', 256)
+        failed = []
         for idx in range(self._racecontext.race.num_nodes):
-            self._racecontext.interface.set_equalisation(
-                idx, pivots[idx], offset_ups[idx], slope_ups[idx],
-                offset_los[idx], slope_los[idx])
+            if not self._racecontext.interface.set_equalisation(
+                    idx, pivots[idx], offset_ups[idx], slope_ups[idx],
+                    offset_los[idx], slope_los[idx]):
+                failed.append(idx + 1)
+        if failed:
+            msg = ('Equalisation was not accepted by node(s) {0}; '
+                   'those nodes are running uncorrected').format(
+                       ', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+        return not failed
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''

@@ -1204,33 +1204,52 @@ def on_set_language(data):
     '''Set interface language.'''
     RaceContext.serverconfig.set_item('UI', 'currentLanguage', data['language'])
 
+def eq_wizard_mutation_allowed():
+    '''Whether the wizard may touch the nodes right now.
+
+    Capturing resets peak/nadir tracking and applying changes the RSSI axis
+    every threshold is measured against, so neither may happen while a race is
+    running, or while a finished race is still unsaved and about to record the
+    live thresholds.
+    '''
+    if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE):
+        RaceContext.rhui.emit_priority_message(
+            __('Save or discard the current race before calibrating.'), False)
+        RaceContext.rhui.emit_eq_wizard_state()
+        return False
+    return True
+
 @SOCKET_IO.on('eq_wizard_capture')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
 def on_eq_wizard_capture(_data=None):
     '''Capture the wizard's next step.'''
-    RaceContext.calibration.eq_wizard_capture()
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_capture()
 
 @SOCKET_IO.on('eq_wizard_back')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
 def on_eq_wizard_back(_data=None):
     '''Discard the last captured step.'''
-    RaceContext.calibration.eq_wizard_back()
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_back()
 
 @SOCKET_IO.on('eq_wizard_reset')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
 def on_eq_wizard_reset(_data=None):
     '''Clear the calibration and start again.'''
-    RaceContext.calibration.eq_wizard_reset()
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_reset()
 
 @SOCKET_IO.on('eq_wizard_apply')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
 def on_eq_wizard_apply(_data=None):
     '''Fit and apply the captured calibration.'''
-    RaceContext.calibration.eq_wizard_apply()
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_apply()
 
 @SOCKET_IO.on('eq_wizard_query')
 @requires_socketio_auth
@@ -2499,6 +2518,14 @@ def cancel_schedule_race(*args):
 @SOCKET_IO.on('stage_race')
 @requires_socketio_auth
 def on_stage_race(*args):
+    # Calibration rewrites coefficients on the nodes and clears their peak
+    #  tracking; starting a race in the middle of that would time it against
+    #  an axis that is still moving.
+    if getattr(RaceContext.calibration, '_eq_busy', False):
+        RaceContext.rhui.emit_priority_message(
+            __('Wait for calibration to finish before starting a race.'), False)
+        RaceContext.rhui.emit_race_status()
+        return
     result = RaceContext.race.stage(*args)
     if not result:
         RaceContext.rhui.emit_race_status()

@@ -2528,6 +2528,14 @@ class RHData():
             frequencies = source_profile.frequencies,
             enter_ats = source_profile.enter_ats,
             exit_ats = source_profile.exit_ats,
+            # The thresholds above are measured against the corrected reading,
+            #  so the correction has to come with them; a copy without it would
+            #  keep thresholds calibrated for an axis it no longer has.
+            eq_pivots = source_profile.eq_pivots,
+            eq_offset_ups = source_profile.eq_offset_ups,
+            eq_slope_ups = source_profile.eq_slope_ups,
+            eq_offset_los = source_profile.eq_offset_los,
+            eq_slope_los = source_profile.eq_slope_los,
             f_ratio = 100)
         Database.DB_session.add(new_profile)
 
