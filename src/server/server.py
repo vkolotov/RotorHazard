@@ -1259,6 +1259,14 @@ def on_eq_wizard_query(_data=None):
     '''Report the wizard position to the asking client.'''
     RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
 
+@SOCKET_IO.on('eq_wizard_mode')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_mode(data=None):
+    '''Choose manual or automatic calibration.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_set_mode((data or {}).get('mode'))
+
 @SOCKET_IO.on('eq_sweep_noise')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper

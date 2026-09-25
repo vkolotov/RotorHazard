@@ -3,6 +3,8 @@
 The sweep's job is to refuse to capture anything it cannot confirm, so most of
 these check that a channel which did not change is skipped rather than measured.
 """
+import gevent.event
+import gevent.lock
 import json
 from pathlib import Path
 import sys
@@ -142,6 +144,7 @@ class SweepTest(unittest.TestCase):
     def test_sweep_captures_every_confirmed_channel(self):
         ctx, nodes, cal = self.context(count=2)
         sent = self.controller(ctx)
+        cal._eq_mode = 'auto'
         cal._eq_captured = {'noise': [90, 90]}
         cal._eq_note_capture_session()
 
@@ -164,6 +167,7 @@ class SweepTest(unittest.TestCase):
         """
         ctx, nodes, cal = self.context(count=2)
         self.controller(ctx)
+        cal._eq_mode = 'auto'
         cal._eq_captured = {'noise': [90, 90]}
         cal._eq_note_capture_session()
 
@@ -183,6 +187,7 @@ class SweepTest(unittest.TestCase):
         """Excess is measured against the floor, so the floor comes first."""
         ctx, _, cal = self.context(count=2)
         self.controller(ctx)
+        cal._eq_mode = 'auto'
         with patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
 
@@ -190,6 +195,7 @@ class SweepTest(unittest.TestCase):
         ctx, _, cal = self.context(count=2)
         self.controller(ctx)
         ctx.rhdata.get_optionInt.return_value = 0
+        cal._eq_mode = 'auto'
         cal._eq_captured = {'noise': [90, 90]}
         cal._eq_note_capture_session()
         with patch('calibration.gevent.sleep'):
@@ -199,6 +205,66 @@ class SweepTest(unittest.TestCase):
         ctx, _, cal = self.context(count=2)
         ctx.vrx_manager = SimpleNamespace(controllers={})
         self.assertFalse(cal.eq_sweep_state()['available'])
+
+    #
+    # Choosing a method
+    #
+
+    def test_wizard_offers_the_choice_before_anything_is_captured(self):
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        state = cal.eq_wizard_state()
+        self.assertEqual(state['state'], 'choosing')
+        self.assertIsNone(state['mode'])
+
+    def test_choosing_manual_arms_the_manual_steps(self):
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        self.assertTrue(cal.eq_wizard_set_mode('manual'))
+        state = cal.eq_wizard_state()
+        self.assertEqual(state['state'], 'capturing')
+        self.assertEqual(state['level'], 'noise')
+        self.assertEqual(state['mode'], 'manual')
+
+    def test_auto_is_refused_without_a_controller_to_command_with(self):
+        ctx, _, cal = self.context(count=2)
+        ctx.vrx_manager = SimpleNamespace(controllers={})
+        self.assertFalse(cal.eq_wizard_set_mode('auto'))
+        self.assertIsNone(cal.eq_wizard_mode())
+
+    def test_the_method_cannot_change_part_way_through_a_run(self):
+        """Captures taken one way would be compared against ones taken the other."""
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        cal.eq_wizard_set_mode('auto')
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+        self.assertFalse(cal.eq_wizard_set_mode('manual'))
+        self.assertEqual(cal.eq_wizard_mode(), 'auto')
+
+    def test_manual_capture_is_refused_in_automatic_mode(self):
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        cal.eq_wizard_set_mode('auto')
+        with patch('calibration.gevent.sleep'):
+            self.assertFalse(cal.eq_wizard_capture())
+
+    def test_sweeping_is_refused_in_manual_mode(self):
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        cal.eq_wizard_set_mode('manual')
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+        with patch('calibration.gevent.sleep'):
+            self.assertFalse(cal.eq_sweep_level('high'))
+
+    def test_back_from_the_first_step_returns_to_the_choice(self):
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        cal.eq_wizard_set_mode('manual')
+        self.assertTrue(cal.eq_wizard_back())
+        self.assertIsNone(cal.eq_wizard_mode())
+        self.assertEqual(cal.eq_wizard_state()['state'], 'choosing')
 
     def test_sweep_stage_advances_with_what_has_been_captured(self):
         ctx, _, cal = self.context(count=2)

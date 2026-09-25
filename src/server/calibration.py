@@ -257,11 +257,44 @@ class Calibration:
                 t_floor + int(round(low_span)),
                 t_floor + int(round(low_span + band_span)))
 
+    def eq_wizard_mode(self):
+        """Which way the run is being calibrated, or None before that is chosen.
+
+        The two ways capture into the same places but ask different things of the
+        operator, so mixing them part way through a run would leave captures that
+        cannot be compared. Choosing up front keeps each run to one method.
+        """
+        return getattr(self, '_eq_mode', None)
+
+    @catchLogExceptionsWrapper
+    def eq_wizard_set_mode(self, mode):
+        """Choose manual or automatic calibration for this run.
+
+        Refused once a run is under way: the captures on hand were taken the
+        other way and would be compared against ones that were not.
+
+        :param mode: "manual" or "auto"
+        """
+        if mode not in ('manual', 'auto'):
+            return False
+        if getattr(self, '_eq_captured', None):
+            return False
+        if mode == 'auto' and not self._vtx().available():
+            self._racecontext.rhui.emit_priority_message(
+                'No VRx controller can command a VTX channel')
+            return False
+
+        self._eq_mode = mode
+        logger.info('Equalisation mode set to %s', mode)
+        self._racecontext.rhui.emit_eq_wizard_state()
+        return True
+
     def eq_wizard_state(self):
         """Where the wizard is: the next step, or done."""
         captured = getattr(self, '_eq_captured', None) or {}
         busy = getattr(self, '_eq_busy', False)
         steps = self._eq_steps()
+        mode = self.eq_wizard_mode()
 
         if captured and not self._eq_captures_are_current():
             # measured against a configuration that is no longer loaded
@@ -274,17 +307,28 @@ class Calibration:
             #  cannot start overwriting a good calibration
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
-                    'settle': EQ_SETTLE_SECONDS}
+                    'mode': mode, 'settle': EQ_SETTLE_SECONDS}
+
+        if mode is None and not captured:
+            # Nothing captured and no method chosen: offer the choice rather
+            #  than arming a step, so neither way starts by accident. Captures
+            #  already in hand mean a run is under way - one started before the
+            #  mode was recorded, or carried across a restart - and those are
+            #  finished and applied on the manual path rather than discarded.
+            return {'state': 'choosing', 'level': None, 'channel': None,
+                    'index': 0, 'total': len(steps), 'busy': busy,
+                    'mode': None, 'settle': EQ_SETTLE_SECONDS}
 
         for level, chan in steps:
             key = level if chan is None else '{0}:{1}'.format(level, chan)
             if key not in captured:
                 return {'state': 'capturing', 'level': level, 'channel': chan,
                         'index': len(captured), 'total': len(steps),
-                        'busy': busy, 'settle': EQ_SETTLE_SECONDS}
+                        'busy': busy, 'mode': mode,
+                        'settle': EQ_SETTLE_SECONDS}
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
-                'settle': EQ_SETTLE_SECONDS}
+                'mode': mode, 'settle': EQ_SETTLE_SECONDS}
 
     def eq_captured_table(self):
         """Per-node view for the UI: what has been captured, or what is applied."""
@@ -349,6 +393,11 @@ class Calibration:
         state = self.eq_wizard_state()
         if state['state'] != 'capturing' or getattr(self, '_eq_busy', False):
             return False
+        if state['mode'] == 'auto':
+            # The automatic sweep captures the same keys a different way; taking
+            #  a manual reading part way through one would mix the two. An unset
+            #  mode is the manual path, so a run already under way can finish.
+            return False
 
         self._eq_busy = True
         # Anything that changes what a capture would mean - a reset, a step
@@ -393,10 +442,21 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def eq_wizard_back(self):
-        """Drop the most recent capture and return to that step."""
+        """Drop the most recent capture and return to that step.
+
+        With nothing captured there is no step to go back to, so this returns to
+        the choice of method instead - that is what the operator is one step
+        away from, and it lets a wrong choice be undone without a reset.
+        """
         captured = getattr(self, '_eq_captured', None) or {}
         if not captured:
-            return False
+            if self.eq_wizard_mode() is None:
+                return False
+            self._eq_mode = None
+            self._eq_sweep_skipped = []
+            logger.info('Equalisation returned to the choice of method')
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return True
         order = [l if c is None else '{0}:{1}'.format(l, c)
                  for l, c in self._eq_steps()]
         last = [k for k in order if k in captured][-1]
@@ -420,6 +480,9 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_invalidate_session()
+        # Back to offering the choice: the next run picks its own method.
+        self._eq_mode = None
+        self._eq_sweep_skipped = []
         previous_axis = self._stored_scale_id(self._racecontext.race.profile)
         num = self._racecontext.race.num_nodes
         self._eq_busy = True
@@ -686,6 +749,8 @@ class Calibration:
         """
         if getattr(self, '_eq_busy', False):
             return False
+        if self.eq_wizard_mode() != 'auto':
+            return False
 
         self._eq_busy = True
         session = self._eq_session()
@@ -737,6 +802,8 @@ class Calibration:
         if level not in ('low', 'high'):
             return False
         if getattr(self, '_eq_busy', False):
+            return False
+        if self.eq_wizard_mode() != 'auto':
             return False
 
         captured = getattr(self, '_eq_captured', None) or {}
