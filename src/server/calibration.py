@@ -29,11 +29,13 @@ EQ_HEADROOM_FRACTION = 0.5
 EQ_FULL_SCALE_BYTE = 255
 EQ_FULL_SCALE_WIDE = 4095
 
-# Minimum gap between adjacent captured levels. A node that never saw the quad
-#  reads only noise and would otherwise get an absurd slope. Deliberately loose:
-#  a node high on its detector curve compresses legitimately - one measured
-#  fleet had a 188-count low-to-high step against another node's 497.
-EQ_MIN_LEVEL_GAP = 60
+# Minimum gap between adjacent captured levels, as a fraction of full scale.
+#  A node that never saw the quad reads only noise and would otherwise get an
+#  absurd slope. Deliberately loose: a node high on its detector curve
+#  compresses legitimately - one measured fleet spanned 4.6% to 7.1% of scale
+#  between its low and high levels, so anything above a few percent is real.
+#  A fraction rather than a count, so it follows the width of the pipeline.
+EQ_MIN_LEVEL_FRACTION = 0.015
 
 # How long to watch a node after clearing its extremes, before reading them.
 #  The clear has to happen after the operator has set the condition up, not
@@ -370,7 +372,7 @@ class Calibration:
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
             # Legacy readings are about eight times smaller than 12-bit raw.
-            min_gap = EQ_MIN_LEVEL_GAP if node_full_resolution(self._racecontext.interface.nodes[idx]) else max(1, round(EQ_MIN_LEVEL_GAP / 8))
+            min_gap = max(1, EQ_MIN_LEVEL_FRACTION * self._eq_scale(idx))
             if (hi - lo) < min_gap or (lo - fl) < min_gap:
                 msg = ('Node {0} levels are too close together '
                        '(noise={1}, low={2}, high={3})').format(idx + 1, fl, lo, hi)

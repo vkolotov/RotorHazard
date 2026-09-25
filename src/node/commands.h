@@ -4,7 +4,7 @@
 #include "io.h"
 
 // API level for node; increment when commands are modified
-#define NODE_API_LEVEL 37
+#define NODE_API_LEVEL 38
 
 class Message
 {

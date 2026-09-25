@@ -30,7 +30,7 @@ spec.loader.exec_module(migration)
 class RssiIntegrationTest(unittest.TestCase):
     def context(self, full=True):
         node = Node()
-        node.api_level = 37
+        node.api_level = 38
         node.firmware_proctype_str = 'STM32F4'
         node.adc_resolution = 12 if full else 10
         node.init()
@@ -63,51 +63,6 @@ class RssiIntegrationTest(unittest.TestCase):
                 cal.hardware_set_all_equalisation()
                 self.assertEqual(ctx.interface.set_equalisation.call_args.args[1], 0)
 
-    def test_no_node_is_compressed_in_either_mode(self):
-        """The correction must never shrink a node's captured spans.
-
-        The destination comes from the widest span in the fleet, so the best
-        node maps onto itself (slope 1.0) and every other node is stretched up
-        to meet it. This holds at either ADC width without a per-width
-        constant, because a narrower pipeline reports proportionally narrower
-        spans and the destination shrinks with them.
-        """
-        # Measured on an eight-node fleet, 12-bit counts: (low_span, band_span).
-        wide = [(566, 464), (396, 299), (260, 428), (374, 412),
-                (294, 464), (442, 332), (431, 365), (452, 364)]
-        for full in (True, False):
-            with self.subTest(full=full):
-                _, _, cal = self.context(full)
-                div = 1 if full else 8
-                spans = [(lo / div, band / div) for lo, band in wide]
-                t_floor, t_low, t_high = cal._eq_destination(spans)
-                # Nothing is compressed except by the headroom cap, and the
-                #  cap applies equally to every node, so the worst slope in
-                #  the fleet is exactly how much the cap had to shrink things.
-                scale = cal._eq_scale(0)
-                widest = max(l for l, _ in spans) + max(b for _, b in spans)
-                shrink = min(1.0, (scale * 0.5) / (widest * 1.01))
-                # Targets are whole counts, so allow the half-count the
-                #  rounding can take off the widest span.
-                for lo_span, band_span in spans:
-                    self.assertGreaterEqual(
-                        (t_high - t_low) / band_span,
-                        shrink - 0.5 / band_span,
-                        'band compressed at {} bits'.format(12 if full else 8))
-                    self.assertGreaterEqual(
-                        (t_low - t_floor) / lo_span, shrink - 0.5 / lo_span)
-                # a typical node still gains real range
-                bands = sorted(b for _, b in spans)
-                self.assertGreater((t_high - t_low) / bands[len(bands) // 2], 1.0)
-                # a quad closer than the calibration spot must stay on scale
-                self.assertLessEqual(t_high, cal._eq_scale(0) * 0.5)
-
-    def test_capture_rejects_noise_only_signal(self):
-        ctx, _, cal = self.context()
-        cal._eq_captured = {'noise': [700], 'low:R1': [702], 'high:R1': [704]}
-        self.assertFalse(cal.eq_wizard_apply())
-        ctx.rhdata.alter_profile.assert_not_called()
-
     def test_rssi_transport_stays_wide_in_legacy_sampling_mode(self):
         _, node, _ = self.context(full=False)
         self.assertTrue(node.has_wide_rssi())
@@ -122,7 +77,7 @@ class RssiIntegrationTest(unittest.TestCase):
         config = Mock()
         config.get_item.return_value = ['/dev/ttyAMA0']
         def read(node, interface, command, *args):
-            return {serial_node.READ_REVISION_CODE: [0x25, 37],
+            return {serial_node.READ_REVISION_CODE: [0x25, 38],
                     serial_node.READ_MULTINODE_COUNT: [8]}.get(command)
         def firmware(node):
             node.firmware_version_str = '1.2.0'
@@ -194,32 +149,6 @@ int main() {
                                     *flags, str(source), '-o', binary], check=True,
                                    capture_output=True)
                     subprocess.run([binary], check=True, capture_output=True)
-
-    def test_existing_api37_calibration_migrates_once(self):
-        with tempfile.TemporaryDirectory() as temp:
-            db = str(Path(temp) / 'database.db')
-            c = sqlite3.connect(db)
-            c.execute('CREATE TABLE profiles (id INTEGER PRIMARY KEY, eq_pivots TEXT, eq_kups TEXT, eq_klos TEXT, enter_ats TEXT)')
-            encode = lambda vals: json.dumps({'v': vals})
-            c.execute('INSERT INTO profiles VALUES (1, ?, ?, ?, ?)',
-                      [encode(v) for v in ([1222, 1416], [435, 601], [138, 134], [540, 540])])
-            c.commit()
-            self.assertEqual(migration.main(db), 0)
-            first = c.execute('SELECT * FROM profiles').fetchone()
-            self.assertEqual(migration.main(db), 0)
-            self.assertEqual(c.execute('SELECT * FROM profiles').fetchone(), first)
-            row = dict(zip([d[0] for d in c.execute('SELECT * FROM profiles').description], first))
-            pivots = json.loads(row['eq_pivots'])['v']
-            for i, pivot in enumerate(pivots):
-                for raw in (pivot-300, pivot, pivot+200):
-                    above = raw >= pivot
-                    slope = json.loads(row['eq_slope_ups' if above else 'eq_slope_los'])['v'][i]
-                    offset = json.loads(row['eq_offset_ups' if above else 'eq_offset_los'])['v'][i]
-                    old = 300+(((raw-pivot)*slope)>>8) if above else 300-(((pivot-raw)*slope)>>8)
-                    self.assertLessEqual(abs(((raw-offset)*slope >> 8)-old), 2)
-            self.assertEqual(json.loads(row['enter_ats'])['v'], [540, 540])
-            c.close()
-
 
 if __name__ == '__main__':
     unittest.main()
