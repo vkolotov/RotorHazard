@@ -402,7 +402,7 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_invalidate_session()
-        previous_axis = self.threshold_scale_id()
+        previous_axis = self._stored_scale_id(self._racecontext.race.profile)
         num = self._racecontext.race.num_nodes
         self._eq_busy = True
         try:
@@ -415,6 +415,9 @@ class Calibration:
                 # Clearing the correction moves the axis just as applying one
                 #  does; convert inside the guard, since this writes to nodes.
                 self.convert_thresholds_to_scale(from_axis=previous_axis)
+                # The tracking reset is a hardware mutation too, so it belongs
+                #  inside the guard rather than after it.
+                self.eq_reset_extremums()
         finally:
             self._eq_busy = False
 
@@ -431,7 +434,6 @@ class Calibration:
             self._racecontext.rhui.emit_eq_wizard_state()
             return False
         self._eq_unresolved = []
-        self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
         return True
@@ -524,7 +526,11 @@ class Calibration:
             offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
             offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
-        previous_axis = self.threshold_scale_id()
+        # The axis the thresholds are actually on, read from the record that
+        #  travels with them. Not threshold_scale_id(), which describes the
+        #  stored coefficients: a failed attempt has already overwritten those,
+        #  so on a retry it would claim the thresholds are where they are not.
+        previous_axis = self._stored_scale_id(self._racecontext.race.profile)
 
         self._eq_busy = True
         try:
