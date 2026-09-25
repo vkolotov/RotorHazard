@@ -136,26 +136,70 @@ class Calibration:
         """A stored per-node calibration list, padded to the node count."""
         profile = self._racecontext.race.profile
         raw = getattr(profile, field, None)
-        vals = json.loads(raw)["v"] if raw else []
+        try:
+            vals = json.loads(raw)["v"] if raw else []
+        except (TypeError, ValueError, KeyError):
+            vals = []  # never calibrated, or written by older code
         out = []
         for idx in range(self._racecontext.race.num_nodes):
             v = vals[idx] if idx < len(vals) else None
             out.append(default if v is None else v)
         return out
 
-    def _eq_resolution_matches(self):
+    def _eq_resolution_matches(self, bits=None):
+        """True when the stored coefficients belong to the width in use.
+
+        `bits` asks about a width other than the live one, which the threshold
+        conversion needs so it can describe the axis it is moving on to.
+        """
         raw = getattr(self._racecontext.race.profile, 'eq_pivots', None)
-        stored_bits = json.loads(raw).get('adc_bits') if raw else None
-        return stored_bits is None or stored_bits == [
+        try:
+            stored_bits = json.loads(raw).get('adc_bits') if raw else None
+        except (TypeError, ValueError):
+            stored_bits = None  # never calibrated, or written by older code
+        if stored_bits is None:
+            return True
+        if bits is not None:
+            return stored_bits == [bits for _ in self._racecontext.interface.nodes]
+        return stored_bits == [
             12 if node_full_resolution(node) else 10
             for node in self._racecontext.interface.nodes]
 
-    def _eq_node_channels(self):
-        """The channel label each node is tuned to, one per node."""
+    def _eq_participants(self):
+        """Which nodes the wizard calibrates.
+
+        A node with no frequency is not receiving anything, and a node whose
+        firmware predates the protocol will ignore the coefficients. Neither
+        can contribute a capture, so neither should be able to hold the wizard
+        open or have a fit computed for it.
+        """
         freqs = json.loads(self._racecontext.race.profile.frequencies)
-        bands, chans = freqs.get('b') or [], freqs.get('c') or []
+        f = freqs.get('f') or []
+        nodes = self._racecontext.interface.nodes
         out = []
         for idx in range(self._racecontext.race.num_nodes):
+            if idx < len(f) and not f[idx]:
+                continue
+            node = nodes[idx] if idx < len(nodes) else None
+            if node is not None and getattr(node, 'api_level', 0) < 37:
+                continue
+            out.append(idx)
+        return out
+
+    def _eq_node_channels(self):
+        """The channel label each node is tuned to, one per node.
+
+        Nodes that are not participating get None, so they raise no step of
+        their own and are skipped by the fit.
+        """
+        freqs = json.loads(self._racecontext.race.profile.frequencies)
+        bands, chans = freqs.get('b') or [], freqs.get('c') or []
+        taking_part = set(self._eq_participants())
+        out = []
+        for idx in range(self._racecontext.race.num_nodes):
+            if idx not in taking_part:
+                out.append(None)
+                continue
             band = bands[idx] if idx < len(bands) else None
             chan = chans[idx] if idx < len(chans) else None
             out.append('{0}{1}'.format(band, chan) if band and chan
@@ -171,6 +215,8 @@ class Calibration:
         steps = [('noise', None)]
         seen = []
         for label in self._eq_node_channels():
+            if label is None:
+                continue  # node is not taking part
             if label not in seen:
                 seen.append(label)
                 steps.append(('low', label))
@@ -259,6 +305,20 @@ class Calibration:
         } for i in range(num)]
 
     @catchLogExceptionsWrapper
+    def _eq_session(self):
+        """Identifies the state a capture belongs to.
+
+        Includes the profile, so switching profiles mid-wizard invalidates a
+        capture in flight rather than filing it against the wrong one.
+        """
+        return (getattr(self, '_eq_epoch', 0),
+                getattr(self._racecontext.race.profile, 'id', None),
+                tuple(self._eq_node_channels()))
+
+    def _eq_invalidate_session(self):
+        """Drop any capture still settling."""
+        self._eq_epoch = getattr(self, '_eq_epoch', 0) + 1
+
     def eq_wizard_capture(self):
         """Capture the next step: clear the extremes, settle, then read."""
         state = self.eq_wizard_state()
@@ -266,10 +326,18 @@ class Calibration:
             return False
 
         self._eq_busy = True
+        # Anything that changes what a capture would mean - a reset, a step
+        #  back, a profile change - bumps this. The sleep below is long enough
+        #  for that to happen underneath us, and a reading taken before the
+        #  change must not be filed against the state after it.
+        session = self._eq_session()
         try:
             self._racecontext.rhui.emit_eq_wizard_state()
             self.eq_reset_extremums()
             gevent.sleep(EQ_SETTLE_SECONDS)
+            if self._eq_session() != session:
+                logger.info('Equalisation capture discarded: state changed while settling')
+                return False
 
             level = state['level']
             key = level if state['channel'] is None \
@@ -281,9 +349,10 @@ class Calibration:
                 v = node.node_nadir_rssi if level == 'noise' else node.node_peak_rssi
                 vals.append(int(v) if v and v < node.max_rssi_value else None)
 
-            if level == 'noise' and any(v is None for v in vals):
-                msg = 'Noise capture failed: no reading on node {0}'.format(
-                    vals.index(None) + 1)
+            taking_part = self._eq_participants()
+            missing = [i + 1 for i in taking_part if vals[i] is None]
+            if level == 'noise' and missing:
+                msg = 'Noise capture failed: no reading on node {0}'.format(missing[0])
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
@@ -306,6 +375,7 @@ class Calibration:
                  for l, c in self._eq_steps()]
         last = [k for k in order if k in captured][-1]
         del captured[last]
+        self._eq_invalidate_session()
         logger.info('Equalisation stepped back, discarded %s', last)
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
@@ -319,6 +389,7 @@ class Calibration:
         against uncorrected readings, so a fresh run has to start from raw.
         """
         self._eq_captured = {}
+        self._eq_invalidate_session()
         num = self._racecontext.race.num_nodes
         self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
         for idx in range(num):
@@ -359,8 +430,15 @@ class Calibration:
 
         # Read every node's captures first: the destination is the widest span
         #  in the fleet, so no node can be fitted until all of them are known.
-        levels = []
-        for idx in range(num):
+        #  Nodes not taking part get no fit and stay uncorrected.
+        taking_part = self._eq_participants()
+        if not taking_part:
+            msg = 'No node is available to calibrate'
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            return False
+        levels = {}
+        for idx in taking_part:
             label = labels[idx]
             lo = captured.get('low:{0}'.format(label), [None] * num)[idx]
             hi = captured.get('high:{0}'.format(label), [None] * num)[idx]
@@ -379,13 +457,22 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            levels.append((fl, lo, hi))
+            levels[idx] = (fl, lo, hi)
 
-        destination = self._eq_destination([(lo - fl, hi - lo) for fl, lo, hi in levels])
+        destination = self._eq_destination(
+            [(lo - fl, hi - lo) for fl, lo, hi in levels.values()])
         logger.info('Equalisation destination from captured spans: %s', destination)
 
         pivots, offset_ups, slope_ups, offset_los, slope_los = [], [], [], [], []
         for idx in range(num):
+            if idx not in levels:
+                # not taking part: pivot 0 leaves this node uncorrected
+                pivots.append(0)
+                slope_ups.append(256)
+                slope_los.append(256)
+                offset_ups.append(0)
+                offset_los.append(0)
+                continue
             fl, lo, hi = levels[idx]
 
             t_floor, t_low, t_high = destination
@@ -443,13 +530,22 @@ class Calibration:
         slope_ups = self._eq_stored('eq_slope_ups', 256)
         offset_los = self._eq_stored('eq_offset_los', 0)
         slope_los = self._eq_stored('eq_slope_los', 256)
+        failed = []
         for idx in range(self._racecontext.race.num_nodes):
-            self._racecontext.interface.set_equalisation(
-                idx, pivots[idx], offset_ups[idx], slope_ups[idx],
-                offset_los[idx], slope_los[idx])
+            if not self._racecontext.interface.set_equalisation(
+                    idx, pivots[idx], offset_ups[idx], slope_ups[idx],
+                    offset_los[idx], slope_los[idx]):
+                failed.append(idx + 1)
+        if failed:
+            msg = ('Equalisation was not accepted by node(s) {0}; '
+                   'those nodes are running uncorrected').format(
+                       ', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
         # Let the median filter discard samples from before the coefficients changed.
         gevent.sleep(0.5)
         self.eq_reset_extremums()
+        return not failed
 
     def current_adc_bits(self):
         """The width the nodes are sampling at right now."""
@@ -458,49 +554,137 @@ class Calibration:
             return None
         return 12 if any(node_full_resolution(node) for node in nodes) else 10
 
-    def rescale_thresholds_for_resolution(self, to_full):
-        """Move stored EnterAt/ExitAt onto the new ADC scale.
+    def threshold_scale_id(self, bits=None):
+        """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
 
-        The low path clamps the 10-bit reading and halves it, so a reading is
-        exactly eight times larger at 12 bits than at 8. Thresholds are
-        compared straight against that reading and carry no other scaling, so
-        the same factor of eight converts them. Going up is lossless; coming
-        back down discards the low three bits, which is the resolution the
-        operator asked to give up.
+        A threshold is compared against whatever rssiRead() returns, which is
+        the ADC width *after* equalisation. Both halves therefore identify the
+        axis, and a stored value only means the same thing while both match.
+        """
+        if bits is None:
+            bits = self.current_adc_bits()
+        return {'adc_bits': bits, 'eq': self._eq_signature(bits)}
 
-        Equalisation is deliberately left alone - see
-        eq_rescale_is_lossy() for why it is re-run rather than converted.
+    def _eq_signature(self, bits):
+        """The correction in force, per node, or None where there is none."""
+        if not self._eq_resolution_matches(bits):
+            return None  # correction is disabled at this width
+        pivots = self._eq_stored('eq_pivots', 0)
+        if not any(pivots):
+            return None
+        return [[pivots[i],
+                 self._eq_stored('eq_offset_ups', 0)[i],
+                 self._eq_stored('eq_slope_ups', 256)[i],
+                 self._eq_stored('eq_offset_los', 0)[i],
+                 self._eq_stored('eq_slope_los', 256)[i]]
+                for i in range(len(pivots))]
+
+    def _corrected(self, raw, coeffs):
+        """What the node reports for a raw reading under `coeffs`."""
+        if not coeffs:
+            return raw
+        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        if not pivot:
+            return raw
+        if raw >= pivot:
+            adj = ((raw - off_up) * slope_up) >> 8
+        else:
+            adj = ((raw - off_lo) * slope_lo) >> 8
+        return max(0, adj)
+
+    def _uncorrect(self, value, coeffs):
+        """The raw reading that produces `value` under `coeffs`.
+
+        The forward transform is two straight segments, so each is inverted
+        directly; the pivot says which one applies.
+        """
+        if not coeffs:
+            return value
+        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        if not pivot:
+            return value
+        at_pivot = self._corrected(pivot, coeffs)
+        if value >= at_pivot:
+            return int(round(value * 256.0 / slope_up)) + off_up if slope_up else value
+        return int(round(value * 256.0 / slope_lo)) + off_lo if slope_lo else value
+
+    def convert_thresholds_to_scale(self, target_bits=None):
+        """Move stored EnterAt/ExitAt onto the axis the nodes are on now.
+
+        A threshold is a corrected value, not a raw one, so it cannot simply be
+        multiplied by the ratio of ADC widths: the correction in force may have
+        changed at the same moment. Undo the old correction to recover the raw
+        reading, rescale that by the ratio of widths, then apply whatever
+        correction is now in force.
+
+        Idempotent: the stored scale is recorded alongside the values, and a
+        profile already on the target axis is left untouched. That also makes
+        this safe to call when activating a profile, which is the only way a
+        profile that was not open during a switch ever gets converted.
         """
         profile = self._racecontext.race.profile
-        node_count = self._racecontext.race.num_nodes
+        if target_bits is None:
+            target_bits = self.current_adc_bits()
+        if target_bits is None:
+            return None, None
 
-        def convert(raw):
-            vals = json.loads(raw)["v"] if raw else []
+        want = self.threshold_scale_id(target_bits)
+        have = self._stored_scale_id(profile)
+        if have == want:
+            return None, None  # already on this axis
+
+        old_bits = (have or {}).get('adc_bits') or target_bits
+        old_eq = (have or {}).get('eq')
+        new_eq = want['eq']
+        ratio = (8 if target_bits == 12 else 1) / (8 if old_bits == 12 else 1)
+
+        def convert(raw_json):
+            try:
+                vals = json.loads(raw_json)["v"] if raw_json else []
+            except (TypeError, ValueError, KeyError):
+                vals = []
             out = []
-            for idx in range(node_count):
+            for idx in range(self._racecontext.race.num_nodes):
                 v = vals[idx] if idx < len(vals) else None
                 if not v:
                     out.append(v)
-                elif to_full:
-                    out.append(int(v) * 8)
-                else:
-                    out.append(max(1, int(v) // 8))
+                    continue
+                raw = self._uncorrect(int(v), old_eq[idx] if old_eq else None)
+                raw = raw * ratio
+                out.append(max(1, int(round(self._corrected(
+                    int(round(raw)), new_eq[idx] if new_eq else None)))))
             return out
 
         enter_ats = convert(getattr(profile, 'enter_ats', None))
         exit_ats = convert(getattr(profile, 'exit_ats', None))
-        bits = 12 if to_full else 10
         self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
-            'enter_ats': {"v": enter_ats, 'adc_bits': bits},
-            'exit_ats': {"v": exit_ats, 'adc_bits': bits},
+            'enter_ats': dict(want, v=enter_ats),
+            'exit_ats': dict(want, v=exit_ats),
         })
         self._racecontext.race.profile = self._racecontext.rhdata.get_profile(profile.id)
         self.hardware_set_all_enter_ats(enter_ats)
         self.hardware_set_all_exit_ats(exit_ats)
-        logger.info("Rescaled EnterAt/ExitAt for %s-bit sampling: enter=%s",
-                    bits, enter_ats)
+        logger.info("Converted EnterAt/ExitAt from %s-bit to %s-bit: enter=%s",
+                    old_bits, target_bits, enter_ats)
         return enter_ats, exit_ats
+
+    def _stored_scale_id(self, profile):
+        """The axis the stored thresholds were written on, if it was recorded.
+
+        Profiles written before this was tracked carry no marker; they are
+        legacy 8-bit with no correction, which is all the older code produced.
+        """
+        raw = getattr(profile, 'enter_ats', None)
+        if not raw:
+            return None
+        try:
+            stored = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if 'adc_bits' not in stored:
+            return {'adc_bits': 10, 'eq': None}
+        return {'adc_bits': stored.get('adc_bits'), 'eq': stored.get('eq')}
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''

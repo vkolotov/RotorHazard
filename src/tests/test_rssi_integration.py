@@ -63,6 +63,61 @@ class RssiIntegrationTest(unittest.TestCase):
                 cal.hardware_set_all_equalisation()
                 self.assertEqual(ctx.interface.set_equalisation.call_args.args[1], 0)
 
+    def test_threshold_conversion_follows_the_correction(self):
+        """A threshold is a corrected value, not a raw one.
+
+        Multiplying by the ratio of ADC widths is only right when no
+        correction is in force on either side. With equalisation applied, the
+        stored number means a different raw reading, and converting has to go
+        back through the transform to find it.
+        """
+        ctx, node, cal = self.context(full=False)
+        # corrected = raw - 89 over the upper segment
+        coeffs = [150, 89, 256, 89, 256]
+        self.assertEqual(cal._corrected(169, coeffs), 80)
+        self.assertEqual(cal._uncorrect(80, coeffs), 169)
+        # round trip through the pair is stable
+        for raw in (160, 200, 255):
+            self.assertEqual(cal._uncorrect(cal._corrected(raw, coeffs), coeffs), raw)
+        # and a naive x8 would have produced 640 rather than the raw-equivalent
+        self.assertNotEqual(cal._uncorrect(80, coeffs) * 8, 80 * 8)
+
+    def test_resolution_conversion_is_idempotent(self):
+        """Converting a profile already on the target axis must do nothing."""
+        ctx, node, cal = self.context(full=False)
+        ctx.race.profile.enter_ats = json.dumps({'v': [96], 'adc_bits': 10, 'eq': None})
+        ctx.race.profile.exit_ats = json.dumps({'v': [80], 'adc_bits': 10, 'eq': None})
+        ctx.race.profile.eq_pivots = None
+        ctx.rhdata.get_profile.return_value = ctx.race.profile
+        node.adc_resolution = 12
+        first = cal.convert_thresholds_to_scale()
+        self.assertEqual(first[0], [768])
+        # the stored scale now matches, so a repeat is a no-op
+        second = cal.convert_thresholds_to_scale()
+        self.assertEqual(second, (None, None))
+        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [768])
+
+    def test_untagged_profile_reads_as_legacy(self):
+        """A profile written before the scale was tracked is 8-bit, no eq."""
+        ctx, node, cal = self.context(full=False)
+        ctx.race.profile.enter_ats = json.dumps({'v': [96]})
+        self.assertEqual(cal._stored_scale_id(ctx.race.profile),
+                         {'adc_bits': 10, 'eq': None})
+
+    def test_unconfirmed_adc_write_is_not_recorded(self):
+        """A write the node never acknowledged must not change cached state."""
+        _, node, _ = self.context(full=False)
+        interface = RHInterface.RHInterface.__new__(RHInterface.RHInterface)
+        interface.nodes = [node]
+        interface.log = lambda *a, **k: None
+        node.adc_resolution = 10
+        with patch.object(RHInterface.RHInterface, 'set_and_validate_value_8',
+                          return_value=12), \
+             patch.object(RHInterface.RHInterface, 'get_value_8', return_value=None):
+            ok = RHInterface.RHInterface.set_adc_resolution(interface, 0, True)
+        self.assertFalse(ok)
+        self.assertEqual(node.adc_resolution, 10)
+
     def test_rssi_transport_stays_wide_in_legacy_sampling_mode(self):
         _, node, _ = self.context(full=False)
         self.assertTrue(node.has_wide_rssi())

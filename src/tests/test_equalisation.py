@@ -92,6 +92,40 @@ class EqualisationTest(unittest.TestCase):
         # a quad closer than the calibration spot must stay on scale
         self.assertLessEqual(t_high, scale * 0.5)
 
+    def test_disabled_node_does_not_take_part(self):
+        """A node with no frequency raises no step and gets no fit."""
+        ctx, _, cal = self.context(count=2)
+        ctx.race.profile.frequencies = json.dumps(
+            {'b': ['R', 'R'], 'c': [1, 2], 'f': [5658, 0]})
+        self.assertEqual(cal._eq_participants(), [0])
+        self.assertIsNone(cal._eq_node_channels()[1])
+        # only the enabled node's channel raises low/high steps
+        labels = [chan for _, chan in cal._eq_steps() if chan]
+        self.assertEqual(sorted(set(labels)), ['R1'])
+
+    def test_unconfirmed_write_is_not_recorded(self):
+        """A coefficient write the node never acknowledged is not success."""
+        import RHInterface
+        _, nodes, _ = self.context()
+        interface = RHInterface.RHInterface.__new__(RHInterface.RHInterface)
+        interface.nodes = nodes
+        interface.log = lambda *a, **k: None
+        nodes[0].eq_pivot = 0
+        with patch.object(RHInterface.RHInterface, 'set_and_validate_value_16',
+                          return_value=120), \
+             patch.object(RHInterface.RHInterface, 'get_value_16', return_value=None):
+            ok = RHInterface.RHInterface.set_equalisation(
+                interface, 0, 120, 89, 256, 89, 256)
+        self.assertFalse(ok)
+        self.assertEqual(nodes[0].eq_pivot, 0)
+
+    def test_capture_is_discarded_when_state_changes(self):
+        """A reset landing during the settle invalidates the reading."""
+        ctx, _, cal = self.context()
+        before = cal._eq_session()
+        cal._eq_invalidate_session()
+        self.assertNotEqual(cal._eq_session(), before)
+
     def test_capture_rejects_noise_only_signal(self):
         ctx, _, cal = self.context()
         cal._eq_captured = {'noise': [700], 'low:R1': [702], 'high:R1': [704]}
