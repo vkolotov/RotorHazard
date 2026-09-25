@@ -51,6 +51,30 @@ byte Message::getPayloadSize()
             size = 2;
             break;
 
+        case WRITE_EQ_PIVOT:  // equalisation pivot (raw ADC)
+            size = 2;
+            break;
+
+        case WRITE_EQ_OFFSET_UP:  // equalisation offset, above pivot
+            size = 2;
+            break;
+
+        case WRITE_EQ_SLOPE_UP:  // equalisation slope, above pivot (Q8)
+            size = 2;
+            break;
+
+        case WRITE_EQ_OFFSET_LO:  // equalisation offset, below pivot
+            size = 2;
+            break;
+
+        case WRITE_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
+            size = 2;
+            break;
+
+        case RESET_NODE_EXTREMUMS:  // restart node peak/nadir tracking
+            size = 1;
+            break;
+
         case FORCE_END_CROSSING:  // kill current crossing flag regardless of RSSI value
             size = 1;
             break;
@@ -152,6 +176,30 @@ void Message::handleWriteCommand(bool serialFlag)
             handleStatusMessage((byte)(u16val >> 8), (byte)(u16val & 0x00FF));
             break;
 
+        case WRITE_EQ_PIVOT:  // equalisation pivot (raw ADC)
+            cmdRssiNodePtr->setEqPivot(buffer.read16());
+            break;
+
+        case WRITE_EQ_OFFSET_UP:  // equalisation offset, above pivot
+            cmdRssiNodePtr->setEqOffsetUp((int16_t) buffer.read16());
+            break;
+
+        case WRITE_EQ_SLOPE_UP:  // equalisation slope, above pivot (Q8)
+            cmdRssiNodePtr->setEqSlopeUp(buffer.read16());
+            break;
+
+        case WRITE_EQ_OFFSET_LO:  // equalisation offset, below pivot
+            cmdRssiNodePtr->setEqOffsetLo((int16_t) buffer.read16());
+            break;
+
+        case WRITE_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
+            cmdRssiNodePtr->setEqSlopeLo(buffer.read16());
+            break;
+
+        case RESET_NODE_EXTREMUMS:  // restart node peak/nadir tracking
+            cmdRssiNodePtr->rssiStateReset();
+            break;
+
         case FORCE_END_CROSSING:  // kill current crossing flag regardless of RSSI value
             cmdRssiNodePtr->rssiEndCrossing();
             break;
@@ -238,6 +286,26 @@ void Message::handleReadCommand(bool serialFlag)
 
         case READ_EXIT_AT_LEVEL:  // lap pass ends when RSSI goes below this level
             ioBufferWriteRssi(buffer, cmdRssiNodePtr->getExitAtLevel());
+            break;
+
+        case READ_EQ_PIVOT:  // equalisation pivot (raw ADC)
+            buffer.write16(cmdRssiNodePtr->getEqPivot());
+            break;
+
+        case READ_EQ_OFFSET_UP:  // equalisation offset, above pivot
+            buffer.write16((uint16_t) cmdRssiNodePtr->getEqOffsetUp());
+            break;
+
+        case READ_EQ_SLOPE_UP:  // equalisation slope, above pivot (Q8)
+            buffer.write16(cmdRssiNodePtr->getEqSlopeUp());
+            break;
+
+        case READ_EQ_OFFSET_LO:  // equalisation offset, below pivot
+            buffer.write16((uint16_t) cmdRssiNodePtr->getEqOffsetLo());
+            break;
+
+        case READ_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
+            buffer.write16(cmdRssiNodePtr->getEqSlopeLo());
             break;
 
         case READ_REVISION_CODE:  // reply with NODE_API_LEVEL and verification value

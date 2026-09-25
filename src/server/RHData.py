@@ -2528,6 +2528,14 @@ class RHData():
             frequencies = source_profile.frequencies,
             enter_ats = source_profile.enter_ats,
             exit_ats = source_profile.exit_ats,
+            # The thresholds above are measured against the corrected reading,
+            #  so the correction has to come with them; a copy without it would
+            #  keep thresholds calibrated for an axis it no longer has.
+            eq_pivots = source_profile.eq_pivots,
+            eq_offset_ups = source_profile.eq_offset_ups,
+            eq_slope_ups = source_profile.eq_slope_ups,
+            eq_offset_los = source_profile.eq_offset_los,
+            eq_slope_los = source_profile.eq_slope_los,
             f_ratio = 100)
         Database.DB_session.add(new_profile)
 
@@ -2556,6 +2564,16 @@ class RHData():
             profile.enter_ats = data['enter_ats'] if isinstance(data['enter_ats'], str) else json.dumps(data['enter_ats'])
         if 'exit_ats' in data:
             profile.exit_ats = data['exit_ats'] if isinstance(data['exit_ats'], str) else json.dumps(data['exit_ats'])
+        if 'eq_pivots' in data:
+            profile.eq_pivots = data['eq_pivots'] if isinstance(data['eq_pivots'], str) else json.dumps(data['eq_pivots'])
+        if 'eq_offset_ups' in data:
+            profile.eq_offset_ups = data['eq_offset_ups'] if isinstance(data['eq_offset_ups'], str) else json.dumps(data['eq_offset_ups'])
+        if 'eq_slope_ups' in data:
+            profile.eq_slope_ups = data['eq_slope_ups'] if isinstance(data['eq_slope_ups'], str) else json.dumps(data['eq_slope_ups'])
+        if 'eq_offset_los' in data:
+            profile.eq_offset_los = data['eq_offset_los'] if isinstance(data['eq_offset_los'], str) else json.dumps(data['eq_offset_los'])
+        if 'eq_slope_los' in data:
+            profile.eq_slope_los = data['eq_slope_los'] if isinstance(data['eq_slope_los'], str) else json.dumps(data['eq_slope_los'])
 
         profile = self._filters.run_filters(Flt.PROFILE_ALTER, profile, {
             'data': data

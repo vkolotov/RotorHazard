@@ -764,6 +764,15 @@ class RHUI():
         else:
             self._socket.emit('enter_and_exit_at_levels', emit_payload)
 
+    def emit_eq_wizard_state(self, **params):
+        """Emits the equalisation wizard position and what it has captured."""
+        emit_payload = self._racecontext.calibration.eq_wizard_state()
+        emit_payload['captured'] = self._racecontext.calibration.eq_captured_table()
+        if ('nobroadcast' in params):
+            emit('eq_wizard_state', emit_payload)
+        else:
+            self._socket.emit('eq_wizard_state', emit_payload)
+
     def emit_cluster_status(self, **params):
         '''Emits cluster status information.'''
         if self._racecontext.cluster:

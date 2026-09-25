@@ -2,7 +2,7 @@
 RELEASE_VERSION = "4.5.1-dev.3" # Public release version code
 SERVER_API = 49 # Server API version
 NODE_API_SUPPORTED = 18 # Minimum supported node version
-NODE_API_BEST = 36 # Most recent node API
+NODE_API_BEST = 37 # Most recent node API
 JSON_API = 3 # JSON API version
 MIN_PYTHON_MAJOR_VERSION = 3 # minimum python version (3.10)
 MIN_PYTHON_MINOR_VERSION = 10
@@ -959,6 +959,7 @@ def on_load_data(data):
             RaceContext.rhui.emit_node_tuning(nobroadcast=True)
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
+            RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -1202,6 +1203,60 @@ def on_set_start_thresh_lower_duration(data):
 def on_set_language(data):
     '''Set interface language.'''
     RaceContext.serverconfig.set_item('UI', 'currentLanguage', data['language'])
+
+def eq_wizard_mutation_allowed():
+    '''Whether the wizard may touch the nodes right now.
+
+    Capturing resets peak/nadir tracking and applying changes the RSSI axis
+    every threshold is measured against, so neither may happen while a race is
+    running, or while a finished race is still unsaved and about to record the
+    live thresholds.
+    '''
+    if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE):
+        RaceContext.rhui.emit_priority_message(
+            __('Save or discard the current race before calibrating.'), False)
+        RaceContext.rhui.emit_eq_wizard_state()
+        return False
+    return True
+
+@SOCKET_IO.on('eq_wizard_capture')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_capture(_data=None):
+    '''Capture the wizard's next step.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_capture()
+
+@SOCKET_IO.on('eq_wizard_back')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_back(_data=None):
+    '''Discard the last captured step.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_back()
+
+@SOCKET_IO.on('eq_wizard_reset')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_reset(_data=None):
+    '''Clear the calibration and start again.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_reset()
+
+@SOCKET_IO.on('eq_wizard_apply')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_apply(_data=None):
+    '''Fit and apply the captured calibration.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_apply()
+
+@SOCKET_IO.on('eq_wizard_query')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_query(_data=None):
+    '''Report the wizard position to the asking client.'''
+    RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
 
 @SOCKET_IO.on('cap_enter_at_btn')
 @requires_socketio_auth
@@ -1571,6 +1626,7 @@ def on_set_profile(data, emit_vals=True):
         RaceContext.interface.set_all_frequencies(freqs)
         RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
         RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
+        RaceContext.calibration.hardware_set_all_equalisation()
 
     else:
         logger.warning('Invalid set_profile value: ' + str(profile_val))
@@ -2462,6 +2518,8 @@ def cancel_schedule_race(*args):
 @SOCKET_IO.on('stage_race')
 @requires_socketio_auth
 def on_stage_race(*args):
+    # The calibration guard lives in RHRace.stage(), so scheduled and API
+    #  starts are covered by the same check.
     result = RaceContext.race.stage(*args)
     if not result:
         RaceContext.rhui.emit_race_status()

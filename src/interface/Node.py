@@ -21,6 +21,11 @@ class Node:
         self.node_nadir_rssi = 0
         self.pass_peak_rssi = 0
         self.pass_nadir_rssi = 0
+        self.eq_pivot = 0
+        self.eq_offset_up = 0
+        self.eq_slope_up = 256
+        self.eq_offset_lo = 0
+        self.eq_slope_lo = 256
         self.max_rssi_value = 999
         self.node_lap_id = -1
         self.current_pilot_id = 0
