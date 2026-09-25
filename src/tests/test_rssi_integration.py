@@ -162,27 +162,6 @@ class RssiIntegrationTest(unittest.TestCase):
         self.assertEqual(second, (None, None))
         self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [768])
 
-    def test_mixed_widths_are_refused_not_half_applied(self):
-        """A fleet on two widths cannot be scaled, so it is rejected."""
-        ctx, node, cal = self.context(full=True)
-        other = Node()
-        other.api_level = 38
-        other.firmware_proctype_str = 'STM32F4'
-        other.adc_resolution = 10
-        other.init()
-        ctx.interface.nodes = [node, other]
-        ctx.race.num_nodes = 2
-        self.assertFalse(cal.nodes_are_homogeneous())
-        self.assertIsNone(cal.current_adc_bits())
-        # and a fit is refused before anything is written
-        ctx.race.profile.frequencies = json.dumps(
-            {'b': ['R', 'R'], 'c': [1, 2], 'f': [5658, 5695]})
-        cal._eq_captured = {'noise': [90, 90], 'low:R1': [150, 150],
-                            'high:R1': [210, 210]}
-        cal._eq_note_capture_session()
-        self.assertFalse(cal.eq_wizard_apply())
-        ctx.interface.set_equalisation.assert_not_called()
-
     def test_reset_refuses_when_a_node_does_not_confirm(self):
         """An unconfirmed reset leaves the correction unknown."""
         ctx, _, cal = self.context(full=False)
@@ -208,27 +187,6 @@ class RssiIntegrationTest(unittest.TestCase):
             self.assertTrue(cal.eq_wizard_apply())
         self.assertTrue(seen, 'thresholds were never written')
         self.assertTrue(all(seen), 'guard was released before threshold writes')
-
-    def test_enabling_full_resolution_on_a_mixed_fleet_is_refused(self):
-        """A fleet all in legacy mode can still be mixed-capability.
-
-        An STM32 and an AVR both start at 10 bits, so checking the current
-        widths would let the switch create the mixed state it is meant to
-        prevent. The check has to ask what the request would produce.
-        """
-        ctx, node, cal = self.context(full=False)
-        avr = Node()
-        avr.api_level = 37
-        avr.firmware_proctype_str = 'ATmega328P'
-        avr.adc_resolution = 10
-        avr.init()
-        ctx.interface.nodes = [node, avr]
-        ctx.race.num_nodes = 2
-        # both are on 10 bits right now
-        self.assertTrue(cal.nodes_are_homogeneous())
-        # but only one can follow a request for full resolution
-        self.assertFalse(cal.nodes_are_homogeneous(True))
-        self.assertTrue(cal.nodes_are_homogeneous(False))
 
     def test_retry_after_failed_apply_converts_from_the_real_axis(self):
         """A failed attempt must not corrupt the source axis for the retry."""

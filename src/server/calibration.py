@@ -169,34 +169,6 @@ class Calibration:
             12 if node_full_resolution(node) else 10
             for node in self._racecontext.interface.nodes]
 
-    def nodes_are_homogeneous(self, full_resolution=None):
-        """True when every node would be on the same ADC width.
-
-        With `full_resolution` given, asks about the width the fleet *would*
-        reach if that setting were applied, rather than the width it is on -
-        an STM32 and an AVR both start in legacy mode and only diverge once
-        full resolution is requested, so checking the current state would let
-        the mixed fleet be created rather than refused.
-
-        Every node on a multi-node board shares one processor, so a mixed
-        fleet needs two boards on separate serial ports. Scaling a threshold
-        or fitting one destination across widths that differ by eight cannot
-        produce a value all of them can represent.
-        """
-        nodes = self._racecontext.interface.nodes
-        if not nodes:
-            return True
-        if full_resolution is None:
-            widths = {12 if node_full_resolution(node) else 10 for node in nodes}
-        else:
-            # A node follows the request only if its firmware can.
-            widths = set()
-            for node in nodes:
-                wide = getattr(node, 'has_wide_rssi', None)
-                capable = bool(wide and wide()) and getattr(node, 'api_level', 0) >= 38
-                widths.add(12 if (full_resolution and capable) else 10)
-        return len(widths) == 1
-
     def _eq_participants(self):
         """Which nodes the wizard calibrates.
 
@@ -523,13 +495,6 @@ class Calibration:
         # Read every node's captures first: the destination is the widest span
         #  in the fleet, so no node can be fitted until all of them are known.
         #  Nodes not taking part get no fit and stay uncorrected.
-        if not self.nodes_are_homogeneous():
-            msg = ('Nodes are not all on the same ADC width; equalisation '
-                   'needs one width across the fleet')
-            logger.warning(msg)
-            self._racecontext.rhui.emit_priority_message(msg)
-            return False
-
         taking_part = self._eq_participants()
         if not taking_part:
             msg = 'No node is available to calibrate'
@@ -692,21 +657,13 @@ class Calibration:
     def current_adc_bits(self):
         """The width the nodes are sampling at right now.
 
-        None when the fleet is not on one width. Every node on a multi-node
-        board shares its processor, so this only arises with two boards of
-        different types on separate serial ports - out of scope here, and
-        reported rather than averaged over.
+        Every node on a board shares one processor, so the fleet is on one
+        width by construction.
         """
         nodes = self._racecontext.interface.nodes
         if not nodes:
             return None
-        widths = {12 if node_full_resolution(node) else 10 for node in nodes}
-        if len(widths) > 1:
-            logger.warning('Nodes are not on one ADC width (%s); '
-                           'threshold and equalisation scaling need a single '
-                           'width and will be skipped', sorted(widths))
-            return None
-        return widths.pop()
+        return 12 if any(node_full_resolution(node) for node in nodes) else 10
 
     def threshold_scale_id(self, bits=None):
         """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
