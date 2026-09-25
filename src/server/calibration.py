@@ -169,20 +169,33 @@ class Calibration:
             12 if node_full_resolution(node) else 10
             for node in self._racecontext.interface.nodes]
 
-    def nodes_are_homogeneous(self):
-        """True when every node reports the same ADC width.
+    def nodes_are_homogeneous(self, full_resolution=None):
+        """True when every node would be on the same ADC width.
+
+        With `full_resolution` given, asks about the width the fleet *would*
+        reach if that setting were applied, rather than the width it is on -
+        an STM32 and an AVR both start in legacy mode and only diverge once
+        full resolution is requested, so checking the current state would let
+        the mixed fleet be created rather than refused.
 
         Every node on a multi-node board shares one processor, so a mixed
         fleet needs two boards on separate serial ports. Scaling a threshold
         or fitting one destination across widths that differ by eight cannot
-        produce a value all of them can represent, so the configuration is
-        refused rather than half-applied.
+        produce a value all of them can represent.
         """
         nodes = self._racecontext.interface.nodes
         if not nodes:
             return True
-        return len({12 if node_full_resolution(node) else 10
-                    for node in nodes}) == 1
+        if full_resolution is None:
+            widths = {12 if node_full_resolution(node) else 10 for node in nodes}
+        else:
+            # A node follows the request only if its firmware can.
+            widths = set()
+            for node in nodes:
+                wide = getattr(node, 'has_wide_rssi', None)
+                capable = bool(wide and wide()) and getattr(node, 'api_level', 0) >= 38
+                widths.add(12 if (full_resolution and capable) else 10)
+        return len(widths) == 1
 
     def _eq_participants(self):
         """Which nodes the wizard calibrates.
@@ -442,7 +455,7 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_invalidate_session()
-        previous_axis = self.threshold_scale_id()
+        previous_axis = self._stored_scale_id(self._racecontext.race.profile)
         num = self._racecontext.race.num_nodes
         self._eq_busy = True
         try:
@@ -455,6 +468,9 @@ class Calibration:
                 # Clearing the correction moves the axis just as applying one
                 #  does; convert inside the guard, since this writes to nodes.
                 self.convert_thresholds_to_scale(from_axis=previous_axis)
+                # The tracking reset is a hardware mutation too, so it belongs
+                #  inside the guard rather than after it.
+                self.eq_reset_extremums()
         finally:
             self._eq_busy = False
 
@@ -471,7 +487,6 @@ class Calibration:
             self._racecontext.rhui.emit_eq_wizard_state()
             return False
         self._eq_unresolved = []
-        self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
         return True
@@ -573,8 +588,11 @@ class Calibration:
             offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
             offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
-        # The axis the thresholds are on right now, before the new fit lands.
-        previous_axis = self.threshold_scale_id()
+        # The axis the thresholds are actually on, read from the record that
+        #  travels with them. Not threshold_scale_id(), which describes the
+        #  stored coefficients: a failed attempt has already overwritten those,
+        #  so on a retry it would claim the thresholds are where they are not.
+        previous_axis = self._stored_scale_id(self._racecontext.race.profile)
 
         self._eq_busy = True
         try:
