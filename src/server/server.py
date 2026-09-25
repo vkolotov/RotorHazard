@@ -2518,14 +2518,8 @@ def cancel_schedule_race(*args):
 @SOCKET_IO.on('stage_race')
 @requires_socketio_auth
 def on_stage_race(*args):
-    # Calibration rewrites coefficients on the nodes and clears their peak
-    #  tracking; starting a race in the middle of that would time it against
-    #  an axis that is still moving.
-    if getattr(RaceContext.calibration, '_eq_busy', False):
-        RaceContext.rhui.emit_priority_message(
-            __('Wait for calibration to finish before starting a race.'), False)
-        RaceContext.rhui.emit_race_status()
-        return
+    # The calibration guard lives in RHRace.stage(), so scheduled and API
+    #  starts are covered by the same check.
     result = RaceContext.race.stage(*args)
     if not result:
         RaceContext.rhui.emit_race_status()

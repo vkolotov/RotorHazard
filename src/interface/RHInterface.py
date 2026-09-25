@@ -619,15 +619,22 @@ class RHInterface(BaseHardwareInterface):
                 (WRITE_EQ_SLOPE_LO, READ_EQ_SLOPE_LO, slope_lo),
                 (WRITE_EQ_PIVOT, READ_EQ_PIVOT, pivot)):
             self.set_and_validate_value_16(node, cmd, read_cmd, value)
-        # Read the pivot back rather than trusting the setter's return, which
-        #  reports the requested value when every read came back empty. A
-        #  threshold is compared against the corrected reading, so believing a
-        #  correction the node never took would misplace every threshold.
-        confirmed = self.get_value_16(node, READ_EQ_PIVOT)
-        if confirmed != pivot:
-            self.log('Equalisation not confirmed on node {0}: pivot wanted {1}, read {2}'.format(
-                node.index + 1, pivot, confirmed))
-            return False
+        # Read every coefficient back rather than trusting the setter's return,
+        #  which reports the requested value when every read came back empty. A
+        #  confirmed pivot is not proof the rest landed, and a threshold is
+        #  compared against the corrected reading, so believing a correction
+        #  the node never took would misplace every threshold.
+        for read_cmd, wanted, name in (
+                (READ_EQ_PIVOT, pivot, 'pivot'),
+                (READ_EQ_OFFSET_UP, offset_up & 0xFFFF, 'offset-up'),
+                (READ_EQ_SLOPE_UP, slope_up, 'slope-up'),
+                (READ_EQ_OFFSET_LO, offset_lo & 0xFFFF, 'offset-lo'),
+                (READ_EQ_SLOPE_LO, slope_lo, 'slope-lo')):
+            confirmed = self.get_value_16(node, read_cmd)
+            if confirmed != wanted:
+                self.log('Equalisation not confirmed on node {0}: {1} wanted {2}, read {3}'.format(
+                    node.index + 1, name, wanted, confirmed))
+                return False
         node.eq_pivot = pivot
         node.eq_offset_up, node.eq_slope_up = offset_up, slope_up
         node.eq_offset_lo, node.eq_slope_lo = offset_lo, slope_lo

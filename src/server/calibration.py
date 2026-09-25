@@ -69,6 +69,9 @@ class Calibration:
             enter_ats["v"].append(None)
 
         enter_ats["v"][seat_index] = enter_at_level
+        # Re-stamp the axis: the value just written was measured against the
+        #  correction in force now, whatever the rest of the record still says.
+        enter_ats.update(self.threshold_scale_id())
 
         profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
@@ -108,6 +111,7 @@ class Calibration:
             exit_ats["v"].append(None)
 
         exit_ats["v"][seat_index] = exit_at_level
+        exit_ats.update(self.threshold_scale_id())
 
         profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
@@ -241,6 +245,12 @@ class Calibration:
         busy = getattr(self, '_eq_busy', False)
         steps = self._eq_steps()
 
+        if captured and not self._eq_captures_are_current():
+            # measured against a configuration that is no longer loaded
+            logger.info('Discarding equalisation captures: configuration changed')
+            captured = {}
+            self._eq_captured = {}
+
         if not captured and any(self._eq_stored('eq_pivots', 0)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration
@@ -286,14 +296,31 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def _eq_session(self):
-        """Identifies the state a capture belongs to.
+        """Identifies the configuration a capture belongs to.
 
-        Includes the profile, so switching profiles mid-wizard invalidates a
-        capture in flight rather than filing it against the wrong one.
+        Actual frequencies rather than channel labels, so a retune that keeps
+        the label - or one the label cannot express - still counts as a
+        different configuration.
         """
+        try:
+            freqs = json.loads(self._racecontext.race.profile.frequencies)
+            tuning = tuple(freqs.get('f') or [])
+        except (TypeError, ValueError, AttributeError):
+            tuning = ()
         return (getattr(self, '_eq_epoch', 0),
                 getattr(self._racecontext.race.profile, 'id', None),
-                tuple(self._eq_node_channels()))
+                tuning)
+
+    def _eq_captures_are_current(self):
+        """True when the captures on hand belong to the configuration in use."""
+        captured = getattr(self, '_eq_captured', None)
+        if not captured:
+            return True
+        return getattr(self, '_eq_captured_session', None) == self._eq_session()
+
+    def _eq_note_capture_session(self):
+        """Record which configuration the current capture set belongs to."""
+        self._eq_captured_session = self._eq_session()
 
     def _eq_invalidate_session(self):
         """Drop any capture still settling."""
@@ -339,6 +366,7 @@ class Calibration:
 
             self._eq_captured = getattr(self, '_eq_captured', {})
             self._eq_captured[key] = vals
+            self._eq_note_capture_session()
             logger.info('Equalisation captured %s: %s', key, vals)
             return True
         finally:
@@ -370,10 +398,17 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_invalidate_session()
+        previous_axis = self.threshold_scale_id()
         num = self._racecontext.race.num_nodes
-        self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
-        for idx in range(num):
-            self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256)
+        self._eq_busy = True
+        try:
+            self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
+            for idx in range(num):
+                self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256)
+        finally:
+            self._eq_busy = False
+        # Clearing the correction moves the axis just as applying one does.
+        self.convert_thresholds_to_scale(from_axis=previous_axis)
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
@@ -467,11 +502,33 @@ class Calibration:
             offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
             offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
-        self._eq_store(pivots, offset_ups, slope_ups, offset_los, slope_los)
-        for idx in range(num):
-            self._racecontext.interface.set_equalisation(
-                idx, pivots[idx], offset_ups[idx], slope_ups[idx],
-                offset_los[idx], slope_los[idx])
+        previous_axis = self.threshold_scale_id()
+
+        self._eq_busy = True
+        try:
+            self._eq_store(pivots, offset_ups, slope_ups, offset_los, slope_los)
+            failed = []
+            for idx in range(num):
+                if not self._racecontext.interface.set_equalisation(
+                        idx, pivots[idx], offset_ups[idx], slope_ups[idx],
+                        offset_los[idx], slope_los[idx]):
+                    failed.append(idx + 1)
+        finally:
+            self._eq_busy = False
+
+        if failed:
+            # The stored fit no longer describes the hardware, so the axis is
+            #  unknown rather than merely different.
+            msg = ('Equalisation was not accepted by node(s) {0}; '
+                   'their correction is unknown - re-run calibration before '
+                   'racing').format(', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return False
+
+        # Applying a fit moves the axis every threshold is measured against.
+        self.convert_thresholds_to_scale(from_axis=previous_axis)
 
         gevent.sleep(0.5)
         self.eq_reset_extremums()
@@ -511,6 +568,114 @@ class Calibration:
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
         return not failed
+
+    def threshold_scale_id(self):
+        """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
+
+        A threshold is compared against whatever rssiRead() returns, which is
+        the reading after equalisation, so the correction in force defines the
+        axis and a stored value only means the same thing while it holds.
+        """
+        return {'eq': self._eq_signature()}
+
+    def _eq_signature(self):
+        """The correction in force, per node, or None where there is none."""
+        pivots = self._eq_stored('eq_pivots', 0)
+        if not any(pivots):
+            return None
+        return [[pivots[i],
+                 self._eq_stored('eq_offset_ups', 0)[i],
+                 self._eq_stored('eq_slope_ups', 256)[i],
+                 self._eq_stored('eq_offset_los', 0)[i],
+                 self._eq_stored('eq_slope_los', 256)[i]]
+                for i in range(len(pivots))]
+
+    def _corrected(self, raw, coeffs):
+        """What the node reports for a raw reading under `coeffs`."""
+        if not coeffs:
+            return raw
+        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        if not pivot:
+            return raw
+        if raw >= pivot:
+            adj = ((raw - off_up) * slope_up) >> 8
+        else:
+            adj = ((raw - off_lo) * slope_lo) >> 8
+        return max(0, adj)
+
+    def _uncorrect(self, value, coeffs):
+        """The raw reading that produces `value` under `coeffs`."""
+        if not coeffs:
+            return value
+        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        if not pivot:
+            return value
+        at_pivot = self._corrected(pivot, coeffs)
+        if value >= at_pivot:
+            return int(round(value * 256.0 / slope_up)) + off_up if slope_up else value
+        return int(round(value * 256.0 / slope_lo)) + off_lo if slope_lo else value
+
+    def _stored_scale_id(self, profile):
+        """The axis the stored thresholds were written on, if recorded.
+
+        Profiles written before this was tracked carry no marker; they predate
+        equalisation, so they are uncorrected.
+        """
+        raw = getattr(profile, 'enter_ats', None)
+        if not raw:
+            return None
+        try:
+            stored = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return {'eq': stored.get('eq')}
+
+    def convert_thresholds_to_scale(self, from_axis=None):
+        """Move stored EnterAt/ExitAt onto the axis now in force.
+
+        A threshold is a corrected value, so when the correction changes the
+        number has to change with it to keep meaning the same physical signal.
+        Undo the old correction to recover the raw reading, then apply the new
+        one. Idempotent: a profile already on this axis is left alone.
+        """
+        profile = self._racecontext.race.profile
+        want = self.threshold_scale_id()
+        have = from_axis if from_axis is not None else self._stored_scale_id(profile)
+        if have == want:
+            return None, None
+
+        old_eq = (have or {}).get('eq')
+        new_eq = want['eq']
+
+        def convert(raw_json):
+            try:
+                vals = json.loads(raw_json)["v"] if raw_json else []
+            except (TypeError, ValueError, KeyError):
+                vals = []
+            out = []
+            for idx in range(self._racecontext.race.num_nodes):
+                v = vals[idx] if idx < len(vals) else None
+                if not v:
+                    out.append(v)
+                    continue
+                raw = self._uncorrect(int(v), old_eq[idx] if old_eq else None)
+                out.append(max(1, int(self._corrected(
+                    raw, new_eq[idx] if new_eq else None))))
+            return out
+
+        enter_ats = convert(getattr(profile, 'enter_ats', None))
+        exit_ats = convert(getattr(profile, 'exit_ats', None))
+        self._racecontext.rhdata.alter_profile({
+            'profile_id': profile.id,
+            'enter_ats': dict(want, v=enter_ats),
+            'exit_ats': dict(want, v=exit_ats),
+        })
+        self._racecontext.race.profile = self._racecontext.rhdata.get_profile(profile.id)
+        self.hardware_set_all_enter_ats(enter_ats)
+        self.hardware_set_all_exit_ats(exit_ats)
+        logger.info('Converted EnterAt/ExitAt onto the new correction: enter=%s',
+                    enter_ats)
+        return enter_ats, exit_ats
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
