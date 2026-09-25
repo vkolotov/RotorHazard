@@ -169,6 +169,21 @@ class Calibration:
             12 if node_full_resolution(node) else 10
             for node in self._racecontext.interface.nodes]
 
+    def nodes_are_homogeneous(self):
+        """True when every node reports the same ADC width.
+
+        Every node on a multi-node board shares one processor, so a mixed
+        fleet needs two boards on separate serial ports. Scaling a threshold
+        or fitting one destination across widths that differ by eight cannot
+        produce a value all of them can represent, so the configuration is
+        refused rather than half-applied.
+        """
+        nodes = self._racecontext.interface.nodes
+        if not nodes:
+            return True
+        return len({12 if node_full_resolution(node) else 10
+                    for node in nodes}) == 1
+
     def _eq_participants(self):
         """Which nodes the wizard calibrates.
 
@@ -408,7 +423,11 @@ class Calibration:
                  for l, c in self._eq_steps()]
         last = [k for k in order if k in captured][-1]
         del captured[last]
+        # Cancel a capture still settling, then re-stamp what remains: the
+        #  earlier steps are still valid for this configuration and stepping
+        #  back must not throw them away.
         self._eq_invalidate_session()
+        self._eq_note_capture_session()
         logger.info('Equalisation stepped back, discarded %s', last)
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
@@ -428,12 +447,30 @@ class Calibration:
         self._eq_busy = True
         try:
             self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
+            failed = []
             for idx in range(num):
-                self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256)
+                if not self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256):
+                    failed.append(idx + 1)
+            if not failed:
+                # Clearing the correction moves the axis just as applying one
+                #  does; convert inside the guard, since this writes to nodes.
+                self.convert_thresholds_to_scale(from_axis=previous_axis)
         finally:
             self._eq_busy = False
-        # Clearing the correction moves the axis just as applying one does.
-        self.convert_thresholds_to_scale(from_axis=previous_axis)
+
+        if failed:
+            # A node that did not confirm may still be correcting, so the axis
+            #  is unknown and the thresholds must not be moved as though it
+            #  were not.
+            self._eq_unresolved = list(failed)
+            msg = ('Equalisation reset was not accepted by node(s) {0}; '
+                   'their correction is unknown - retry before racing').format(
+                       ', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return False
+        self._eq_unresolved = []
         self.eq_reset_extremums()
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation cleared')
@@ -471,6 +508,13 @@ class Calibration:
         # Read every node's captures first: the destination is the widest span
         #  in the fleet, so no node can be fitted until all of them are known.
         #  Nodes not taking part get no fit and stay uncorrected.
+        if not self.nodes_are_homogeneous():
+            msg = ('Nodes are not all on the same ADC width; equalisation '
+                   'needs one width across the fleet')
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            return False
+
         taking_part = self._eq_participants()
         if not taking_part:
             msg = 'No node is available to calibrate'
@@ -542,6 +586,11 @@ class Calibration:
                         offset_los[idx], slope_los[idx]):
                     failed.append(idx + 1)
 
+            if not failed:
+                # Still inside the guard: the conversion writes thresholds to
+                #  the nodes, so the window is not safe to race in either.
+                self.convert_thresholds_to_scale(from_axis=previous_axis)
+
             gevent.sleep(0.5)
             self.eq_reset_extremums()
             gevent.sleep(0.5)
@@ -553,18 +602,16 @@ class Calibration:
             # The stored fit no longer describes the hardware, so the axis is
             #  unknown rather than merely different. Say so instead of
             #  converting thresholds onto an axis that may not exist.
+            self._eq_unresolved = list(failed)
             msg = ('Equalisation was not accepted by node(s) {0}; '
-                   'their correction is unknown - re-run calibration before '
-                   'racing').format(', '.join(str(n) for n in failed))
+                   'their correction is unknown - re-run calibration or reset '
+                   'it before racing').format(', '.join(str(n) for n in failed))
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
             self._racecontext.rhui.emit_eq_wizard_state()
             return False
 
-        # Applying a fit moves the axis every threshold is measured against,
-        #  so the stored thresholds have to move with it.
-        self.convert_thresholds_to_scale(from_axis=previous_axis)
-
+        self._eq_unresolved = []
         self._eq_captured = {}
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation applied: pivots=%s slopes=%s/%s',
@@ -572,6 +619,18 @@ class Calibration:
         self._racecontext.rhui.emit_priority_message(
             'Equalisation applied to {0} nodes'.format(num))
         return True
+
+    def eq_state_is_unresolved(self):
+        """True when the correction on the nodes is not known to be correct.
+
+        Set when a coefficient write is not confirmed: some nodes may be on a
+        new correction with thresholds still on the old one, and others in an
+        unknown state. Timing against that is worse than refusing to start.
+        """
+        return bool(getattr(self, '_eq_unresolved', None))
+
+    def eq_unresolved_nodes(self):
+        return list(getattr(self, '_eq_unresolved', []) or [])
 
     def eq_reset_extremums(self):
         """Restart peak/nadir tracking on every node.

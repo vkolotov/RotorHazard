@@ -2829,6 +2829,15 @@ def on_set_config(data):
                 'GENERAL', 'FULL_RSSI_RESOLUTION')):
             RaceContext.rhui.emit_rssi_resolution_state()
             return
+        # Refuse before anything is written rather than skipping the threshold
+        #  conversion afterwards, which would leave the nodes on a new width
+        #  with thresholds still on the old one.
+        if not RaceContext.calibration.nodes_are_homogeneous():
+            RaceContext.rhui.emit_priority_message(
+                __('Nodes are not all on the same ADC width; the RSSI resolution '
+                   'cannot be changed for a mixed fleet.'))
+            RaceContext.rhui.emit_rssi_resolution_state()
+            return
     RaceContext.serverconfig.set_item(data['section'], data['key'], data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'ADMIN_SOCKET_AUTH':
         AdminAuth.set_admin_socket_auth_enabled(data['value'])
