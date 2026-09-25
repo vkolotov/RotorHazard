@@ -332,7 +332,12 @@ class Calibration:
                 tuning)
 
     def _eq_captures_are_current(self):
-        """True when the captures on hand belong to the configuration in use."""
+        """True when the captures on hand belong to the configuration in use.
+
+        A capture set survives between steps, so it can outlive the profile it
+        was measured under; fitting it afterwards would describe the wrong
+        receivers.
+        """
         captured = getattr(self, '_eq_captured', None)
         if not captured:
             return True
@@ -524,6 +529,7 @@ class Calibration:
             offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
             offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
 
+        # The axis the thresholds are on right now, before the new fit lands.
         previous_axis = self.threshold_scale_id()
 
         self._eq_busy = True
@@ -535,12 +541,18 @@ class Calibration:
                         idx, pivots[idx], offset_ups[idx], slope_ups[idx],
                         offset_los[idx], slope_los[idx]):
                     failed.append(idx + 1)
+
+            gevent.sleep(0.5)
+            self.eq_reset_extremums()
+            gevent.sleep(0.5)
+            self.eq_reset_extremums()
         finally:
             self._eq_busy = False
 
         if failed:
             # The stored fit no longer describes the hardware, so the axis is
-            #  unknown rather than merely different.
+            #  unknown rather than merely different. Say so instead of
+            #  converting thresholds onto an axis that may not exist.
             msg = ('Equalisation was not accepted by node(s) {0}; '
                    'their correction is unknown - re-run calibration before '
                    'racing').format(', '.join(str(n) for n in failed))
@@ -549,13 +561,9 @@ class Calibration:
             self._racecontext.rhui.emit_eq_wizard_state()
             return False
 
-        # Applying a fit moves the axis every threshold is measured against.
+        # Applying a fit moves the axis every threshold is measured against,
+        #  so the stored thresholds have to move with it.
         self.convert_thresholds_to_scale(from_axis=previous_axis)
-
-        gevent.sleep(0.5)
-        self.eq_reset_extremums()
-        gevent.sleep(0.5)
-        self.eq_reset_extremums()
 
         self._eq_captured = {}
         self._racecontext.rhui.emit_eq_wizard_state()
@@ -604,17 +612,40 @@ class Calibration:
         self.eq_reset_extremums()
         return not failed
 
-    def threshold_scale_id(self):
+    def current_adc_bits(self):
+        """The width the nodes are sampling at right now.
+
+        None when the fleet is not on one width. Every node on a multi-node
+        board shares its processor, so this only arises with two boards of
+        different types on separate serial ports - out of scope here, and
+        reported rather than averaged over.
+        """
+        nodes = self._racecontext.interface.nodes
+        if not nodes:
+            return None
+        widths = {12 if node_full_resolution(node) else 10 for node in nodes}
+        if len(widths) > 1:
+            logger.warning('Nodes are not on one ADC width (%s); '
+                           'threshold and equalisation scaling need a single '
+                           'width and will be skipped', sorted(widths))
+            return None
+        return widths.pop()
+
+    def threshold_scale_id(self, bits=None):
         """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
 
         A threshold is compared against whatever rssiRead() returns, which is
-        the reading after equalisation, so the correction in force defines the
-        axis and a stored value only means the same thing while it holds.
+        the ADC width *after* equalisation. Both halves therefore identify the
+        axis, and a stored value only means the same thing while both match.
         """
-        return {'eq': self._eq_signature()}
+        if bits is None:
+            bits = self.current_adc_bits()
+        return {'adc_bits': bits, 'eq': self._eq_signature(bits)}
 
-    def _eq_signature(self):
+    def _eq_signature(self, bits):
         """The correction in force, per node, or None where there is none."""
+        if not self._eq_resolution_matches(bits):
+            return None  # correction is disabled at this width
         pivots = self._eq_stored('eq_pivots', 0)
         if not any(pivots):
             return None
@@ -639,7 +670,11 @@ class Calibration:
         return max(0, adj)
 
     def _uncorrect(self, value, coeffs):
-        """The raw reading that produces `value` under `coeffs`."""
+        """The raw reading that produces `value` under `coeffs`.
+
+        The forward transform is two straight segments, so each is inverted
+        directly; the pivot says which one applies.
+        """
         if not coeffs:
             return value
         pivot, off_up, slope_up, off_lo, slope_lo = coeffs
@@ -650,37 +685,38 @@ class Calibration:
             return int(round(value * 256.0 / slope_up)) + off_up if slope_up else value
         return int(round(value * 256.0 / slope_lo)) + off_lo if slope_lo else value
 
-    def _stored_scale_id(self, profile):
-        """The axis the stored thresholds were written on, if recorded.
+    def convert_thresholds_to_scale(self, target_bits=None, from_axis=None):
+        """Move stored EnterAt/ExitAt onto the axis the nodes are on now.
 
-        Profiles written before this was tracked carry no marker; they predate
-        equalisation, so they are uncorrected.
-        """
-        raw = getattr(profile, 'enter_ats', None)
-        if not raw:
-            return None
-        try:
-            stored = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-        return {'eq': stored.get('eq')}
+        A threshold is a corrected value, not a raw one, so it cannot simply be
+        multiplied by the ratio of ADC widths: the correction in force may have
+        changed at the same moment. Undo the old correction to recover the raw
+        reading, rescale that by the ratio of widths, then apply whatever
+        correction is now in force.
 
-    def convert_thresholds_to_scale(self, from_axis=None):
-        """Move stored EnterAt/ExitAt onto the axis now in force.
-
-        A threshold is a corrected value, so when the correction changes the
-        number has to change with it to keep meaning the same physical signal.
-        Undo the old correction to recover the raw reading, then apply the new
-        one. Idempotent: a profile already on this axis is left alone.
+        Idempotent: the stored scale is recorded alongside the values, and a
+        profile already on the target axis is left untouched. That also makes
+        this safe to call when activating a profile, which is the only way a
+        profile that was not open during a switch ever gets converted.
         """
         profile = self._racecontext.race.profile
-        want = self.threshold_scale_id()
-        have = from_axis if from_axis is not None else self._stored_scale_id(profile)
-        if have == want:
+        if target_bits is None:
+            target_bits = self.current_adc_bits()
+        if target_bits is None:
             return None, None
 
+        want = self.threshold_scale_id(target_bits)
+        # `from_axis` is the axis the caller knows the values are on, for the
+        #  case where the stored record has already been overwritten - applying
+        #  a fit stores the new coefficients before the thresholds move.
+        have = from_axis if from_axis is not None else self._stored_scale_id(profile)
+        if have == want:
+            return None, None  # already on this axis
+
+        old_bits = (have or {}).get('adc_bits') or target_bits
         old_eq = (have or {}).get('eq')
         new_eq = want['eq']
+        ratio = (8 if target_bits == 12 else 1) / (8 if old_bits == 12 else 1)
 
         def convert(raw_json):
             try:
@@ -694,8 +730,9 @@ class Calibration:
                     out.append(v)
                     continue
                 raw = self._uncorrect(int(v), old_eq[idx] if old_eq else None)
-                out.append(max(1, int(self._corrected(
-                    raw, new_eq[idx] if new_eq else None))))
+                raw = raw * ratio
+                out.append(max(1, int(round(self._corrected(
+                    int(round(raw)), new_eq[idx] if new_eq else None)))))
             return out
 
         enter_ats = convert(getattr(profile, 'enter_ats', None))
@@ -708,9 +745,26 @@ class Calibration:
         self._racecontext.race.profile = self._racecontext.rhdata.get_profile(profile.id)
         self.hardware_set_all_enter_ats(enter_ats)
         self.hardware_set_all_exit_ats(exit_ats)
-        logger.info('Converted EnterAt/ExitAt onto the new correction: enter=%s',
-                    enter_ats)
+        logger.info("Converted EnterAt/ExitAt from %s-bit to %s-bit: enter=%s",
+                    old_bits, target_bits, enter_ats)
         return enter_ats, exit_ats
+
+    def _stored_scale_id(self, profile):
+        """The axis the stored thresholds were written on, if it was recorded.
+
+        Profiles written before this was tracked carry no marker; they are
+        legacy 8-bit with no correction, which is all the older code produced.
+        """
+        raw = getattr(profile, 'enter_ats', None)
+        if not raw:
+            return None
+        try:
+            stored = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if 'adc_bits' not in stored:
+            return {'adc_bits': 10, 'eq': None}
+        return {'adc_bits': stored.get('adc_bits'), 'eq': stored.get('eq')}
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
@@ -749,18 +803,46 @@ class Calibration:
         self._racecontext.rhui.emit_enter_and_exit_at_levels()  # one broadcast for all nodes
 
     def _race_matches_resolution(self, race):
-        """True if this saved race was timed at the width now in use.
+        """True if this saved race was timed on the axis now in use.
 
-        Races saved before the width became switchable carry no tag; they are
-        8-bit, because that is all the firmware of the time could produce.
+        Adaptive calibration restores EnterAt/ExitAt straight out of race
+        history, so a race is only reusable while the axis that produced it
+        still holds - both the ADC width and the correction, since either one
+        changes what a stored number means.
+
+        Races saved before this was tracked carry no tag; they are 8-bit with
+        no correction, which is all the firmware of the time could produce.
         """
         current = self.current_adc_bits()
         if current is None:
             return True
         tagged = self._racecontext.rhdata.get_savedrace_attribute_value(
             race, 'adc_bits', None)
-        stored = int(tagged) if tagged else 10
-        return stored == current
+        stored_bits = int(tagged) if tagged else 10
+        if stored_bits != current:
+            return False
+        stored_eq = self._racecontext.rhdata.get_savedrace_attribute_value(
+            race, 'eq_signature', None)
+        live_eq = self._eq_signature(current)
+        return self._eq_signature_key(stored_eq) == self._eq_signature_key(live_eq)
+
+    @staticmethod
+    def _eq_signature_key(signature):
+        """A comparable form of an equalisation signature.
+
+        Stored ones arrive as JSON text, live ones as lists; None and the
+        string "null" both mean no correction.
+        """
+        if signature is None or signature == 'null':
+            return None
+        if isinstance(signature, str):
+            try:
+                signature = json.loads(signature)
+            except (TypeError, ValueError):
+                return None
+        if not signature:
+            return None
+        return json.dumps(signature, sort_keys=True)
 
     def find_best_calibration_values(self, node, seat_index):
         ''' Search race history for best tuning values '''

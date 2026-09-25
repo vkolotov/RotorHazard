@@ -129,9 +129,9 @@ class RHRace():
 
         data = self._filters.run_filters(Flt.RACE_STAGE, data)
 
-        # Calibration rewrites coefficients on the nodes and clears their peak
-        #  tracking. Guard here rather than at the socket handler, so
-        #  scheduled and API starts are covered too.
+        # Calibration rewrites coefficients and thresholds on the nodes and
+        #  clears their peak tracking. Guard here rather than at the socket
+        #  handler, so scheduled and API starts are covered too.
         if getattr(self._racecontext.calibration, '_eq_busy', False):
             logger.info("Canceling staging, calibration is updating the nodes")
             self._racecontext.rhui.emit_priority_message(
@@ -735,6 +735,13 @@ class RHRace():
                     self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
                         'race_attr': 'adc_bits',
                         'value': str(adc_bits),
+                        })
+                    # The correction too: the width alone does not identify the
+                    #  axis a threshold was measured on.
+                    self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
+                        'race_attr': 'eq_signature',
+                        'value': json.dumps(
+                            self._racecontext.calibration._eq_signature(adc_bits)),
                         })
 
                 race_data = {}
