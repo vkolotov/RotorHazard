@@ -17,6 +17,7 @@ for folder in ('interface', 'server'):
     sys.path.insert(0, str(SRC / folder))
 
 from Node import Node
+import calibration
 from calibration import Calibration
 import vtx_control
 
@@ -204,6 +205,8 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             nodes[0].node_peak_rssi = 180
             nodes[1].node_peak_rssi = 175
+            nodes[0].current_rssi = 180
+            nodes[1].current_rssi = 175
             self.assertTrue(cal.eq_sweep_level('high'))
 
         self.assertEqual(sent, ['R1', 'R2'])
@@ -216,13 +219,16 @@ class SweepTest(unittest.TestCase):
         cal._eq_mode = 'auto'
         cal._eq_captured = {'noise': [90, 90]}
         cal._eq_note_capture_session()
-        answers = [(False, 'still on old channel')] * 3 + [(True, 'confirmed')] * 2
+        # Fail every attempt but the last, so the retry is what gets it through.
+        attempts = calibration.EQ_CHANNEL_RETRIES + 1
+        answers = ([(False, 'still on old channel')] * (attempts - 1)
+                   + [(True, 'confirmed')] * 2)
         with patch.object(cal._vtx(), 'confirm_channel', side_effect=answers), \
                 patch('calibration.gevent.sleep'):
-            nodes[0].node_peak_rssi = 180
-            nodes[1].node_peak_rssi = 175
+            nodes[0].current_rssi = 180
+            nodes[1].current_rssi = 175
             self.assertTrue(cal.eq_sweep_level('high'))
-        self.assertEqual(sent, ['R1'] * 4 + ['R2'])
+        self.assertEqual(sent, ['R1'] * attempts + ['R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
@@ -259,6 +265,8 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             nodes[0].node_peak_rssi = 180
             nodes[1].node_peak_rssi = 175
+            nodes[0].current_rssi = 180
+            nodes[1].current_rssi = 175
             self.assertFalse(cal.eq_sweep_level('high'))
 
         self.assertIn('high:R1', cal._eq_captured)
@@ -283,7 +291,7 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1'] * 4)
+        self.assertEqual(sent, ['R1'] * (calibration.EQ_CHANNEL_RETRIES + 1))
         self.assertNotIn('high:R1', cal._eq_captured)
         self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
 
@@ -304,6 +312,8 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             nodes[0].node_peak_rssi = 180
             nodes[1].node_peak_rssi = 175
+            nodes[0].current_rssi = 180
+            nodes[1].current_rssi = 175
             self.assertFalse(cal.eq_sweep_level('high'))
 
         self.assertEqual(sent, ['R1'])
