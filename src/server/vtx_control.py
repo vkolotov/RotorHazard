@@ -62,23 +62,31 @@ VTX_CONFIRM_SEPARATION_FRACTION = 0.10
 #  quad at the gate, a commanded channel lands three seconds after the command:
 #  the handset waits a second before its first send, then repeats twice more at
 #  half-second intervals, and the receiver has to pass the change to the VTX.
-#  Polling returns as soon as the change is visible, so a generous limit costs
-#  nothing when things are working, and the sweep now abandons the whole run on
-#  a timeout - so the limit has to be well clear of a merely slow change rather
-#  than merely above the typical one.
-VTX_CONFIRM_TIMEOUT_SECONDS = 15.0
+#
+# Long enough to outlast the handset's ten second disconnect debounce and still
+#  leave room for a resend afterwards, because a command that arrives during
+#  that window is discarded rather than delayed. Polling returns as soon as the
+#  change is visible, so this costs nothing when things are working.
+VTX_CONFIRM_TIMEOUT_SECONDS = 30.0
 
 # How long to let the backpack change the address it sends to before using it,
 #  and to let a packet leave before the address is put back.
 VTX_ADDRESS_SETTLE_SECONDS = 0.5
 
-# How long to wait for a change before commanding the channel again. A change
-#  that is going to happen is visible about three seconds after the command, so
-#  anything still unchanged after four has most likely been lost rather than
-#  merely delayed. Not shorter: every command makes the handset write the
-#  receiver's configuration to flash, and repeated writes are what appear to
-#  leave the quad unresponsive until it is power cycled.
-VTX_RESEND_SECONDS = 4.0
+# How long to wait for a change before commanding the channel again.
+#
+# Past the handset's disconnect debounce, which is the constraint that matters.
+#  When the quad's link drops - as it does if the flight controller restarts
+#  after a configuration write - the handset discards the queued packets and
+#  refuses to send VTX configuration for ten seconds
+#  (VTX_DISCONNECT_DEBOUNCE_MS in the ELRS firmware). Anything commanded inside
+#  that window updates the handset's stored configuration and never reaches the
+#  quad, so resending faster than the debounce achieves nothing and only adds
+#  flash writes.
+#
+# A change that is going to work is visible in about three seconds, so a resend
+#  only ever happens once the first command has genuinely not arrived.
+VTX_RESEND_SECONDS = 12.0
 
 # How long each read of the nodes watches for, the gap between those reads, and
 #  how often the live reading is sampled inside one.
