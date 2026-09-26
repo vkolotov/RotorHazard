@@ -16,7 +16,9 @@ checks the receiver RSSI before recording a calibration measurement.
    baseline. Require two consecutive observations of a clear rise on that
    channel. Similar rises on competing channels are ambiguous, not success.
 5. Retry an unconfirmed command at seven-second intervals, at most three
-   additional sends within a bounded 28-second confirmation window.
+   additional sends within a bounded 28-second confirmation window. For the
+   first capture, each retry repeats parking and refreshes the baseline before
+   sending the target; its confirmation window allows 49 seconds for this.
 6. Only after confirmation, clear peaks once and capture for three seconds.
    Stop on failure instead of recording or skipping past an uncertain channel.
 7. Review both passes, then Apply explicitly.
@@ -24,7 +26,8 @@ checks the receiver RSSI before recording a calibration measurement.
 The initial move is deliberately not replaced with “highest RSSI means the
 right channel”: receiver sensitivity and adjacent-channel bleed invalidate that
 shortcut. If the initial parking command fails and no target transition can be
-established, the pass stops rather than accepting unchanged readings.
+established, repeat parking before retrying the target. If those retries fail,
+the pass stops rather than accepting unchanged readings.
 
 Automatic capture currently requires at least two distinct watched channels.
 Use **Current channels**. A selected band scope is accepted only if every
@@ -59,7 +62,13 @@ flight-controller restart, or a changed goggles channel with quad confirmation.
 Simulation tests exercise all eight possible starting channels, lost commands,
 exhausted retries, weak 8-bit signals, ambiguous rises, cancellation, independent
 per-channel captures, and high + low + Apply through the actual sweep/detector.
-Hardware validation is separate; simulations do not prove delivery over RF.
+Live 8-bit checks confirmed all eight Raceband channels, including recovery
+from a missed initial parking command. Delivery is still intermittent: the
+continuous check confirmed R1–R6, then stopped on R7 after all three retries
+with RSSI unchanged on R6. A subsequent check confirmed R8 and then R7 (one
+retry). This is not evidence of a reliable uninterrupted full sweep yet.
+The checks used live RSSI and the production detector, without capturing or
+applying calibration; full near/far hardware calibration remains unverified.
 Only one quad should transmit during calibration. Noise capture while the quad
 is on invalidates the calibration, even though transition detection itself does
 not use the noise floor. Neither power control nor firmware flashing is needed.
