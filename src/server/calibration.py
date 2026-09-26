@@ -44,6 +44,17 @@ EQ_FULL_SCALE = 255
 #  and 4.75x.
 EQ_MIN_LEVEL_FRACTION = 15.0 / 255
 
+# Levels shown when nothing has been captured, so the fields start from a
+#  working state rather than from blanks. Every node carrying the same pair
+#  makes the destination equal to that pair's own spans, so the fit comes out
+#  at unity slope and applying it corrects nothing - the same no-op the nodes
+#  hold after a reset. Round numbers, to read as the placeholders they are.
+#  The total span stays under the headroom limit, which would otherwise shrink
+#  the destination and pull the slopes off unity.
+EQ_IDENTITY_NOISE = 10
+EQ_IDENTITY_LOW = 70
+EQ_IDENTITY_HIGH = 120
+
 # How long to watch a node after clearing its extremes, before reading them.
 #  The clear has to happen after the operator has set the condition up, not
 #  before: a peak only ever rises, so extremes cleared at the end of the
@@ -306,15 +317,18 @@ class Calibration:
                 'high': captured.get('high:{0}'.format(labels[i]), [None] * num)[i],
             } for i in range(num)]
 
+        # Nothing captured: show levels that fit to no correction at all, so
+        #  the fields start from a working state rather than from blanks. The
+        #  destination is derived from the captures, so any pair whose spans
+        #  match the destination's fits unity slopes; EQ_IDENTITY_LOW and
+        #  EQ_IDENTITY_HIGH are that pair, and applying them is a no-op.
         pivots = self._eq_stored('eq_pivots', 0)
-        ups = self._eq_stored('eq_slope_ups', 256)
-        los = self._eq_stored('eq_slope_los', 256)
         return [{
             'channel': labels[i],
-            'mode': 'applied' if pivots[i] else 'empty',
-            'noise': None, 'low': pivots[i] or None,
-            'high': None if not pivots[i] else ups[i],
-            'slope_lo': None if not pivots[i] else los[i],
+            'mode': 'applied' if pivots[i] else 'identity',
+            'noise': EQ_IDENTITY_NOISE,
+            'low': EQ_IDENTITY_LOW,
+            'high': EQ_IDENTITY_HIGH,
         } for i in range(num)]
 
     @catchLogExceptionsWrapper

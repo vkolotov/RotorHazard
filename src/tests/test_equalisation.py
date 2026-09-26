@@ -280,6 +280,47 @@ class EqualisationTest(unittest.TestCase):
         self.assertEqual(cal._eq_captured['high:R1'], [187])
         self.assertTrue(ctx.rhui.emit_priority_message.called)
 
+    def test_nothing_captured_shows_levels_that_correct_nothing(self):
+        """Empty fields give the operator nothing to start from.
+
+        The defaults have to be a real working pair, not placeholders that
+        would distort the fit if applied: every node carrying the same levels
+        makes the destination equal to those levels' spans, so the slopes come
+        out at unity and applying them is the no-op a reset leaves behind.
+        """
+        import calibration as cal_mod
+        ctx, _, cal = self.context(count=3)
+        rows = cal.eq_captured_table()
+        self.assertTrue(all(r['mode'] == 'identity' for r in rows))
+        self.assertEqual([r['low'] for r in rows],
+                         [cal_mod.EQ_IDENTITY_LOW] * 3)
+        self.assertEqual([r['high'] for r in rows],
+                         [cal_mod.EQ_IDENTITY_HIGH] * 3)
+
+        # applying exactly those levels must leave every node uncorrected
+        with patch('calibration.gevent.sleep'):
+            cal._eq_captured = {
+                'noise': [cal_mod.EQ_IDENTITY_NOISE] * 3,
+                'low:R1': [cal_mod.EQ_IDENTITY_LOW] * 3,
+                'low:R2': [cal_mod.EQ_IDENTITY_LOW] * 3,
+                'low:R3': [cal_mod.EQ_IDENTITY_LOW] * 3,
+                'high:R1': [cal_mod.EQ_IDENTITY_HIGH] * 3,
+                'high:R2': [cal_mod.EQ_IDENTITY_HIGH] * 3,
+                'high:R3': [cal_mod.EQ_IDENTITY_HIGH] * 3,
+            }
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+        for call in ctx.interface.set_equalisation.call_args_list:
+            _, _, _, slope_up, _, slope_lo = call.args
+            self.assertEqual((slope_up, slope_lo), (256, 256))
+
+    def test_identity_defaults_clear_the_band_guard(self):
+        """The defaults must not be a pair the capture guard would refuse."""
+        import calibration as cal_mod
+        _, _, cal = self.context(count=1)
+        self.assertGreaterEqual(
+            cal_mod.EQ_IDENTITY_HIGH - cal_mod.EQ_IDENTITY_LOW, cal._eq_min_gap())
+
     def test_unconfirmed_write_is_not_recorded(self):
         """A coefficient write the node never acknowledged is not success."""
         import RHInterface
