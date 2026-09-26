@@ -301,8 +301,13 @@ class EqualisationTest(unittest.TestCase):
         cal._eq_invalidate_session()
         self.assertNotEqual(cal._eq_session(), before)
 
-    def test_apply_moves_thresholds_onto_the_new_axis(self):
-        """A threshold is a corrected value, so applying a fit must move it."""
+    def test_apply_leaves_the_thresholds_alone(self):
+        """EnterAt/ExitAt are the operator's, and applying a fit must not move them.
+
+        The correction does change what a given number means, but a tuned
+        threshold is a judgement about what the gate should trigger on, and
+        rewriting it silently is worse than leaving it for the operator.
+        """
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context()
             ctx.race.profile.enter_ats = json.dumps({'v': [169]})
@@ -311,11 +316,8 @@ class EqualisationTest(unittest.TestCase):
                                         ([v] for v in (90, 150, 210))))
             cal._eq_note_capture_session()
             self.assertTrue(cal.eq_wizard_apply())
-            stored = json.loads(ctx.race.profile.enter_ats)
-            # the raw level 169 is unchanged; its corrected value is not 169
-            self.assertIsNotNone(stored['eq'])
-            self.assertNotEqual(stored['v'], [169])
-            self.assertEqual(cal._uncorrect(stored['v'][0], stored['eq'][0]), 169)
+            self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
+            self.assertEqual(json.loads(ctx.race.profile.exit_ats)['v'], [160])
 
     def test_apply_refuses_when_a_node_does_not_confirm(self):
         """An unconfirmed write leaves the axis unknown, not merely changed."""
@@ -358,21 +360,18 @@ class EqualisationTest(unittest.TestCase):
             self.assertTrue(cal.eq_state_is_unresolved())
             self.assertEqual(cal.eq_unresolved_nodes(), [1])
 
-    def test_busy_covers_threshold_writes(self):
-        """The guard must still be set while thresholds are written."""
-        seen = []
+    def test_apply_writes_no_thresholds_at_all(self):
+        """Applying a fit touches the node constants and nothing else."""
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context()
             ctx.race.profile.enter_ats = json.dumps({'v': [169]})
             ctx.race.profile.exit_ats = json.dumps({'v': [160]})
-            ctx.interface.set_enter_at_level.side_effect = \
-                lambda *a, **k: seen.append(cal._eq_busy)
             cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
                                         ([v] for v in (90, 150, 210))))
             cal._eq_note_capture_session()
             self.assertTrue(cal.eq_wizard_apply())
-        self.assertTrue(seen, 'thresholds were never written')
-        self.assertTrue(all(seen), 'guard was released before threshold writes')
+        ctx.interface.set_enter_at_level.assert_not_called()
+        ctx.interface.set_exit_at_level.assert_not_called()
 
     def test_back_keeps_the_earlier_captures(self):
         """Stepping back cancels a pending capture, not the retained ones."""
@@ -406,13 +405,8 @@ class EqualisationTest(unittest.TestCase):
         values.clear()
         self.assertFalse(cal._race_matches_correction(race))
 
-    def test_retry_after_failed_apply_converts_from_the_real_axis(self):
-        """A failed attempt must not corrupt the source axis for the retry.
-
-        The failure persists the desired coefficients while leaving the
-        thresholds alone, so the axis has to be read from the record that
-        travels with the thresholds, not from the coefficients.
-        """
+    def test_a_failed_apply_then_a_retry_leaves_the_thresholds_alone(self):
+        """Neither the failure nor the retry may touch EnterAt/ExitAt."""
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context()
             ctx.race.profile.enter_ats = json.dumps({'v': [169]})
@@ -426,27 +420,19 @@ class EqualisationTest(unittest.TestCase):
             self.assertFalse(cal.eq_wizard_apply())
             self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
 
-            # retry, this time the nodes take it
             ctx.interface.set_equalisation.return_value = True
             cal._eq_captured = dict(captures)
             cal._eq_note_capture_session()
             self.assertTrue(cal.eq_wizard_apply())
-            stored = json.loads(ctx.race.profile.enter_ats)
-            self.assertEqual(cal._uncorrect(stored['v'][0], stored['eq'][0]), 169)
-            self.assertNotEqual(stored['v'], [169])
+            self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
             self.assertFalse(cal.eq_state_is_unresolved())
 
-    def test_retry_after_failed_reset_converts_from_the_real_axis(self):
-        """Same for the reverse path: a failed reset then a good one."""
+    def test_reset_leaves_the_thresholds_alone(self):
+        """Clearing the correction must not rewrite them either."""
         ctx, _, cal = self.context()
-        corrected = {'v': [80], 'eq': [[150, 89, 256, 89, 256]]}
-        ctx.race.profile.enter_ats = json.dumps(corrected)
-        ctx.race.profile.exit_ats = json.dumps(corrected)
+        ctx.race.profile.enter_ats = json.dumps({'v': [80]})
+        ctx.race.profile.exit_ats = json.dumps({'v': [75]})
         ctx.race.profile.eq_pivots = json.dumps({'v': [150]})
-        ctx.race.profile.eq_offset_ups = json.dumps({'v': [89]})
-        ctx.race.profile.eq_slope_ups = json.dumps({'v': [256]})
-        ctx.race.profile.eq_offset_los = json.dumps({'v': [89]})
-        ctx.race.profile.eq_slope_los = json.dumps({'v': [256]})
 
         ctx.interface.set_equalisation.return_value = False
         self.assertFalse(cal.eq_wizard_reset())
@@ -454,8 +440,8 @@ class EqualisationTest(unittest.TestCase):
 
         ctx.interface.set_equalisation.return_value = True
         self.assertTrue(cal.eq_wizard_reset())
-        # correction is gone, so the threshold returns to the raw level
-        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
+        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [80])
+        self.assertEqual(json.loads(ctx.race.profile.exit_ats)['v'], [75])
         self.assertFalse(cal.eq_state_is_unresolved())
 
     def test_reset_holds_the_guard_through_its_tracking_reset(self):
