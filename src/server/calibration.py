@@ -263,12 +263,15 @@ class Calibration:
             logger.info('Discarding equalisation captures: configuration changed')
             captured = {}
             self._eq_captured = {}
+            self._eq_applied_captures = False
 
         vtx = self.eq_vtx_available()
 
-        if not captured and any(self._eq_stored('eq_pivots', 0)):
+        applied = any(self._eq_stored('eq_pivots', 0))
+        if applied and (not captured or getattr(self, '_eq_applied_captures', False)):
             # already calibrated - do not arm the first step, so a stray click
-            #  cannot start overwriting a good calibration
+            #  cannot start overwriting a good calibration. The captures behind
+            #  the fit are kept so a level can still be corrected and re-applied.
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
                     'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
@@ -290,9 +293,14 @@ class Calibration:
         labels = self._eq_node_channels()
 
         if captured:
+            # The captures stay after a fit is applied, so say which it is:
+            #  the page shows the same editable levels either way, but only an
+            #  applied fit has constants on the nodes behind them.
+            mode = 'applied-capture' \
+                if getattr(self, '_eq_applied_captures', False) else 'capture'
             noise = captured.get('noise', [None] * num)
             return [{
-                'channel': labels[i], 'mode': 'capture',
+                'channel': labels[i], 'mode': mode,
                 'noise': noise[i],
                 'low': captured.get('low:{0}'.format(labels[i]), [None] * num)[i],
                 'high': captured.get('high:{0}'.format(labels[i]), [None] * num)[i],
@@ -393,6 +401,9 @@ class Calibration:
                 return False
 
             self._eq_captured = getattr(self, '_eq_captured', {})
+            # a fresh reading supersedes whatever fit was applied from the old
+            #  set, so these captures are a new run rather than its record
+            self._eq_applied_captures = False
             self._eq_captured[key] = vals
             self._eq_note_capture_session()
             logger.info('Equalisation captured %s: %s', key, vals)
@@ -446,8 +457,14 @@ class Calibration:
                 return False
 
         previous = captured[key][node_index]
+        if previous == value:
+            return True  # nothing to do; do not disturb an applied fit
         captured[key][node_index] = value
         self._eq_captured = captured
+        # The applied constants were fitted from the old value, so the fit is
+        #  now stale. Keep it on the nodes - it is better than nothing while
+        #  the operator finishes editing - but let the wizard offer Apply again.
+        self._eq_applied_captures = False
         # The edit belongs to this configuration like a capture does, so it is
         #  stamped the same way and survives a state query.
         self._eq_note_capture_session()
@@ -579,6 +596,8 @@ class Calibration:
                  for l, c in self._eq_steps()]
         last = [k for k in order if k in captured][-1]
         del captured[last]
+        # the set no longer matches the fit that was applied from it
+        self._eq_applied_captures = False
         # Cancel a capture still settling, then re-stamp what remains: the
         #  earlier steps are still valid for this configuration and stepping
         #  back must not throw them away.
@@ -597,6 +616,7 @@ class Calibration:
         against uncorrected readings, so a fresh run has to start from raw.
         """
         self._eq_captured = {}
+        self._eq_applied_captures = False
         self._eq_invalidate_session()
         previous_axis = self._stored_scale_id(self._racecontext.race.profile)
         num = self._racecontext.race.num_nodes
@@ -767,7 +787,12 @@ class Calibration:
         gevent.sleep(0.5)
         self.eq_reset_extremums()
 
-        self._eq_captured = {}
+        # Keep the captures. They are what the fit was made from, so holding
+        #  them lets a level that read wrong be corrected and re-applied
+        #  without sweeping the whole fleet again. They are raw readings taken
+        #  before any correction was on the nodes, so they stay valid as the
+        #  source for a new fit.
+        self._eq_applied_captures = True
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation applied: pivots=%s slopes=%s/%s',
                     pivots, slope_ups, slope_los)

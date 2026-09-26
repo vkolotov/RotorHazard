@@ -489,9 +489,12 @@
 					var r = msg.captured[i];
 					var lbl, a, b, d;
 					if (r.mode == 'applied') {
+						/* no captures kept: only the constants are knowable */
 						lbl = "{{ __('Eq') }}"; a = r.low; b = r.high; d = r.slope_lo;
 					} else {
-						lbl = "{{ __('Cal') }}"; a = r.noise; b = r.low; d = r.high;
+						lbl = r.mode == 'applied-capture' ? "{{ __('Eq') }}"
+						                                  : "{{ __('Cal') }}";
+						a = r.noise; b = r.low; d = r.high;
 					}
 					$('#eq_lbl_' + i).text(lbl);
 					$.each({'a': a, 'b': b, 'c': d}, function (k, v) {
@@ -503,8 +506,11 @@
 							if (!el.is(':focus')) {
 								el.val(set ? v : '');
 							}
-							/* The captured levels are editable; the applied
-							   constants are not the operator's to retype. */
+							/* Captured levels are editable, including after a
+							   fit has been applied from them - correcting one and
+							   re-applying beats sweeping the fleet again. Only the
+							   bare constants of a fit whose captures are gone
+							   cannot be retyped. */
 							el.prop('disabled', r.mode == 'applied');
 						} else {
 							el.text(set ? v : '\u2013');

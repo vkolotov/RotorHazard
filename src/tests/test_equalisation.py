@@ -217,6 +217,47 @@ class EqualisationTest(unittest.TestCase):
         cal.eq_wizard_state()
         self.assertEqual(cal._eq_captured['high:R2'][1], 181)
 
+    def test_captures_survive_apply_so_a_level_stays_editable(self):
+        """Correcting one reading must not mean sweeping the fleet again."""
+        values = [90, 150, 210]
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            cal._eq_captured = {'noise': [values[0]], 'high:R1': [values[2]],
+                                'low:R1': [values[1]]}
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+
+        # the fit is applied, and the readings behind it are still there
+        state = cal.eq_wizard_state()
+        self.assertEqual(state['state'], 'applied')
+        rows = cal.eq_captured_table()
+        self.assertEqual(rows[0]['mode'], 'applied-capture')
+        self.assertEqual((rows[0]['low'], rows[0]['high']), (150, 210))
+
+        # editing one re-arms Apply rather than demanding a new sweep
+        self.assertTrue(cal.eq_wizard_set_level(0, 'high', 205))
+        self.assertEqual(cal.eq_wizard_state()['state'], 'ready')
+        self.assertEqual(cal._eq_captured['high:R1'], [205])
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.eq_wizard_apply())
+        self.assertEqual(cal.eq_wizard_state()['state'], 'applied')
+
+    def test_a_new_capture_after_apply_starts_a_fresh_run(self):
+        """Kept captures are a record, not a run still in progress."""
+        values = [90, 150, 210]
+        ctx, nodes, cal = self.context()
+        with patch('calibration.gevent.sleep'):
+            cal._eq_captured = {'noise': [values[0]], 'high:R1': [values[2]],
+                                'low:R1': [values[1]]}
+            cal._eq_note_capture_session()
+            self.assertTrue(cal.eq_wizard_apply())
+        self.assertEqual(cal.eq_wizard_state()['state'], 'applied')
+        # Reset arms the wizard again and drops the kept set
+        cal.eq_wizard_reset()
+        self.assertEqual(cal._eq_captured, {})
+        state = cal.eq_wizard_state()
+        self.assertEqual((state['state'], state['level']), ('capturing', 'noise'))
+
     def test_noise_is_not_editable_and_junk_is_ignored(self):
         _, nodes, cal = self.context(count=1)
         self.capture(cal, nodes, 'noise', [90])
