@@ -345,7 +345,7 @@ class SweepTest(unittest.TestCase):
             self.assertTrue(cal.eq_sweep_level('high'))
 
         # Three sends for the first channel: the original plus two resends.
-        self.assertEqual(sent, ['R2', 'R1', 'R1', 'R1', 'R2', 'R2', 'R2'])
+        self.assertEqual(sent, ['R2', 'R1', 'R2', 'R1', 'R2', 'R1', 'R2', 'R2', 'R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
@@ -597,7 +597,13 @@ class SweepTest(unittest.TestCase):
     def test_real_detector_retries_dropped_commands(self):
         ctx, nodes, cal, sent = self.simulated_quad(dropped={'R1': 2})
         self.assertTrue(cal.eq_sweep_level('high'))
-        self.assertEqual(sent[:4], ['R8', 'R1', 'R1', 'R1'])
+        self.assertEqual(sent[:6], ['R8', 'R1', 'R8', 'R1', 'R8', 'R1'])
+
+    def test_real_detector_recovers_when_initial_parking_command_is_lost(self):
+        ctx, nodes, cal, sent = self.simulated_quad(start='R1', dropped={'R8': 1})
+        self.assertTrue(cal.eq_sweep_level('high'))
+        self.assertEqual(sent[:4], ['R8', 'R1', 'R8', 'R1'])
+        self.assertIn('high:R1', cal._eq_captured)
 
     def test_real_detector_never_captures_a_channel_that_did_not_switch(self):
         ctx, nodes, cal, sent = self.simulated_quad(dropped={'R2': 99})

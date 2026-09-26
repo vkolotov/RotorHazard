@@ -8,7 +8,7 @@ import RHUtils
 from eventmanager import Evt
 from RHUtils import catchLogExceptionsWrapper
 from filtermanager import Flt
-from vtx_control import VTX_CONFIRM_TIMEOUT_SECONDS
+from vtx_control import VTX_CONFIRM_TIMEOUT_SECONDS, VTX_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 
@@ -1064,8 +1064,13 @@ class Calibration:
                 if stop():
                     return False
                 before = vtx.read_levels()
-                switch_deadline = time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS
-                phase('switching', VTX_CONFIRM_TIMEOUT_SECONDS)
+                # Startup retries may need to establish a fresh parking
+                # baseline as well as resend the target.
+                switch_timeout = VTX_CONFIRM_TIMEOUT_SECONDS
+                if label == channels[0]:
+                    switch_timeout += EQ_CHANNEL_SETTLE_SECONDS * VTX_MAX_RETRIES
+                switch_deadline = time.monotonic() + switch_timeout
+                phase('switching', switch_timeout)
 
                 confirmed = False
                 detail = 'not commanded'
@@ -1084,15 +1089,32 @@ class Calibration:
 
                     def resend():
                         tries[0] += 1
-                        phase('switching', max(0, switch_deadline - time.monotonic()),
-                              attempt=tries[0])
                         try:
+                            if label == channels[0]:
+                                # A lost parking command can leave the quad
+                                # already on the target. Repeating that target
+                                # alone can never produce the required rise.
+                                phase('preparing', EQ_CHANNEL_SETTLE_SECONDS,
+                                      attempt=tries[0])
+                                self._eq_progress['channel'] = parking
+                                self._racecontext.rhui.emit_eq_wizard_state()
+                                vtx.command_channel(pilot_id, parking)
+                                until = time.monotonic() + EQ_CHANNEL_SETTLE_SECONDS
+                                while time.monotonic() < until:
+                                    if stop():
+                                        return
+                                    gevent.sleep(min(0.1, max(0, until - time.monotonic())))
+                                before[:] = vtx.read_levels()
+                            if stop():
+                                return
+                            phase('switching', max(0, switch_deadline - time.monotonic()),
+                                  attempt=tries[0])
                             vtx.command_channel(pilot_id, label)
                         except Exception as exc:  # noqa: BLE001
                             logger.warning('Could not re-send %s: %s', label, exc)
 
                     confirmed, detail = vtx.confirm_channel(
-                        label, node_channels, before,
+                        label, node_channels, before, timeout=switch_timeout,
                         cancelled=stop, resend=resend)
                 if stop():
                     return False
