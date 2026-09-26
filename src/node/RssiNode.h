@@ -14,9 +14,9 @@
 
 #define MAX_DURATION 0xFFFF
 
-// Upper clamp for an equalised reading. MAX_RSSI is the 'no nadir recorded'
+// Upper clamp for a normalised reading. MAX_RSSI is the 'no nadir recorded'
 //  sentinel, so a real reading must never reach it.
-#define MAX_EQ_RSSI (MAX_RSSI - 1)
+#define MAX_NORM_RSSI (MAX_RSSI - 1)
 
 #define RX5808_MIN_TUNETIME 35  // after set freq need to wait this long before read RSSI
 #define RX5808_MIN_BUSTIME 30   // after set freq need to wait this long before setting again
@@ -46,16 +46,21 @@ struct Settings
     rssi_t volatile enterAtLevel = 96;
     // lap pass ends when RSSI goes below this level
     rssi_t volatile exitAtLevel = 80;
-    // Per-node equalisation: two straight segments meeting at eqPivot, so that
-    //  every node reports the same value for the same signal. The server owns
-    //  the output scale and sends offsets with it already folded in, so there
-    //  is no shared constant to keep in step across the protocol boundary.
-    //  eqPivot == 0 disables the correction entirely.
-    uint16_t volatile eqPivot = 0;
-    int16_t volatile eqOffsetUp = 0;
-    uint16_t volatile eqSlopeUp = 256;
-    int16_t volatile eqOffsetLo = 0;
-    uint16_t volatile eqSlopeLo = 256;
+    // Per-node normalisation: two straight segments meeting at normPivot, so
+    //  that every node reports the same value for the same signal. Above the
+    //  pivot the correction is the offset alone - unity gain, so the region
+    //  that decides a lap keeps the raw curve's shape - and below it normScale
+    //  bends the reading down onto a common noise floor. The server owns the
+    //  output scale and folds it into the offset, so there is no shared
+    //  constant to keep in step across the protocol boundary.
+    //  normPivot == 0 disables the correction entirely.
+    uint16_t volatile normPivot = 0;
+    int16_t volatile normOffset = 0;
+    uint16_t volatile normScale = 256;
+    // Where the pivot lands once the offset is applied: the anchor the lower
+    //  segment pivots around. Derived whenever the pivot or offset changes,
+    //  so the sample path never has to recompute it.
+    int16_t volatile normPivotTarget = 0;
 };
 
 struct State
@@ -139,6 +144,15 @@ class RssiNode
     void bufferHistoricNadir(bool force);
     void initExtremum(Extremum *e);
 
+    // The pivot's place on the corrected scale follows from the pivot and the
+    //  offset, so it is derived on every write rather than sent and trusted:
+    //  a server and a node that disagreed here would put a step in the curve.
+    void deriveNormPivotTarget()
+    {
+        settings.normPivotTarget =
+            (int16_t) ((int32_t) settings.normPivot - settings.normOffset);
+    }
+
     static uint16_t freqMhzToRegVal(uint16_t freqInMhz);
 #if STM32_MODE_FLAG
     static int rx5808SelPinForNodeIndex(int nIdx);
@@ -175,16 +189,20 @@ public:
     void setEnterAtLevel(rssi_t val) { settings.enterAtLevel = val; }
     rssi_t getExitAtLevel() { return settings.exitAtLevel; }
     void setExitAtLevel(rssi_t val) { settings.exitAtLevel = val; }
-    uint16_t getEqPivot() { return settings.eqPivot; }
-    void setEqPivot(uint16_t val) { settings.eqPivot = val; }
-    int16_t getEqOffsetUp() { return settings.eqOffsetUp; }
-    void setEqOffsetUp(int16_t val) { settings.eqOffsetUp = val; }
-    uint16_t getEqSlopeUp() { return settings.eqSlopeUp; }
-    void setEqSlopeUp(uint16_t val) { settings.eqSlopeUp = val; }
-    int16_t getEqOffsetLo() { return settings.eqOffsetLo; }
-    void setEqOffsetLo(int16_t val) { settings.eqOffsetLo = val; }
-    uint16_t getEqSlopeLo() { return settings.eqSlopeLo; }
-    void setEqSlopeLo(uint16_t val) { settings.eqSlopeLo = val; }
+    uint16_t getNormPivot() { return settings.normPivot; }
+    void setNormPivot(uint16_t val)
+    {
+        settings.normPivot = val;
+        deriveNormPivotTarget();
+    }
+    int16_t getNormOffset() { return settings.normOffset; }
+    void setNormOffset(int16_t val)
+    {
+        settings.normOffset = val;
+        deriveNormPivotTarget();
+    }
+    uint16_t getNormScale() { return settings.normScale; }
+    void setNormScale(uint16_t val) { settings.normScale = val; }
     bool rssiProcess(mtime_t millis) { return rssiProcessValue(millis, rssiRead()); }
 
     struct State & getState() { return state; }
