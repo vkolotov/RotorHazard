@@ -72,6 +72,14 @@ VTX_CONFIRM_TIMEOUT_SECONDS = 15.0
 #  and to let a packet leave before the address is put back.
 VTX_ADDRESS_SETTLE_SECONDS = 0.5
 
+# How long to wait for a change before commanding the channel again. A change
+#  that is going to happen is visible about three seconds after the command, so
+#  anything still unchanged after four has most likely been lost rather than
+#  merely delayed. Not shorter: every command makes the handset write the
+#  receiver's configuration to flash, and repeated writes are what appear to
+#  leave the quad unresponsive until it is power cycled.
+VTX_RESEND_SECONDS = 4.0
+
 # How long each read of the nodes watches for, the gap between those reads, and
 #  how often the live reading is sampled inside one.
 VTX_CONFIRM_READ_SECONDS = 0.5
@@ -252,7 +260,8 @@ class VtxController:
         return (label, margin, separation)
 
     def confirm_channel(self, label, floors, channels, before=None,
-                        timeout=VTX_CONFIRM_TIMEOUT_SECONDS, cancelled=None):
+                        timeout=VTX_CONFIRM_TIMEOUT_SECONDS, cancelled=None,
+                        resend=None):
         """Wait until the nodes show the quad has moved to `label`.
 
         Looks for the change rather than for a winner. Adjacent channels bleed
@@ -276,6 +285,11 @@ class VtxController:
         :param cancelled: Called each pass; truthy gives up without waiting out
             the timeout, so cancelling a sweep does not cost a full timeout for
             every channel left in it
+        :param resend: Called to command the channel again while waiting, so a
+            command that was lost is replaced without restarting the wait. Every
+            command makes the handset write the receiver's configuration to
+            flash, so this is repeated at a measured interval rather than as
+            fast as the link allows.
         :return: (True, detail) once confirmed, or (False, detail) otherwise
         """
         target = None
@@ -306,9 +320,15 @@ class VtxController:
         last = 'no change on the node for {0}'.format(label)
         was = before[target] if target < len(before) else None
 
+        next_resend = time.monotonic() + VTX_RESEND_SECONDS
         while time.monotonic() < deadline:
             if cancelled is not None and cancelled():
                 return (False, 'cancelled')
+
+            if resend is not None and time.monotonic() >= next_resend:
+                logger.info('Re-sending VTX channel %s', label)
+                resend()
+                next_resend = time.monotonic() + VTX_RESEND_SECONDS
 
             excess = self._read_excess(floors)
             now = excess[target] if target < len(excess) else None

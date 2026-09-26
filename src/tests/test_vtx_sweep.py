@@ -271,24 +271,59 @@ class SweepTest(unittest.TestCase):
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
-    def test_sweep_retries_until_confirmed(self):
+    def test_the_command_is_repeated_while_waiting(self):
+        """A lost command is replaced during the wait, not after it.
+
+        Waiting out the whole limit and then starting again costs a timeout per
+        attempt; re-sending inside the wait replaces a lost command within a few
+        seconds and still costs only one timeout when the channel is never going
+        to switch.
+        """
         ctx, nodes, cal = self.context(count=2)
         sent = self.controller(ctx)
         cal._eq_mode = 'auto'
         cal._eq_captured = {'noise': [90, 90]}
         cal._eq_note_capture_session()
-        # Fail every attempt but the last, so the retry is what gets it through.
-        attempts = calibration.EQ_CHANNEL_RETRIES + 1
-        answers = ([(False, 'still on old channel')] * (attempts - 1)
-                   + [(True, 'confirmed')] * 2)
-        with patch.object(cal._vtx(), 'confirm_channel', side_effect=answers), \
+
+        def confirm(label, floors, channels, before=None, cancelled=None,
+                    resend=None, **kwargs):
+            # Two resends inside one wait, then the change appears.
+            resend()
+            resend()
+            return (True, 'confirmed')
+
+        with patch.object(cal._vtx(), 'confirm_channel', side_effect=confirm), \
                 patch('calibration.gevent.sleep'):
             nodes[0].current_rssi = 180
             nodes[1].current_rssi = 175
             self.assertTrue(cal.eq_sweep_level('high'))
-        self.assertEqual(sent, ['R1'] * attempts + ['R2'])
+
+        # Three sends for the first channel: the original plus two resends.
+        self.assertEqual(sent, ['R1', 'R1', 'R1', 'R2', 'R2', 'R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
+
+    def test_a_channel_that_never_switches_costs_one_wait(self):
+        ctx, nodes, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+
+        calls = []
+
+        def confirm(label, floors, channels, before=None, cancelled=None,
+                    resend=None, **kwargs):
+            calls.append(label)
+            return (False, 'no change')
+
+        with patch.object(cal._vtx(), 'confirm_channel', side_effect=confirm), \
+                patch('calibration.gevent.sleep'):
+            self.assertFalse(cal.eq_sweep_level('high'))
+
+        # One wait for the first channel, then the sweep stops.
+        self.assertEqual(calls, ['R1'])
+        self.assertEqual(sent, ['R1'])
 
     def test_cancel_during_failed_confirmation_does_not_retry(self):
         ctx, nodes, cal = self.context(count=2)
@@ -349,7 +384,7 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1'] * (calibration.EQ_CHANNEL_RETRIES + 1))
+        self.assertEqual(sent, ['R1'])
         self.assertNotIn('high:R1', cal._eq_captured)
         self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
 

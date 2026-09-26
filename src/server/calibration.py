@@ -59,12 +59,6 @@ EQ_SETTLE_SECONDS = 3.0
 #  is no window here to wait out.
 EQ_CHANNEL_SETTLE_SECONDS = 4.0
 
-# Additional attempts after the first channel command fails confirmation. One:
-#  a command that arrives is confirmed within a few seconds, so a second go
-#  covers a packet that was genuinely lost, while more only multiply the wait
-#  before reporting a chain that is not working at all.
-EQ_CHANNEL_RETRIES = 1
-
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed
 #  assignment; the band scopes measure every channel of a band, so nodes can be
@@ -1011,49 +1005,49 @@ class Calibration:
                     logger.info('Sweep abandoned: state changed part way through')
                     return False
 
+                stop = (lambda: getattr(self, '_eq_cancelled', False)
+                        or self._eq_session() != session)
+
+                self._eq_progress = {
+                    'level': level, 'channel': label,
+                    'index': channels.index(label) + 1, 'total': len(channels),
+                    'until': time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS,
+                }
+                self._racecontext.rhui.emit_eq_wizard_state()
+
+                # Let the previous channel finish arriving before reading the
+                #  level this change is measured against: a reading taken while
+                #  the last change is still settling is already rising, and the
+                #  rise that follows would be counted from part way up.
+                gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
+                if stop():
+                    return False
+                before = vtx.read_excess(floors)
+
                 confirmed = False
-                for attempt in range(EQ_CHANNEL_RETRIES + 1):
-                    if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
-                        return False
-                    self._eq_progress = {
-                        'level': level, 'channel': label,
-                        'index': channels.index(label) + 1, 'total': len(channels),
-                        'until': time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS,
-                    }
-                    self._racecontext.rhui.emit_eq_wizard_state()
+                detail = 'not commanded'
+                try:
+                    vtx.command_channel(pilot_id, label)
+                except Exception as exc:  # noqa: BLE001 - reported, not raised
+                    logger.warning('Could not command %s: %s', label, exc)
+                    detail = str(exc)
+                else:
+                    # One wait, with the command repeated inside it rather than
+                    #  a fresh attempt around it. A lost command is replaced
+                    #  within a few seconds instead of after a whole timeout
+                    #  has expired, and a channel that is simply never going to
+                    #  switch still costs one timeout rather than several.
+                    def resend():
+                        try:
+                            vtx.command_channel(pilot_id, label)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning('Could not re-send %s: %s', label, exc)
 
-                    # What the nodes read before the command, so confirmation
-                    #  can look for the change rather than for a winner. Let
-                    #  the previous channel finish arriving first: a reading
-                    #  taken while the last change is still settling is already
-                    #  rising, and the rise this one is measured against would
-                    #  be counted from part way up.
-                    gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
-                    before = vtx.read_excess(floors)
-
-                    try:
-                        vtx.command_channel(pilot_id, label)
-                    except Exception as exc:  # noqa: BLE001 - reported, not raised
-                        logger.warning('Could not command %s: %s', label, exc)
-                        detail = str(exc)
-                        break
-
-                    # No blind wait before looking: confirmation polls, so it
-                    #  returns as soon as the change is visible and waits out
-                    #  its own limit when it is not. Sleeping first only adds
-                    #  that time to every channel, including the ones that
-                    #  switched immediately.
                     confirmed, detail = vtx.confirm_channel(
                         label, floors, node_channels, before=before,
-                        cancelled=lambda: getattr(self, '_eq_cancelled', False)
-                        or self._eq_session() != session)
-                    if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
-                        return False
-                    if confirmed:
-                        break
-                    if attempt < EQ_CHANNEL_RETRIES:
-                        logger.warning('VTX channel %s not confirmed (%s); retry %d/%d',
-                                       label, detail, attempt + 1, EQ_CHANNEL_RETRIES)
+                        cancelled=stop, resend=resend)
+                if stop():
+                    return False
 
                 if not confirmed:
                     # Do not capture the wrong channel or advance after retries
