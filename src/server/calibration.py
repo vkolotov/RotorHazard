@@ -34,15 +34,12 @@ EQ_FULL_SCALE = 255
 #  absurd slope. A fraction rather than a count, so it follows the width of
 #  the pipeline.
 #
-# Set from what the gap is used for. The band a node reports gets stretched to
-#  the destination band, so the gain it receives is destination/band; a
-#  measured fleet put that destination near 30 counts, and gain much past 2x
-#  amplifies the node's own noise faster than it buys resolution. 15 counts of
-#  255 is that 2x limit, and it sits clear of real measurements: the same
-#  fleet's sound channels spanned 22 to 38 counts, while two channels captured
-#  with the quad left too close spanned 8 and 10 and produced gains of 3.8x
-#  and 4.75x.
-EQ_MIN_LEVEL_FRACTION = 15.0 / 255
+# The band a node reports gets stretched to the destination band, so the gain
+#  it receives is destination/band and a narrow band buys a large gain that
+#  amplifies the node's own noise with the signal. A measured fleet spanned 34
+#  to 49 counts on a run with the quad properly placed, so 30 sits below every
+#  real measurement while still catching a pass flown too close to the gate.
+EQ_MIN_LEVEL_FRACTION = 30.0 / 255
 
 # The Q8 scale that changes nothing: the node computes (raw - offset) * slope
 #  >> 8, so a slope of 256 multiplies by exactly one. Both the default for a
@@ -279,7 +276,11 @@ class Calibration:
 
         vtx = self.eq_vtx_available()
 
-        applied = any(self._eq_stored('eq_pivots', 0))
+        # Floor levelling stores a fit too, but it is a starting point with the
+        #  sweep still ahead of it, so it must not park the wizard the way a
+        #  finished calibration does.
+        applied = any(self._eq_stored('eq_pivots', 0)) \
+            and not getattr(self, '_eq_levelled_only', False)
         if applied and (not captured or getattr(self, '_eq_applied_captures', False)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration. The captures behind
@@ -516,8 +517,16 @@ class Calibration:
 
         self._eq_unresolved = []
         self._eq_store(pivots, offset_ups, ups, offset_los, los)
+        # Every reading the nodes give from here on is corrected, so nothing
+        #  captured before this point can be compared with anything captured
+        #  after it - the two sit on different axes, and a fit across the join
+        #  measures the levelling rather than the receivers. Start the captures
+        #  over against the levelled nodes.
+        self._eq_captured = {}
+        self._eq_invalidate_session()
         # Deliberately not _eq_applied_captures: the sweep is not finished, and
         #  marking it applied would park the wizard and refuse the real fit.
+        self._eq_levelled_only = True
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Noise floors levelled to %d: offsets=%s',
                     target, [noise[i] - target for i in taking_part])
@@ -745,6 +754,7 @@ class Calibration:
         """
         self._eq_captured = {}
         self._eq_applied_captures = False
+        self._eq_levelled_only = False
         self._eq_invalidate_session()
         num = self._racecontext.race.num_nodes
         self._eq_busy = True
@@ -831,9 +841,11 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            min_gap = self._eq_min_gap(idx)
-            if (hi - lo) < min_gap or (lo - fl) < min_gap:
-                msg = ('Node {0} levels are too close together '
+            # Only the arithmetic floor is enforced: the fit divides by both
+            #  spans, so they have to be positive. How wide is worth having is
+            #  the operator's judgement, not this function's.
+            if hi <= lo or lo <= fl:
+                msg = ('Node {0} levels are not in order '
                        '(noise={1}, low={2}, high={3})').format(idx + 1, fl, lo, hi)
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
@@ -911,6 +923,7 @@ class Calibration:
         #  before any correction was on the nodes, so they stay valid as the
         #  source for a new fit.
         self._eq_applied_captures = True
+        self._eq_levelled_only = False
         self._racecontext.rhui.emit_eq_wizard_state()
         logger.info('Equalisation applied: pivots=%s slopes=%s/%s',
                     pivots, slope_ups, slope_los)

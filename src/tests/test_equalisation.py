@@ -191,8 +191,8 @@ class EqualisationTest(unittest.TestCase):
         _, nodes, cal = self.context(count=1)
         self.assertTrue(self.capture(cal, nodes, 'noise', [90]))
         self.assertTrue(self.capture(cal, nodes, 'high', [180]))
-        self.assertEqual(cal._eq_min_gap(), 15)
-        self.assertTrue(self.capture(cal, nodes, 'low', [165]))  # exactly 15
+        gap = cal._eq_min_gap()
+        self.assertTrue(self.capture(cal, nodes, 'low', [180 - gap]))  # exactly the limit
         self.assertIn('low:R1', cal._eq_captured)
 
     def test_only_the_node_on_that_channel_is_judged(self):
@@ -319,11 +319,30 @@ class EqualisationTest(unittest.TestCase):
         # nothing written to the profile
         self.assertFalse(any(cal._eq_stored('eq_pivots', 0)))
 
+    def test_levelling_discards_the_captures_it_was_made_from(self):
+        """Readings taken after levelling sit on a different axis.
+
+        The nodes now subtract an offset, so a capture from before the
+        levelling cannot be compared with one from after it: the difference
+        between them measures the levelling, not the receiver. This bit in
+        practice - a noise floor captured at 94 against a low captured at 103
+        once the floors had moved to 67 looked like a 9-count span and was
+        refused, when the real span was 36.
+        """
+        _, nodes, cal = self.context(count=2)
+        self.capture(cal, nodes, 'noise', [90, 95])
+        self.assertTrue(cal.eq_wizard_apply_noise())
+        self.assertEqual(cal._eq_captured, {})
+        state = cal.eq_wizard_state()
+        self.assertEqual((state['state'], state['level']), ('capturing', 'noise'))
+
     def test_a_full_sweep_still_overrides_levelled_floors(self):
         """Levelling is a starting point, not a substitute for the fit."""
         ctx, nodes, cal = self.context(count=1)
         self.capture(cal, nodes, 'noise', [90])
         self.assertTrue(cal.eq_wizard_apply_noise())
+        # the sweep restarts against the levelled nodes, which now read lower
+        self.capture(cal, nodes, 'noise', [67])
         self.capture(cal, nodes, 'high', [210])
         self.capture(cal, nodes, 'low', [150])
         with patch('calibration.gevent.sleep'):
