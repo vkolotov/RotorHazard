@@ -36,6 +36,12 @@ VTX_BANDS = 'ABEFRL'
 #  rather than a count, so it follows the width of the pipeline.
 VTX_CONFIRM_MARGIN_FRACTION = 0.15
 
+# How far a node's reading has to climb before it counts as the transmitter
+#  arriving rather than noise or drift. Measured rises on arrival are 30 counts
+#  on the least sensitive receiver and around 100 on the best, against a couple
+#  of counts of jitter when nothing happens, so there is a wide gap to sit in.
+VTX_SWITCH_RISE_FRACTION = 0.08
+
 # How far up the pipeline the loudest channel has to be before anything counts
 #  as on air at all. Below this every channel is idle and there is nothing to
 #  compare. Only has to clear the noise, and has to stay below the weakest
@@ -237,63 +243,74 @@ class VtxController:
     # Channel state
     #
 
-    def channel_state(self, floors, seconds=VTX_CONFIRM_READ_SECONDS):
-        """What every channel is doing: its level, and whether it is on air.
+    def read_levels(self, seconds=VTX_CONFIRM_READ_SECONDS):
+        """What every node is reading right now, highest over a short window.
 
-        A channel is HIGH when a transmitter is on it and LOW when it is not.
-        The two are far apart - a quad on a channel reads most of the way up
-        the pipeline while an idle receiver sits at its own floor - so the line
-        between them does not have to be placed precisely to be reliable.
+        Raw readings, not excess over a floor. Detecting a switch means
+        comparing a node against itself a moment earlier, and its floor is the
+        same in both readings, so it cancels out. Bringing the floor into it
+        only makes the answer depend on a separate measurement that can be
+        stale or wrong - a floor captured while the quad was transmitting made
+        the occupied channel look quiet and a bleeding neighbour look loud.
 
-        Bleed is what makes the level alone ambiguous: a neighbour of an
-        occupied channel can read two thirds as high. So the line is drawn from
-        the loudest channel rather than from a constant, and a channel counts
-        as HIGH only if it is within reach of whatever is loudest. That keeps
-        one transmitter from marking three channels HIGH.
-
-        :param floors: Per-node noise floor
         :param seconds: How long to watch
-        :return: List of (excess, is_high) per node, either may be None
+        :return: Per-node reading, None where there is none
         """
-        excess = self._read_excess(floors, seconds)
-        levels = [v for v in excess if v is not None]
-        if not levels:
-            return [(None, None)] * len(excess)
+        nodes = self._racecontext.interface.nodes
+        num = self._racecontext.race.num_nodes
 
-        loudest = max(levels)
-        scale = self._racecontext.calibration.eq_scale(0)
-        # Nothing is on air at all: everything is down near the floor.
-        if loudest < scale * VTX_ON_AIR_FRACTION:
-            return [(v, False if v is not None else None) for v in excess]
+        best = [None] * num
+        deadline = time.monotonic() + seconds
+        while True:
+            for idx in range(num):
+                node = nodes[idx] if idx < len(nodes) else None
+                value = getattr(node, 'current_rssi', None) if node else None
+                if value and value < node.max_rssi_value:
+                    if best[idx] is None or value > best[idx]:
+                        best[idx] = int(value)
+            if time.monotonic() >= deadline:
+                break
+            gevent.sleep(VTX_SAMPLE_SECONDS)
+        return best
 
-        line = loudest * VTX_HIGH_OF_LOUDEST
-        return [(v, (v >= line) if v is not None else None) for v in excess]
+    def find_switch(self, before, after, channels):
+        """Which channel the signal moved to, comparing two readings.
 
-    def channel_change(self, floors, before, channels,
-                       seconds=VTX_CONFIRM_READ_SECONDS):
-        """What moved since `before`: which channel went off, which came on.
+        A switch shows as one node climbing and usually another falling. The
+        climb is what identifies the destination: the node whose reading rose
+        most, provided it rose enough to be a signal arriving rather than
+        noise or drift.
 
-        :param floors: Per-node noise floor
-        :param before: A previous `channel_state` result
+        Bleed rises too, but always less than the channel the transmitter
+        actually moved to, so the largest rise is the right one. Nothing here
+        needs a noise floor, a per-node threshold, or a comparison between
+        different nodes' levels.
+
+        :param before: Readings from before the command
+        :param after: Readings from after it
         :param channels: Per-node channel label
-        :param seconds: How long to watch
-        :return: (went_low, went_high, state) as channel labels, either may be
-            None if nothing moved that way
+        :return: (label, rise, runner_up_rise), label None if nothing moved
         """
-        state = self.channel_state(floors, seconds)
-        went_low = went_high = None
-
-        for idx, (level, high) in enumerate(state):
-            was = before[idx][1] if idx < len(before) else None
-            if high is None or was is None or high == was:
+        rises = []
+        for idx in range(min(len(before), len(after))):
+            if before[idx] is None or after[idx] is None:
                 continue
-            label = channels[idx] if idx < len(channels) else None
-            if high:
-                went_high = label
-            else:
-                went_low = label
+            rises.append((after[idx] - before[idx], idx))
+        if not rises:
+            return (None, None, None)
 
-        return (went_low, went_high, state)
+        rises.sort(reverse=True)
+        rise, winner = rises[0]
+        runner_up = rises[1][0] if len(rises) > 1 else 0
+
+        need = max(1, int(round(
+            self._racecontext.calibration.eq_scale(winner)
+            * VTX_SWITCH_RISE_FRACTION)))
+        if rise < need:
+            return (None, rise, runner_up)
+
+        label = channels[winner] if winner < len(channels) else None
+        return (label, rise, runner_up)
 
     def _thresholds(self, node_index):
         """Confirmation thresholds in counts, from the node's full scale."""
@@ -326,51 +343,35 @@ class VtxController:
         label = channels[winner] if winner < len(channels) else None
         return (label, margin, separation)
 
-    def confirm_channel(self, label, floors, channels, before=None,
+    def confirm_channel(self, label, channels, before,
                         timeout=VTX_CONFIRM_TIMEOUT_SECONDS, cancelled=None,
                         resend=None):
-        """Wait until the commanded channel is the one on air.
+        """Wait until the readings show the signal has moved to `label`.
 
-        Watches the state of every channel rather than the level of one. A
-        channel is HIGH when a transmitter is on it, LOW when it is not, and a
-        change is the commanded channel going HIGH - usually with whatever was
-        HIGH before going LOW, though not always: the quad may arrive from a
-        channel no node is watching.
+        Compares each node against its own reading from before the command.
+        The node for the commanded channel climbs when the transmitter arrives;
+        bleed climbs too but always less, so the largest rise names the
+        destination.
 
-        This replaces comparing one node's rise against thresholds. Levels vary
-        by receiver and by how close the quad is, and bleed lifts the
-        neighbours, so no fixed count separates a change from a non-change. The
-        state does: what matters is which channel is occupied, and that is a
-        question the levels answer clearly once they are read together.
+        Nothing here uses a noise floor. A floor is needed to turn a reading
+        into a signal level, which the captures want, but a switch is a change
+        and a change cancels the floor out. Earlier versions passed one in and
+        a stale floor - captured while the quad was transmitting - made an
+        occupied channel look quiet and a bleeding neighbour look loud, so a
+        channel that had plainly switched was retried until the sweep gave up.
 
         :param label: The channel that was commanded
-        :param floors: Per-node noise floor
         :param channels: Per-node channel label
-        :param before: State from before the command, as `channel_state`
-            returns it. Without it the target simply has to be HIGH.
+        :param before: Readings from before the command, from `read_levels`
         :param timeout: How long to keep looking
-        :param cancelled: Called each pass; truthy gives up without waiting out
-            the timeout
-        :param resend: Called to command the channel again while waiting, so a
-            command that was lost is replaced without restarting the wait
+        :param cancelled: Called each pass; truthy gives up immediately
+        :param resend: Called to command the channel again while waiting
         :return: (True, detail) once confirmed, or (False, detail) otherwise
         """
-        target = None
-        for idx, chan in enumerate(channels):
-            if chan == label:
-                target = idx
-                break
-        if target is None:
-            return (False, 'no node is tuned to {0}'.format(label))
-
-        was_high = None
-        if before is not None and target < len(before):
-            was_high = before[target][1]
-
         deadline = time.monotonic() + timeout
         next_resend = time.monotonic() + VTX_RESEND_SECONDS
         agreed = 0
-        last = 'no channel came on air'
+        last = 'nothing moved'
 
         while time.monotonic() < deadline:
             if cancelled is not None and cancelled():
@@ -381,35 +382,26 @@ class VtxController:
                 resend()
                 next_resend = time.monotonic() + VTX_RESEND_SECONDS
 
-            state = self.channel_state(floors)
-            level, high = state[target] if target < len(state) else (None, None)
+            after = self.read_levels()
+            seen, rise, runner_up = self.find_switch(before, after, channels)
 
-            if high:
+            if seen == label:
                 agreed += 1
                 if agreed >= VTX_CONFIRM_CONSECUTIVE:
-                    others = [channels[i] for i, (_, h) in enumerate(state)
-                              if h and i != target and i < len(channels)]
-                    detail = '{0} is on air at {1}'.format(label, level)
-                    if others:
-                        detail += ', with {0}'.format(', '.join(str(o) for o in others))
-                    logger.info('Confirmed VTX: %s', detail)
+                    detail = 'rose {0}, next {1}'.format(rise, runner_up)
+                    logger.info('Confirmed VTX on %s: %s', label, detail)
                     return (True, detail)
             else:
                 agreed = 0
-                on_air = [channels[i] for i, (_, h) in enumerate(state)
-                          if h and i < len(channels)]
-                if on_air:
-                    last = 'on air: {0}, not {1}'.format(
-                        ', '.join(str(o) for o in on_air), label)
-                elif level is not None:
-                    last = 'nothing on air; {0} reads {1}'.format(label, level)
+                if seen:
+                    last = '{0} rose most ({1}), not {2}'.format(
+                        seen, rise, label)
+                elif rise is not None:
+                    last = 'largest rise {0}, too small to be a switch'.format(
+                        rise)
 
             gevent.sleep(VTX_CONFIRM_POLL_SECONDS)
 
-        # Never having been LOW is worth saying: the quad may already have been
-        #  on this channel, in which case nothing was ever going to change.
-        if was_high:
-            last += ' ({0} was already on air before the command)'.format(label)
         logger.warning('Could not confirm VTX on %s: %s', label, last)
         return (False, last)
 

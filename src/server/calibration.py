@@ -987,12 +987,12 @@ class Calibration:
         if self.eq_wizard_mode() != 'auto':
             return False
 
+        # The noise floor is not needed to sweep. Detecting a switch compares
+        #  a node against itself, which cancels the floor out; only the fit at
+        #  the end needs one, and Apply is where that is checked. Requiring it
+        #  here meant a run could be blocked, or worse run against a stale one,
+        #  for a measurement it never used.
         captured = getattr(self, '_eq_captured', None) or {}
-        floors = captured.get('noise')
-        if not floors:
-            self._racecontext.rhui.emit_priority_message(
-                'Capture the noise floor before sweeping channels')
-            return False
 
         pilot_id = self._racecontext.rhdata.get_optionInt('eq_sweep_pilot', 0)
         if not pilot_id:
@@ -1050,7 +1050,7 @@ class Calibration:
                 gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
                 if stop():
                     return False
-                before = vtx.channel_state(floors)
+                before = vtx.read_levels()
 
                 confirmed = False
                 detail = 'not commanded'
@@ -1077,7 +1077,7 @@ class Calibration:
                             logger.warning('Could not re-send %s: %s', label, exc)
 
                     confirmed, detail = vtx.confirm_channel(
-                        label, floors, node_channels, before=before,
+                        label, node_channels, before,
                         cancelled=stop, resend=resend)
                 if stop():
                     return False

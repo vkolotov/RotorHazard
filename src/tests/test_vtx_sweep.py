@@ -178,111 +178,79 @@ class SweepTest(unittest.TestCase):
             label, _, _ = vtx.observed_channel([90, 90], ['R1', 'R2'])
         self.assertIsNone(label)
 
-    def _state(self, ctx, nodes, floors, levels):
-        for idx, node in enumerate(nodes):
-            node.current_rssi = floors[idx] + levels[idx]
-        vtx = vtx_control.VtxController(ctx)
-        with patch('vtx_control.gevent.sleep'):
-            return vtx, vtx.channel_state(floors)
-
-    def _confirm(self, ctx, nodes, floors, before, after, label, labels):
-        for idx, node in enumerate(nodes):
-            node.current_rssi = floors[idx] + after[idx]
-        vtx = vtx_control.VtxController(ctx)
-        with patch('vtx_control.gevent.sleep'), \
-                patch('vtx_control.time.monotonic',
-                      side_effect=[0] + list(range(1, 400))):
-            return vtx.confirm_channel(label, floors, labels, before=before)
-
-    FLOORS = [91, 95, 70, 116, 95, 109, 88, 89]
     LABELS = ['R{0}'.format(n + 1) for n in range(8)]
 
-    def test_one_transmitter_marks_one_channel_high(self):
-        """Bleed lifts the neighbours; only the occupied channel is on air.
-
-        Measured with the quad on R6: R7 read 64 over its floor against R6's
-        99, so a level alone cannot separate them. Judged against the loudest,
-        it can.
-        """
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, state = self._state(ctx, nodes, self.FLOORS,
-                               [0, 0, 5, 9, 46, 99, 64, 3])
-        high = [self.LABELS[i] for i, (_, h) in enumerate(state) if h]
-        self.assertEqual(high, ['R6'])
-
-    def test_nothing_on_air_is_all_low(self):
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, state = self._state(ctx, nodes, self.FLOORS,
-                               [2, 1, 0, 3, 1, 2, 0, 1])
-        self.assertEqual([h for _, h in state], [False] * 8)
-
-    def test_a_change_is_one_channel_off_and_another_on(self):
-        """Measured across a real change: R8 went 97 -> 1, R4 went -2 -> 86."""
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, before = self._state(ctx, nodes, self.FLOORS,
-                                [-4, 0, -1, -3, 4, 9, 57, 99])
+    def _levels(self, ctx, nodes, values):
         for idx, node in enumerate(nodes):
-            node.current_rssi = self.FLOORS[idx] + [2, 16, 45, 86, 42, 16, 9, 1][idx]
+            node.current_rssi = values[idx]
         vtx = vtx_control.VtxController(ctx)
         with patch('vtx_control.gevent.sleep'):
-            went_low, went_high, _ = vtx.channel_change(
-                self.FLOORS, before, self.LABELS)
-        self.assertEqual(went_low, 'R8')
-        self.assertEqual(went_high, 'R4')
+            return vtx, vtx.read_levels()
 
-    def test_the_commanded_channel_coming_on_air_confirms(self):
+    def test_the_largest_rise_names_the_new_channel(self):
+        """Measured across a real change: R8 fell 96, R4 rose 88."""
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, before = self._state(ctx, nodes, self.FLOORS,
-                                [-4, 0, -1, -3, 4, 9, 57, 99])
-        confirmed, detail = self._confirm(
-            ctx, nodes, self.FLOORS, before,
-            [2, 16, 45, 86, 42, 16, 9, 1], 'R4', self.LABELS)
-        self.assertTrue(confirmed, detail)
-
-    def test_an_insensitive_node_still_confirms(self):
-        """Node 4 reads lowest in the fleet; it is still the occupied channel."""
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, before = self._state(ctx, nodes, self.FLOORS,
-                                [0, 0, 0, 0, 0, 0, 30, 0])
-        confirmed, detail = self._confirm(
-            ctx, nodes, self.FLOORS, before,
-            [0, 0, 0, 30, 0, 0, 2, 0], 'R4', self.LABELS)
-        self.assertTrue(confirmed, detail)
-
-    def test_a_channel_that_stays_off_air_is_not_confirmed(self):
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, before = self._state(ctx, nodes, self.FLOORS,
-                                [0, 99, 0, 0, 0, 0, 0, 0])
-        confirmed, _ = self._confirm(
-            ctx, nodes, self.FLOORS, before,
-            [0, 99, 0, 0, 0, 0, 25, 0], 'R7', self.LABELS)
-        self.assertFalse(confirmed)
-
-    def test_a_quad_arriving_from_an_unwatched_channel_confirms(self):
-        """Nothing was on air before, so there is no channel to go LOW."""
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        _, before = self._state(ctx, nodes, self.FLOORS,
-                                [1, 0, 2, 1, 0, 1, 0, 2])
-        confirmed, detail = self._confirm(
-            ctx, nodes, self.FLOORS, before,
-            [0, 0, 0, 0, 0, 99, 60, 0], 'R6', self.LABELS)
-        self.assertTrue(confirmed, detail)
-
-    def test_a_single_agreeing_read_is_not_enough(self):
-        """One read can land mid-transition, so agreement has to hold."""
-        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        before = [87, 95, 69, 113, 99, 118, 145, 188]
+        after = [93, 111, 115, 202, 137, 125, 97, 90]
         vtx = vtx_control.VtxController(ctx)
-        states = iter([
-            [(0, False)] * 5 + [(99, True)] + [(0, False)] * 2,   # R6 briefly
-            [(99, True)] + [(0, False)] * 7,                      # then R1
-            [(0, False)] * 5 + [(99, True)] + [(0, False)] * 2,   # R6 again
-            [(0, False)] * 5 + [(99, True)] + [(0, False)] * 2,   # and holds
+        label, rise, _ = vtx.find_switch(before, after, self.LABELS)
+        self.assertEqual(label, 'R4')
+        self.assertEqual(rise, 89)
+
+    def test_bleed_rises_less_than_the_channel_switched_to(self):
+        """R7 climbs when the quad lands on R6, but never as much."""
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        before = [90, 95, 70, 116, 95, 109, 88, 89]
+        after = [90, 95, 75, 125, 141, 208, 152, 89]
+        vtx = vtx_control.VtxController(ctx)
+        label, _, _ = vtx.find_switch(before, after, self.LABELS)
+        self.assertEqual(label, 'R6')
+
+    def test_nothing_moving_is_not_a_switch(self):
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        before = [90, 95, 70, 116, 95, 109, 88, 189]
+        after = [91, 94, 70, 117, 96, 108, 89, 188]
+        vtx = vtx_control.VtxController(ctx)
+        label, _, _ = vtx.find_switch(before, after, self.LABELS)
+        self.assertIsNone(label)
+
+    def test_an_insensitive_node_still_registers_a_switch(self):
+        """Node 4 gains least in the fleet and must still be detected."""
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        before = [90, 95, 70, 116, 95, 109, 88, 189]
+        after = [90, 95, 70, 146, 95, 109, 88, 95]
+        vtx = vtx_control.VtxController(ctx)
+        label, rise, _ = vtx.find_switch(before, after, self.LABELS)
+        self.assertEqual(label, 'R4')
+        self.assertEqual(rise, 30)
+
+    def test_detection_needs_no_noise_floor(self):
+        """A floor captured while transmitting used to break detection.
+
+        The node for the occupied channel had the signal in its floor, so it
+        read as quiet, and a bleeding neighbour with an honest floor read as
+        loud. Comparing a node against itself cannot go wrong that way.
+        """
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        before = [113, 141, 175, 170, 111, 116, 89, 144]
+        after = [113, 226, 175, 170, 111, 116, 120, 144]
+        vtx = vtx_control.VtxController(ctx)
+        label, _, _ = vtx.find_switch(before, after, self.LABELS)
+        self.assertEqual(label, 'R2')
+
+    def test_confirmation_waits_for_the_rise(self):
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        before = [90, 95, 70, 116, 95, 109, 88, 189]
+        vtx = vtx_control.VtxController(ctx)
+        reads = iter([
+            [90, 95, 70, 116, 95, 109, 88, 189],   # nothing yet
+            [90, 190, 70, 116, 95, 109, 88, 95],   # R2 arrives
+            [90, 190, 70, 116, 95, 109, 88, 95],
         ])
-        with patch.object(vtx, 'channel_state', side_effect=lambda *a, **k: next(states)), \
+        with patch.object(vtx, 'read_levels', side_effect=lambda *a, **k: next(reads)), \
                 patch('vtx_control.gevent.sleep'):
-            confirmed, _ = vtx.confirm_channel(
-                'R6', self.FLOORS, self.LABELS)
-        self.assertTrue(confirmed)
+            confirmed, detail = vtx.confirm_channel('R2', self.LABELS, before)
+        self.assertTrue(confirmed, detail)
 
     #
     # The sweep itself
@@ -304,7 +272,7 @@ class SweepTest(unittest.TestCase):
 
         vtx = cal._vtx()
         with patch.object(vtx, 'confirm_channel', return_value=(True, 'on air')), \
-                patch.object(vtx, 'channel_state', return_value=[(0, False)] * 2), \
+                patch.object(vtx, 'read_levels', return_value=[90, 90]), \
                 patch('calibration.gevent.sleep'):
             nodes[0].node_peak_rssi = 180
             nodes[1].node_peak_rssi = 175
