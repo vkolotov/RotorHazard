@@ -497,24 +497,25 @@
 						a = r.noise; b = r.low; d = r.high;
 					}
 					$('#eq_lbl_' + i).text(lbl);
-					$.each({'a': a, 'b': b, 'c': d}, function (k, v) {
+					/* Noise stays a readout: it is the one level measured with
+					   no quad in the air, so there is nothing to hand-correct. */
+					var noiseEl = $('#eq_a_' + i);
+					noiseEl.text(a === null || a === undefined ? '\u2013' : a);
+					noiseEl.toggleClass('eq-set', a !== null && a !== undefined);
+
+					$.each({'b': b, 'c': d}, function (k, v) {
 						var el = $('#eq_' + k + '_' + i);
 						var set = v !== null && v !== undefined;
-						if (el.is('input')) {
-							/* Leave a field the operator is typing in alone,
-							   or the next state push overwrites it mid-edit. */
-							if (!el.is(':focus')) {
-								el.val(set ? v : '');
-							}
-							/* Captured levels are editable, including after a
-							   fit has been applied from them - correcting one and
-							   re-applying beats sweeping the fleet again. Only the
-							   bare constants of a fit whose captures are gone
-							   cannot be retyped. */
-							el.prop('disabled', r.mode == 'applied');
-						} else {
-							el.text(set ? v : '\u2013');
+						/* Leave a field the operator is typing in alone, or the
+						   next state push overwrites it mid-edit. */
+						if (!el.is(':focus')) {
+							el.val(set ? v : '');
 						}
+						/* Captured levels are editable, including after a fit has
+						   been applied from them - correcting one and re-applying
+						   beats sweeping the fleet again. Only the bare constants
+						   of a fit whose captures are gone cannot be retyped. */
+						el.prop('disabled', r.mode == 'applied');
 						el.toggleClass('eq-set', set);
 					});
 				}
@@ -2729,14 +2730,9 @@
 .eq-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
           font-variant-numeric: tabular-nums; }
 .eq-cap.eq-set { opacity: 1; }
-/* The captured levels are editable in place, so they stay the size of the
-   readout rather than taking the full-width styling of a form input. */
-input.eq-edit { width: 3.6em; min-width: 0; padding: 0 0.25em; margin: 0;
-                font-size: inherit; font-family: inherit; height: 1.6em;
-                -moz-appearance: textfield; }
-input.eq-edit::-webkit-outer-spin-button,
-input.eq-edit::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-input.eq-edit:disabled { background: transparent; border-color: transparent; }
+/* EqLow/EqHigh sit in .enter-exit-control rows beside EnterAt/ExitAt and take
+   that styling; they only need the empty-vs-set cue the readout spans have. */
+input.eq-edit:disabled { opacity: 0.5; }
 </style>
 {% endblock %} {% block content %}
 <main class="page-settings">
@@ -2844,11 +2840,19 @@ input.eq-edit:disabled { background: transparent; border-color: transparent; }
 						<button class="cap_exit_at_btn" data-node_index="{{ node }}" title="{{ __('Capture current RSSI') }}"><svg height="1em" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M0 14h16v2H0zM10 6V0H6v6H3l5 7 5-7z"/></svg></button>
 					</div>
 
+					<div class="enter-exit-control">
+						<label for="eq_c_{{ node }}">{{ __('EqHigh') }}</label>
+						<input type="number" id="eq_c_{{ node }}" class="eq-edit" data-node="{{ node }}" data-level="high" min="0" max="9999">
+					</div>
+
+					<div class="enter-exit-control">
+						<label for="eq_b_{{ node }}">{{ __('EqLow') }}</label>
+						<input type="number" id="eq_b_{{ node }}" class="eq-edit" data-node="{{ node }}" data-level="low" min="0" max="9999">
+					</div>
+
 					<div class="eq-readout" data-node="{{ node }}">
 						<span class="eq-lbl" id="eq_lbl_{{ node }}">{{ __('Cal') }}</span>
 						<span class="eq-cap" id="eq_a_{{ node }}">&ndash;</span>
-						<input type="number" class="eq-cap eq-edit" id="eq_b_{{ node }}" data-node="{{ node }}" data-level="low" min="0" max="9999" title="{{ __('Captured low level') }}">
-						<input type="number" class="eq-cap eq-edit" id="eq_c_{{ node }}" data-node="{{ node }}" data-level="high" min="0" max="9999" title="{{ __('Captured high level') }}">
 					</div>
 				</div>
 				<table>
