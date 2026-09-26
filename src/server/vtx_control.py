@@ -43,11 +43,14 @@ VTX_CONFIRM_MARGIN_FRACTION = 0.15
 #  neighbour. A fraction of full scale, so it follows the pipeline's width.
 VTX_CONFIRM_RISE_FRACTION = 0.18
 
-# How much of the signal has to move, as a fraction of what the channel being
-#  left was carrying. A real change moves nearly all of it - measured, the node
-#  being left fell 98 counts of its 99 while the target rose 88 - so half is a
-#  wide margin that still rejects the partial wobbles bleed produces.
-VTX_CONFIRM_PAIR_FRACTION = 0.5
+# How far the target has to rise, as a fraction of what the channel being left
+#  was carrying. Fitted to every change measured so far - twelve real switches
+#  and four things that only looked like one - where 0.30 accepts all twelve and
+#  rejects all four. Half was tried first and threw out two real switches: the
+#  fleet's least sensitive node rises about a third of what the source was
+#  carrying, not most of it, and a bar set by the strongest node calls that a
+#  failure when it switched perfectly well.
+VTX_CONFIRM_PAIR_FRACTION = 0.30
 
 # How far clear of the runner-up the winning node has to be. Adjacent channels
 #  bleed: a quad on R1 lifted the R6 node 35 counts over its floor while R1
@@ -327,6 +330,17 @@ class VtxController:
                     and excess[source] is not None:
                 fell = before[source] - excess[source]
 
+            # The rise on its own is enough when it is unambiguous: the
+            #  transmitter starts radiating on the new channel immediately,
+            #  even while the flight controller is still restarting, so the
+            #  target climbing past what anything else gained is a change that
+            #  has already happened.
+            biggest_other = 0
+            for i in range(min(len(excess), len(before))):
+                if i == target or excess[i] is None or before[i] is None:
+                    continue
+                biggest_other = max(biggest_other, excess[i] - before[i])
+
             if fell is None:
                 # Nothing was carrying the signal beforehand, so there is no
                 #  fall to look for and the rise has to stand on its own.
@@ -337,15 +351,23 @@ class VtxController:
                 detail = 'rose {0} to {1}'.format(rise, now)
                 shortfall = 'rose only {0}, needs {1}'.format(rise, need)
             else:
-                # Both ends have to move, and the target has to end up above
-                #  where the source ended: a partial change is not a change.
-                moved = (rise > 0 and fell > 0
-                         and rise >= best_before * VTX_CONFIRM_PAIR_FRACTION
-                         and fell >= best_before * VTX_CONFIRM_PAIR_FRACTION)
+                # The target has to rise, the source has to fall, and the
+                #  target has to have gained more than any other node - that
+                #  last part is what rejects bleed, which lifts neighbours
+                #  without taking the signal off the channel being left.
+                #
+                #  The fall is required but not sized: how far the source has
+                #  dropped by the time this reads it depends on where in the
+                #  change the sample lands, while the rise is the thing being
+                #  waited for. Sizing both was too strict - a real change was
+                #  rejected for a source that had only half finished emptying.
+                need = max(1, int(round(
+                    best_before * VTX_CONFIRM_PAIR_FRACTION)))
+                moved = (rise >= need and fell > 0 and rise > biggest_other)
                 detail = 'rose {0}, {1} fell {2}'.format(
                     rise, channels[source], fell)
-                shortfall = 'rose {0} while {1} fell {2}'.format(
-                    rise, channels[source], fell)
+                shortfall = 'rose {0} (needs {1}), {2} fell {3}'.format(
+                    rise, need, channels[source], fell)
 
             if moved:
                 agreed += 1

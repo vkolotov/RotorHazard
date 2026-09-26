@@ -50,10 +50,14 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 EQ_SETTLE_SECONDS = 3.0
 
 # How long to let the previous channel finish arriving before reading the level
-#  the next command will be measured against. A commanded channel lands about
-#  three seconds after the command, so a reading taken sooner catches the change
-#  still in progress and understates the rise that follows.
-EQ_CHANNEL_SETTLE_SECONDS = 3.0
+#  the next change is measured against. A commanded channel lands about three
+#  seconds after the command, and a reading taken sooner is already rising, so
+#  the rise that follows would be counted from part way up.
+#
+# Only the reading needs this. A second command sent one second after the first
+#  was honoured in testing, so the quad is not deaf while it switches and there
+#  is no window here to wait out.
+EQ_CHANNEL_SETTLE_SECONDS = 4.0
 
 # Additional attempts after the first channel command fails confirmation. One:
 #  a command that arrives is confirmed within a few seconds, so a second go
