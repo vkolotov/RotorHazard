@@ -45,11 +45,9 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  previous step would already hold whatever the VTX did while its channel was
 #  being changed.
 #
-# Three seconds rather than five: the wait only has to cover the receiver
-#  settling and a pass of the running median, and where the channel was
-#  commanded rather than set by hand the change is confirmed by polling the
-#  nodes instead of by waiting out a worst case.
-EQ_SETTLE_SECONDS = 3.0
+# Give the receiver five seconds to settle before capturing or confirming a
+#  commanded channel during an automatic sweep.
+EQ_SETTLE_SECONDS = 5.0
 
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed
@@ -1000,7 +998,7 @@ class Calibration:
                 self._eq_progress = {
                     'level': level, 'channel': label,
                     'index': channels.index(label) + 1, 'total': len(channels),
-                    'until': time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS,
+                    'until': time.monotonic() + EQ_SETTLE_SECONDS + VTX_CONFIRM_TIMEOUT_SECONDS,
                 }
                 self._racecontext.rhui.emit_eq_wizard_state()
 
@@ -1010,6 +1008,10 @@ class Calibration:
                     logger.warning('Could not command %s: %s', label, exc)
                     skipped.append('{0} ({1})'.format(label, exc))
                     break
+
+                gevent.sleep(EQ_SETTLE_SECONDS)
+                if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
+                    return False
 
                 confirmed, detail = vtx.confirm_channel(
                     label, floors, node_channels,
