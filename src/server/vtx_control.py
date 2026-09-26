@@ -36,6 +36,13 @@ VTX_BANDS = 'ABEFRL'
 #  rather than a count, so it follows the width of the pipeline.
 VTX_CONFIRM_MARGIN_FRACTION = 0.15
 
+# How far a node's own reading has to rise before the quad counts as having
+#  arrived on its channel. Measured: the node for the commanded channel rose
+#  around ninety counts on a byte-wide pipeline, while bleed moved the others by
+#  tens, so half that leaves room for a weaker signal without catching a
+#  neighbour. A fraction of full scale, so it follows the pipeline's width.
+VTX_CONFIRM_RISE_FRACTION = 0.18
+
 # How far clear of the runner-up the winning node has to be. Adjacent channels
 #  bleed: a quad on R1 lifted the R6 node 35 counts over its floor while R1
 #  itself rose 94. Separation rather than absolute level, because bleed scales
@@ -151,6 +158,13 @@ class VtxController:
     # Confirming
     #
 
+    def read_excess(self, floors, seconds=VTX_CONFIRM_READ_SECONDS):
+        """How far each node is reading above its own noise floor.
+
+        Public so a caller can take a before-reading to compare against.
+        """
+        return self._read_excess(floors, seconds)
+
     def _read_excess(self, floors, seconds=VTX_CONFIRM_READ_SECONDS):
         """How far each node is reading above its own noise floor.
 
@@ -228,22 +242,103 @@ class VtxController:
         label = channels[winner] if winner < len(channels) else None
         return (label, margin, separation)
 
-    def confirm_channel(self, label, floors, channels,
+    def confirm_channel(self, label, floors, channels, before=None,
                         timeout=VTX_CONFIRM_TIMEOUT_SECONDS, cancelled=None):
-        """Wait until the nodes agree the quad is on `label`.
+        """Wait until the nodes show the quad has moved to `label`.
 
-        Polls rather than sleeping out a fixed settle: a change that has taken
-        effect is confirmed as soon as it is visible, and one that has not is
-        reported instead of being captured.
+        Looks for the change rather than for a winner. Adjacent channels bleed
+        hard at close range - a quad one channel away has been measured at two
+        thirds the level of the channel it is actually on - so "which node reads
+        highest, and by how much" is ambiguous exactly where the quad is
+        strongest. How much a node's own reading rose is not: the node for the
+        commanded channel climbed ninety counts when the quad arrived, while
+        everything else moved by tens.
+
+        Polls rather than sleeping out a fixed settle, so a change that has
+        taken effect is confirmed as soon as it is visible.
 
         :param label: The channel that was commanded
         :param floors: Per-node noise floor
         :param channels: Per-node channel label
+        :param before: Per-node excess from before the command, as
+            `read_excess` returns it. Without it this falls back to comparing
+            nodes against each other, which is weaker.
         :param timeout: How long to keep looking
         :param cancelled: Called each pass; truthy gives up without waiting out
             the timeout, so cancelling a sweep does not cost a full timeout for
             every channel left in it
         :return: (True, detail) once confirmed, or (False, detail) otherwise
+        """
+        target = None
+        for idx, chan in enumerate(channels):
+            if chan == label:
+                target = idx
+                break
+        if target is None:
+            return (False, 'no node is tuned to {0}'.format(label))
+
+        if before is None:
+            return self._confirm_by_ranking(label, floors, channels, timeout,
+                                            cancelled)
+
+        deadline = time.monotonic() + timeout
+        agreed = 0
+        last = 'no change on the node for {0}'.format(label)
+        was = before[target] if target < len(before) else None
+
+        while time.monotonic() < deadline:
+            if cancelled is not None and cancelled():
+                return (False, 'cancelled')
+
+            excess = self._read_excess(floors)
+            now = excess[target] if target < len(excess) else None
+            if now is None or was is None:
+                agreed = 0
+                last = 'no reading on the node for {0}'.format(label)
+                gevent.sleep(VTX_CONFIRM_POLL_SECONDS)
+                continue
+
+            rise = now - was
+            need = max(1, int(round(
+                self._racecontext.calibration.eq_scale(target)
+                * VTX_CONFIRM_RISE_FRACTION)))
+
+            # Bleed lifts the neighbours too, and close to the gate it can lift
+            #  them past the threshold on its own - so the commanded node also
+            #  has to have risen the most. Whatever the quad actually moved to
+            #  always gains more than what is merely leaking into it.
+            others = [excess[i] - before[i]
+                      for i in range(min(len(excess), len(before)))
+                      if i != target and excess[i] is not None
+                      and before[i] is not None]
+            biggest_other = max(others) if others else 0
+
+            if rise >= need and rise > biggest_other:
+                agreed += 1
+                if agreed >= VTX_CONFIRM_CONSECUTIVE:
+                    detail = 'rose {0} to {1}'.format(rise, now)
+                    logger.info('Confirmed VTX on %s: %s', label, detail)
+                    return (True, detail)
+            else:
+                agreed = 0
+                if rise < need:
+                    last = 'rose {0}, needs {1}'.format(rise, need)
+                else:
+                    last = 'rose {0}, but another node rose {1}'.format(
+                        rise, biggest_other)
+
+            gevent.sleep(VTX_CONFIRM_POLL_SECONDS)
+
+        logger.warning('Could not confirm VTX on %s: %s', label, last)
+        return (False, last)
+
+    def _confirm_by_ranking(self, label, floors, channels, timeout, cancelled):
+        """Confirm by comparing nodes against each other.
+
+        The fallback for when there is no before-reading to compare against, as
+        when the quad is already on the channel being asked for. Weaker, because
+        bleed from a close quad can put a neighbouring node within a few counts
+        of the right one.
         """
         deadline = time.monotonic() + timeout
         agreed = 0

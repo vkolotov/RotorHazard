@@ -1012,6 +1012,10 @@ class Calibration:
                     }
                     self._racecontext.rhui.emit_eq_wizard_state()
 
+                    # What the nodes read before the command, so confirmation
+                    #  can look for the change rather than for a winner.
+                    before = vtx.read_excess(floors)
+
                     try:
                         vtx.command_channel(pilot_id, label)
                     except Exception as exc:  # noqa: BLE001 - reported, not raised
@@ -1025,7 +1029,7 @@ class Calibration:
                     #  that time to every channel, including the ones that
                     #  switched immediately.
                     confirmed, detail = vtx.confirm_channel(
-                        label, floors, node_channels,
+                        label, floors, node_channels, before=before,
                         cancelled=lambda: getattr(self, '_eq_cancelled', False)
                         or self._eq_session() != session)
                     if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
