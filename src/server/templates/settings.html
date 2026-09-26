@@ -460,6 +460,9 @@
 			$('#eq_scope_current, #eq_scope_r, #eq_scope_rl')
 				.toggle(choosingScope && !running);
 			$('#eq_wizard_cancel').toggle((!choosingMode && !settled) || running);
+			/* Stepping the VTX by hand is a check on the control path, so it
+			   stays available whenever a run is not using the radio. */
+			$('#eq_vtx_step').toggle(!!sweep.available && !running);
 			$('#eq_wizard_reset').prop('disabled', running);
 			$('#eq_sweep_pilot_row').toggle(!!sweep.available
 				&& (choosingMode || msg.mode == 'auto') && !running);
@@ -540,6 +543,10 @@
 					});
 				}
 			}
+		});
+
+		$('#eq_vtx_step').click(function (event) {
+			socket.emit('eq_vtx_test', {});
 		});
 
 		$('#eq_wizard_cancel').click(function (event) {
@@ -2936,6 +2943,7 @@
 					<button id="eq_scope_current" class="alt-button">{{ __('Current channels') }}</button>
 					<button id="eq_scope_r" class="alt-button">{{ __('R band') }}</button>
 					<button id="eq_scope_rl" class="alt-button">{{ __('R + L band') }}</button>
+					<button id="eq_vtx_step" class="alt-button">{{ __('Step VTX') }}</button>
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>
 				</div>

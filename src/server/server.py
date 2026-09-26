@@ -1284,6 +1284,13 @@ def on_eq_sweep_scope(data=None):
     if eq_wizard_mutation_allowed():
         RaceContext.calibration.eq_sweep_set_scope((data or {}).get('scope'))
 
+@SOCKET_IO.on('eq_vtx_test')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_vtx_test(data=None):
+    '''Command one VTX channel, for checking the control path.'''
+    RaceContext.calibration.eq_vtx_test((data or {}).get('channel'))
+
 @SOCKET_IO.on('eq_sweep_noise')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
