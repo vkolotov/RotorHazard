@@ -10,55 +10,74 @@ from filtermanager import Flt
 
 logger = logging.getLogger(__name__)
 
-# Where the calibrated levels land on the corrected scale is derived from the
-#  captures themselves, not from fixed fractions: every fleet has different
-#  receivers, so any constant chosen here would be right for one timer and
-#  wrong for the next. The destination is the widest span any node showed, so
-#  the node that already resolves best is left alone and every other node is
-#  stretched up to match it. No node is ever compressed, and the result scales
-#  automatically with the width of the pipeline, since a narrower one reports
-#  proportionally narrower spans.
+# The gate is where a pass is decided, so it is where the correction has to be
+#  a pure translation: above the pivot the offset applies alone and the gain is
+#  exactly one, which keeps peak amplitude, local slope and the timing of the
+#  maximum as the receiver reported them. A fluctuation of n raw counts comes
+#  out as n counts on every node. The shipped fit reached cross-node agreement
+#  instead by stretching each node's whole curve, which amplified gate noise by
+#  1.0 to 2.85x depending on the node - different distortion per seat, in the
+#  one region lap detection reads.
 #
-# The one thing that cannot come from the captures is headroom: "high" is the
-#  quad at the gate, not saturation, and a closer pass has to stay on scale.
-#  Cap the top of the mapped range at this fraction of full scale.
-EQ_HEADROOM_FRACTION = 0.5
+# Where the gain still earns its place is further down, where matching receiver
+#  sensitivity matters more than preserving shape. Below the pivot the lower
+#  segment bends each node's reading onto a common noise floor.
+#
+# Two captures per node - floor and gate - and everything else follows.
+
+# Where the pivot sits on each node's own floor-to-gate range. The upper 40% is
+#  left at unity gain; the lower 60% is scaled. Measured over 8 nodes x 8 R-band
+#  channels, 0.60 roughly halves the cross-node error against offset-only at
+#  30-50% of range and costs nothing above it. Swept over 0.0, 0.3, 0.6, 0.8 and
+#  1.0: gate agreement is exact at every value, so the ratio only trades
+#  convergence lower down.
+#
+# Not 0. A ratio of 0 makes the whole curve offset-only, which measures better
+#  on the survey's `pit` level - but `pit` is a transmit-power setting that
+#  lands anywhere from 28% to 80% of the floor-to-gate span, so spread measured
+#  there reports where each node's PIT happens to fall, not fit quality.
+NORM_PIVOT_RATIO = 0.60
+
+# Where the levelled floors land, as a fraction of full scale. Small, but not
+#  zero: an idle node should still read alive, and rssi 0 is the node's own
+#  "no peak recorded" sentinel (`passPeak.rssi != 0`), so a floor there would
+#  make a genuine reading indistinguishable from a missing one.
+NORM_TARGET_FLOOR_FRACTION = 0.01
 
 # What a node's reading can reach. The node pipeline is a byte wide, so this is
-#  a byte; a wider pipeline would raise it, and the destination below follows
-#  the captures rather than this number, so nothing else has to change.
-EQ_FULL_SCALE = 255
+#  a byte; a wider pipeline would raise it, and the fit follows the captures
+#  rather than this number, so nothing else has to change.
+NORM_FULL_SCALE = 255
 
-# Minimum gap between adjacent captured levels, as a fraction of full scale.
-#  A node that never saw the quad reads only noise and would otherwise get an
-#  absurd slope. A fraction rather than a count, so it follows the width of
-#  the pipeline.
+# Minimum gap between the floor and the gate, as a fraction of full scale. A
+#  node that never saw the quad reads only noise and would otherwise get an
+#  absurd scale. A fraction rather than a count, so it follows the width of the
+#  pipeline.
 #
-# The band a node reports gets stretched to the destination band, so the gain
-#  it receives is destination/band and a narrow band buys a large gain that
-#  amplifies the node's own noise with the signal. A measured fleet spanned 34
-#  to 49 counts on a run with the quad properly placed, so 30 sits below every
-#  real measurement while still catching a pass flown too close to the gate.
-EQ_MIN_LEVEL_FRACTION = 30.0 / 255
+# The lower segment stretches floor-to-pivot onto the shared destination, so a
+#  narrow range buys a large gain that amplifies the node's own noise. A
+#  measured fleet spanned 34 to 49 counts with the quad properly placed, so 30
+#  sits below every real measurement while still catching a pass flown too
+#  close to the gate.
+NORM_MIN_LEVEL_FRACTION = 30.0 / 255
 
-# The Q8 scale that changes nothing: the node computes (raw - offset) * slope
-#  >> 8, so a slope of 256 multiplies by exactly one. Both the default for a
-#  node that has never been fitted and the value an operator types to undo a
-#  correction by hand.
-EQ_UNITY_SLOPE = 256
+# The Q8 scale that changes nothing: the node multiplies by scale >> 8, so 256
+#  is exactly one. Both the default for a node that has never been fitted and
+#  the value an operator types to undo a correction by hand.
+NORM_UNITY_SLOPE = 256
 
-# What an operator may type into a scale field. A gain far outside this is a
-#  bad capture rather than a real receiver difference, and amplifies the node's
-#  own noise with the signal.
-EQ_SLOPE_MIN = 32       # x0.125
-EQ_SLOPE_MAX = 2048     # x8.00
+# What an operator may type into a scale field. A gain far outside this is a bad
+#  capture rather than a real receiver difference, and amplifies the node's own
+#  noise with the signal.
+NORM_SLOPE_MIN = 32       # x0.125
+NORM_SLOPE_MAX = 2048     # x8.00
 
 # How long to watch a node after clearing its extremes, before reading them.
 #  The clear has to happen after the operator has set the condition up, not
 #  before: a peak only ever rises, so extremes cleared at the end of the
 #  previous step would already hold whatever the VTX did while its channel was
 #  being changed.
-EQ_SETTLE_SECONDS = 5.0
+NORM_SETTLE_SECONDS = 5.0
 
 class Calibration:
     def __init__(self, racecontext):
@@ -146,9 +165,9 @@ class Calibration:
         if emit_levels:
             self._racecontext.rhui.emit_enter_and_exit_at_levels()
 
-    # --- equalisation -----------------------------------------------------
+    # --- normalisation -----------------------------------------------------
 
-    def _eq_stored(self, field, default):
+    def _norm_stored(self, field, default):
         """A stored per-node calibration list, padded to the node count."""
         profile = self._racecontext.race.profile
         raw = getattr(profile, field, None)
@@ -162,7 +181,7 @@ class Calibration:
             out.append(default if v is None else v)
         return out
 
-    def _eq_participants(self):
+    def _norm_participants(self):
         """Which nodes the wizard calibrates.
 
         A node with no frequency is not receiving anything, and a node whose
@@ -183,7 +202,7 @@ class Calibration:
             out.append(idx)
         return out
 
-    def _eq_node_channels(self):
+    def _norm_node_channels(self):
         """The channel label each node is tuned to, one per node.
 
         Nodes that are not participating get None, so they raise no step of
@@ -191,7 +210,7 @@ class Calibration:
         """
         freqs = json.loads(self._racecontext.race.profile.frequencies)
         bands, chans = freqs.get('b') or [], freqs.get('c') or []
-        taking_part = set(self._eq_participants())
+        taking_part = set(self._norm_participants())
         out = []
         for idx in range(self._racecontext.race.num_nodes):
             if idx not in taking_part:
@@ -203,91 +222,95 @@ class Calibration:
                        else 'Node {0}'.format(idx + 1))
         return out
 
-    def _eq_steps(self):
-        """The capture sequence: noise, then every channel high, then every low.
+    def _norm_steps(self):
+        """The capture sequence: noise, then every channel at the gate.
 
-        Noise needs no quad and no channel change, so it is captured once.
-        Every distinct channel then needs the quad on it at two signal levels.
+        Noise needs no quad and no channel change, so it is captured once. Every
+        distinct channel then needs the quad at the gate, and that is the whole
+        sweep - the fit derives the pivot from the floor and the gate, so the
+        mid-power level the old three-point fit needed is gone. It was also the
+        least reproducible of the three, since it depended on the operator
+        placing the quad at a distance rather than on a marked spot.
 
-        Level is the outer loop rather than the inner one because the levels
-        are set by where the quad physically is - at the gate for "high", away
-        from it for "low" - while the channel is set by a command. Sweeping all
-        the channels at one level means the operator places the quad twice for
-        the whole run instead of twice per channel.
+        For an eight-node fleet on distinct channels this is 9 steps where the
+        three-level sweep took 17.
         """
         seen = []
-        for label in self._eq_node_channels():
+        for label in self._norm_node_channels():
             if label is None:
                 continue  # node is not taking part
             if label not in seen:
                 seen.append(label)
         steps = [('noise', None)]
-        for level in ('high', 'low'):
-            steps.extend((level, label) for label in seen)
+        steps.extend(('high', label) for label in seen)
         return steps
 
-    def _eq_scale(self, node_index):
+    def _norm_scale(self, node_index):
         """What a node's corrected reading can reach.
 
         Based on what the pipeline can actually carry, not on max_rssi_value -
         that is the "no nadir recorded" sentinel and sits above the real range.
         """
-        return EQ_FULL_SCALE
+        return NORM_FULL_SCALE
 
-    def _eq_destination(self, spans):
-        """Where every node's levels should land, from the captured spans.
+    def _norm_target_floor(self):
+        """Where every node's levelled floor lands on the corrected scale."""
+        return max(1, int(round(self._norm_scale(0) * NORM_TARGET_FLOOR_FRACTION)))
 
-        `spans` is (low_span, band_span) per node - noise-to-low and
-        low-to-high as that node actually reported them. The widest of each
-        becomes the common destination, so the best node keeps its own scale
-        and the rest are stretched onto it. Scaled down only if the result
-        would not leave room above the calibrated high for a closer quad:
-        headroom wins over stretch, because a reading that clips is lost
-        outright while a slightly compressed one is merely coarser.
+    def _norm_fit(self, floor_raw, gate_raw, target_gate):
+        """One node's coefficients from its two captures.
+
+        `target_gate` is where the gate should land and is shared across the
+        fleet, so every node's gate reading comes out on the same value. Above
+        the pivot the offset alone applies, so that is a translation and nothing
+        more. Below it the scale carries floor-to-pivot onto
+        target_floor-to-pivot_target, which lands every node's floor on one
+        value too.
+
+        Returns (pivot, offset, scale) ready for the node: it computes
+        `raw - offset` above the pivot and pivots the lower segment around the
+        same point, so the two meet there by construction rather than by the
+        server and the node agreeing on a third number.
         """
-        low_span = max(s[0] for s in spans)
-        band_span = max(s[1] for s in spans)
-        # The floor sits just clear of zero so an idle node still reads alive,
-        #  and it counts against the headroom like everything else.
-        floor_frac = 0.01
-        top = (low_span + band_span) * (1.0 + floor_frac)
-        limit = self._eq_scale(0) * EQ_HEADROOM_FRACTION
-        if top > limit and top > 0:
-            shrink = limit / top
-            low_span *= shrink
-            band_span *= shrink
-        t_floor = max(1, int(round((low_span + band_span) * floor_frac)))
-        return (t_floor,
-                t_floor + int(round(low_span)),
-                t_floor + int(round(low_span + band_span)))
+        offset = gate_raw - target_gate
+        pivot = int(round(floor_raw + (gate_raw - floor_raw) * NORM_PIVOT_RATIO))
+        # The pivot has to sit strictly above the floor or the lower segment has
+        #  no span to scale across. A capture pair this tight is rejected before
+        #  it reaches here, so this only guards the arithmetic.
+        pivot = max(pivot, floor_raw + 1)
+        pivot_target = pivot - offset
+        span = pivot - floor_raw
+        scale = int(round((pivot_target - self._norm_target_floor()) * 256.0 / span))
+        scale = max(1, min(65535, scale))
+        return pivot, offset, scale
 
-    def eq_wizard_state(self):
+    def norm_wizard_state(self):
         """Where the wizard is: the next step, or done."""
-        captured = getattr(self, '_eq_captured', None) or {}
-        busy = getattr(self, '_eq_busy', False)
-        steps = self._eq_steps()
+        captured = getattr(self, '_norm_captured', None) or {}
+        busy = getattr(self, '_norm_busy', False)
+        steps = self._norm_steps()
 
-        if captured and not self._eq_captures_are_current():
+        if captured and not self._norm_captures_are_current():
             # measured against a configuration that is no longer loaded
-            logger.info('Discarding equalisation captures: configuration changed')
+            logger.info('Discarding normalisation captures: configuration changed')
             captured = {}
-            self._eq_captured = {}
-            self._eq_applied_captures = False
+            self._norm_captured = {}
+            self._norm_applied_captures = False
 
-        vtx = self.eq_vtx_available()
+        vtx = self.norm_vtx_available()
 
         # Floor levelling stores a fit too, but it is a starting point with the
         #  sweep still ahead of it, so it must not park the wizard the way a
         #  finished calibration does.
-        applied = any(self._eq_stored('eq_pivots', 0)) \
-            and not getattr(self, '_eq_levelled_only', False)
-        if applied and (not captured or getattr(self, '_eq_applied_captures', False)):
+        applied = any(self._norm_stored('norm_pivots', 0)) \
+            and not getattr(self, '_norm_levelled_only', False)
+        if applied and (not captured or getattr(self, '_norm_applied_captures', False)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration. The captures behind
             #  the fit are kept so a level can still be corrected and re-applied.
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
-                    'settle': EQ_SETTLE_SECONDS, 'vtx': vtx,
+                    'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
                     'noise_ready': False}
 
         # Noise alone is enough to level the floors: with no quad there is no
@@ -301,53 +324,58 @@ class Calibration:
             if key not in captured:
                 return {'state': 'capturing', 'level': level, 'channel': chan,
                         'index': len(captured), 'total': len(steps),
-                        'busy': busy, 'settle': EQ_SETTLE_SECONDS, 'vtx': vtx,
+                        'busy': busy, 'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
                         'noise_ready': noise_ready}
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
-                'settle': EQ_SETTLE_SECONDS, 'vtx': vtx,
+                'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
                 'noise_ready': noise_ready}
 
-    def eq_captured_table(self):
+    def norm_captured_table(self):
         """Per-node view for the UI.
 
-        Carries the captured levels for the readout, and always the two scale
-        factors, which are what the operator edits. They are the Q8 gains the
-        node actually multiplies by, so 256 means x1.00 and changes nothing;
-        a node with no fit reads 256 rather than blank, since "no correction"
-        is a real, editable state rather than missing data.
+        Carries the captured levels for the readout, and always the offset and
+        the scale, which are what the operator edits. The offset is in counts
+        and decides where the gate lands; the scale is the Q8 gain below the
+        pivot, so 256 means x1.00 and changes nothing. A node with no fit reads
+        0 and 256 rather than blank, since "no correction" is a real, editable
+        state rather than missing data.
+
+        The pivot travels with them for the readout: it is derived, not edited,
+        but it is where the offset stops applying alone and the scale takes
+        over, so the two numbers mean little without it.
         """
-        captured = getattr(self, '_eq_captured', None) or {}
+        captured = getattr(self, '_norm_captured', None) or {}
         num = self._racecontext.race.num_nodes
-        labels = self._eq_node_channels()
-        pivots = self._eq_stored('eq_pivots', 0)
-        ups = self._eq_stored('eq_slope_ups', EQ_UNITY_SLOPE)
-        los = self._eq_stored('eq_slope_los', EQ_UNITY_SLOPE)
+        labels = self._norm_node_channels()
+        pivots = self._norm_stored('norm_pivots', 0)
+        offsets = self._norm_stored('norm_offsets', 0)
+        scales = self._norm_stored('norm_scales', NORM_UNITY_SLOPE)
 
         if captured:
             mode = 'applied-capture' \
-                if getattr(self, '_eq_applied_captures', False) else 'capture'
+                if getattr(self, '_norm_applied_captures', False) else 'capture'
             noise = captured.get('noise', [None] * num)
             rows = [{
                 'channel': labels[i], 'mode': mode,
                 'noise': noise[i],
-                'low': captured.get('low:{0}'.format(labels[i]), [None] * num)[i],
                 'high': captured.get('high:{0}'.format(labels[i]), [None] * num)[i],
             } for i in range(num)]
         else:
             rows = [{
                 'channel': labels[i],
                 'mode': 'applied' if pivots[i] else 'empty',
-                'noise': None, 'low': None, 'high': None,
+                'noise': None, 'high': None,
             } for i in range(num)]
 
         for i in range(num):
-            rows[i]['slope_up'] = ups[i]
-            rows[i]['slope_lo'] = los[i]
+            rows[i]['pivot'] = pivots[i]
+            rows[i]['offset'] = offsets[i]
+            rows[i]['scale'] = scales[i]
         return rows
 
     @catchLogExceptionsWrapper
-    def _eq_session(self):
+    def _norm_session(self):
         """Identifies the configuration a capture belongs to.
 
         Actual frequencies rather than channel labels, so a retune that keeps
@@ -359,43 +387,43 @@ class Calibration:
             tuning = tuple(freqs.get('f') or [])
         except (TypeError, ValueError, AttributeError):
             tuning = ()
-        return (getattr(self, '_eq_epoch', 0),
+        return (getattr(self, '_norm_epoch', 0),
                 getattr(self._racecontext.race.profile, 'id', None),
                 tuning)
 
-    def _eq_captures_are_current(self):
+    def _norm_captures_are_current(self):
         """True when the captures on hand belong to the configuration in use."""
-        captured = getattr(self, '_eq_captured', None)
+        captured = getattr(self, '_norm_captured', None)
         if not captured:
             return True
-        return getattr(self, '_eq_captured_session', None) == self._eq_session()
+        return getattr(self, '_norm_captured_session', None) == self._norm_session()
 
-    def _eq_note_capture_session(self):
+    def _norm_note_capture_session(self):
         """Record which configuration the current capture set belongs to."""
-        self._eq_captured_session = self._eq_session()
+        self._norm_captured_session = self._norm_session()
 
-    def _eq_invalidate_session(self):
+    def _norm_invalidate_session(self):
         """Drop any capture still settling."""
-        self._eq_epoch = getattr(self, '_eq_epoch', 0) + 1
+        self._norm_epoch = getattr(self, '_norm_epoch', 0) + 1
 
-    def eq_wizard_capture(self):
+    def norm_wizard_capture(self):
         """Capture the next step: clear the extremes, settle, then read."""
-        state = self.eq_wizard_state()
-        if state['state'] != 'capturing' or getattr(self, '_eq_busy', False):
+        state = self.norm_wizard_state()
+        if state['state'] != 'capturing' or getattr(self, '_norm_busy', False):
             return False
 
-        self._eq_busy = True
+        self._norm_busy = True
         # Anything that changes what a capture would mean - a reset, a step
         #  back, a profile change - bumps this. The sleep below is long enough
         #  for that to happen underneath us, and a reading taken before the
         #  change must not be filed against the state after it.
-        session = self._eq_session()
+        session = self._norm_session()
         try:
-            self._racecontext.rhui.emit_eq_wizard_state()
-            self.eq_reset_extremums()
-            gevent.sleep(EQ_SETTLE_SECONDS)
-            if self._eq_session() != session:
-                logger.info('Equalisation capture discarded: state changed while settling')
+            self._racecontext.rhui.emit_norm_wizard_state()
+            self.norm_reset_extremums()
+            gevent.sleep(NORM_SETTLE_SECONDS)
+            if self._norm_session() != session:
+                logger.info('Normalisation capture discarded: state changed while settling')
                 return False
 
             level = state['level']
@@ -408,7 +436,7 @@ class Calibration:
                 v = node.node_nadir_rssi if level == 'noise' else node.node_peak_rssi
                 vals.append(int(v) if v and v < node.max_rssi_value else None)
 
-            taking_part = self._eq_participants()
+            taking_part = self._norm_participants()
             missing = [i + 1 for i in taking_part if vals[i] is None]
             if level == 'noise' and missing:
                 msg = 'Noise capture failed: no reading on node {0}'.format(missing[0])
@@ -416,33 +444,33 @@ class Calibration:
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
 
-            rejected = self._eq_reject_reason(level, state['channel'], vals)
+            rejected = self._norm_reject_reason(level, state['channel'], vals)
             if rejected:
                 # One placement of the quad serves the whole pass, so a gap
                 #  this small condemns the placement rather than the step: the
                 #  channels already captured at this level were measured from
                 #  the same wrong distance. Drop them all and restart the pass
                 #  from its first channel.
-                discarded = self._eq_discard_level(level)
-                logger.warning('Equalisation %s pass restarted (%d discarded): %s',
+                discarded = self._norm_discard_level(level)
+                logger.warning('Normalisation %s pass restarted (%d discarded): %s',
                                level, discarded, rejected)
                 self._racecontext.rhui.emit_priority_message(rejected)
                 return False
 
-            self._eq_captured = getattr(self, '_eq_captured', {})
+            self._norm_captured = getattr(self, '_norm_captured', {})
             # a fresh reading supersedes whatever fit was applied from the old
             #  set, so these captures are a new run rather than its record
-            self._eq_applied_captures = False
-            self._eq_captured[key] = vals
-            self._eq_note_capture_session()
-            logger.info('Equalisation captured %s: %s', key, vals)
+            self._norm_applied_captures = False
+            self._norm_captured[key] = vals
+            self._norm_note_capture_session()
+            logger.info('Normalisation captured %s: %s', key, vals)
             return True
         finally:
-            self._eq_busy = False
-            self._racecontext.rhui.emit_eq_wizard_state()
+            self._norm_busy = False
+            self._racecontext.rhui.emit_norm_wizard_state()
 
     @catchLogExceptionsWrapper
-    def eq_wizard_apply_noise(self):
+    def norm_wizard_apply_noise(self):
         """Level every node's noise floor, using only the noise capture.
 
         With no quad in the air there is one measured point per node, which is
@@ -454,13 +482,13 @@ class Calibration:
         A later full sweep overwrites this; it is a starting point, not a
         substitute for a two-point fit.
         """
-        captured = getattr(self, '_eq_captured', None) or {}
+        captured = getattr(self, '_norm_captured', None) or {}
         noise = captured.get('noise')
-        if not noise or getattr(self, '_eq_busy', False):
+        if not noise or getattr(self, '_norm_busy', False):
             return False
 
         num = self._racecontext.race.num_nodes
-        taking_part = [i for i in self._eq_participants()
+        taking_part = [i for i in self._norm_participants()
                        if i < len(noise) and noise[i] is not None]
         if not taking_part:
             self._racecontext.rhui.emit_priority_message(
@@ -472,62 +500,57 @@ class Calibration:
         #  range towards the ceiling for no gain in resolution.
         target = min(noise[i] for i in taking_part)
 
-        pivots = self._eq_stored('eq_pivots', 0)
-        ups = self._eq_stored('eq_slope_ups', EQ_UNITY_SLOPE)
-        los = self._eq_stored('eq_slope_los', EQ_UNITY_SLOPE)
-        offset_ups = self._eq_stored('eq_offset_ups', 0)
-        offset_los = self._eq_stored('eq_offset_los', 0)
+        pivots = self._norm_stored('norm_pivots', 0)
+        offsets = self._norm_stored('norm_offsets', 0)
+        scales = self._norm_stored('norm_scales', NORM_UNITY_SLOPE)
 
         for idx in range(num):
             if idx not in taking_part:
                 continue
-            offset = noise[idx] - target
             # Pivot 1 rather than 0: zero disables the correction outright, and
             #  every reading is at or above 1, so the upper segment is the one
-            #  in use and the lower one never fires.
+            #  in use and the lower one never fires. That upper segment is the
+            #  offset alone, which is exactly the correction one point supports.
             pivots[idx] = 1
-            ups[idx] = EQ_UNITY_SLOPE
-            los[idx] = EQ_UNITY_SLOPE
-            offset_ups[idx] = offset
-            offset_los[idx] = offset
+            offsets[idx] = noise[idx] - target
+            scales[idx] = NORM_UNITY_SLOPE
 
-        self._eq_busy = True
+        self._norm_busy = True
         failed = []
         try:
-            self._racecontext.rhui.emit_eq_wizard_state()
+            self._racecontext.rhui.emit_norm_wizard_state()
             for idx in taking_part:
-                if not self._racecontext.interface.set_equalisation(
-                        idx, pivots[idx], offset_ups[idx], ups[idx],
-                        offset_los[idx], los[idx]):
+                if not self._racecontext.interface.set_normalisation(
+                        idx, pivots[idx], offsets[idx], scales[idx]):
                     failed.append(idx + 1)
             if not failed:
-                self.eq_reset_extremums()
+                self.norm_reset_extremums()
         finally:
-            self._eq_busy = False
+            self._norm_busy = False
 
         if failed:
-            self._eq_unresolved = list(failed)
+            self._norm_unresolved = list(failed)
             msg = ('Noise levelling was not accepted by node(s) {0}; '
                    'their correction is unknown - retry before racing').format(
                        ', '.join(str(n) for n in failed))
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
-            self._racecontext.rhui.emit_eq_wizard_state()
+            self._racecontext.rhui.emit_norm_wizard_state()
             return False
 
-        self._eq_unresolved = []
-        self._eq_store(pivots, offset_ups, ups, offset_los, los)
+        self._norm_unresolved = []
+        self._norm_store(pivots, offsets, scales)
         # Every reading the nodes give from here on is corrected, so nothing
         #  captured before this point can be compared with anything captured
         #  after it - the two sit on different axes, and a fit across the join
         #  measures the levelling rather than the receivers. Start the captures
         #  over against the levelled nodes.
-        self._eq_captured = {}
-        self._eq_invalidate_session()
-        # Deliberately not _eq_applied_captures: the sweep is not finished, and
+        self._norm_captured = {}
+        self._norm_invalidate_session()
+        # Deliberately not _norm_applied_captures: the sweep is not finished, and
         #  marking it applied would park the wizard and refuse the real fit.
-        self._eq_levelled_only = True
-        self._racecontext.rhui.emit_eq_wizard_state()
+        self._norm_levelled_only = True
+        self._racecontext.rhui.emit_norm_wizard_state()
         logger.info('Noise floors levelled to %d: offsets=%s',
                     target, [noise[i] - target for i in taking_part])
         self._racecontext.rhui.emit_priority_message(
@@ -535,21 +558,27 @@ class Calibration:
         return True
 
     @catchLogExceptionsWrapper
-    def eq_wizard_set_slope(self, node_index, which, value):
-        """Set one node's scale factor by hand and send it to the node.
+    def norm_wizard_set_coefficient(self, node_index, which, value):
+        """Set one node's offset or scale by hand and send it to the node.
 
-        The scale is the Q8 gain the node multiplies by, so 256 is x1.00 and
-        undoes the correction for that segment. Editing it re-derives the
-        matching offset so the curve still passes through the pivot at the same
-        corrected value: the number then does what it looks like it does -
-        tilts the segment - rather than also sliding it up or down.
+        The two an operator can usefully edit. The offset moves the whole curve
+        up or down - it is what decides where the gate lands, and it applies
+        alone above the pivot - while the scale is the Q8 gain below the pivot,
+        so 256 is x1.00 and leaves the lower segment straight through.
+
+        Editing the offset keeps the scale as it is: the lower segment is
+        anchored on the pivot, which the offset carries with it, so the shape
+        below the pivot rides along instead of needing a second edit.
+
+        There is deliberately no field for a gain above the pivot. That region
+        is a pure translation by design, and the node has no coefficient for it.
 
         :param node_index: Zero-based node
-        :param which: 'up' for the segment above the pivot, 'lo' for below
-        :param value: The Q8 scale to store
+        :param which: 'offset' or 'scale'
+        :param value: The offset in counts, or the Q8 scale
         :return: True when the node took it
         """
-        if which not in ('up', 'lo'):
+        if which not in ('offset', 'scale'):
             return False
         try:
             node_index = int(node_index)
@@ -559,68 +588,66 @@ class Calibration:
         num = self._racecontext.race.num_nodes
         if not 0 <= node_index < num:
             return False
-        if not EQ_SLOPE_MIN <= value <= EQ_SLOPE_MAX:
+        if which == 'scale' and not NORM_SLOPE_MIN <= value <= NORM_SLOPE_MAX:
             self._racecontext.rhui.emit_priority_message(
                 'Node {0}: scale must be between {1} (x{2:.2f}) and {3} (x{4:.2f})'
-                .format(node_index + 1, EQ_SLOPE_MIN,
-                        EQ_SLOPE_MIN / float(EQ_UNITY_SLOPE), EQ_SLOPE_MAX,
-                        EQ_SLOPE_MAX / float(EQ_UNITY_SLOPE)))
+                .format(node_index + 1, NORM_SLOPE_MIN,
+                        NORM_SLOPE_MIN / float(NORM_UNITY_SLOPE), NORM_SLOPE_MAX,
+                        NORM_SLOPE_MAX / float(NORM_UNITY_SLOPE)))
             return False
-        if getattr(self, '_eq_busy', False):
+        # The node carries the offset as a signed 16-bit value, and an offset
+        #  wider than the scale is a typo rather than a correction.
+        if which == 'offset' and not -NORM_FULL_SCALE <= value <= NORM_FULL_SCALE:
+            self._racecontext.rhui.emit_priority_message(
+                'Node {0}: offset must be between {1} and {2}'
+                .format(node_index + 1, -NORM_FULL_SCALE, NORM_FULL_SCALE))
+            return False
+        if getattr(self, '_norm_busy', False):
             return False
 
-        pivots = self._eq_stored('eq_pivots', 0)
-        ups = self._eq_stored('eq_slope_ups', EQ_UNITY_SLOPE)
-        los = self._eq_stored('eq_slope_los', EQ_UNITY_SLOPE)
-        offset_ups = self._eq_stored('eq_offset_ups', 0)
-        offset_los = self._eq_stored('eq_offset_los', 0)
+        pivots = self._norm_stored('norm_pivots', 0)
+        offsets = self._norm_stored('norm_offsets', 0)
+        scales = self._norm_stored('norm_scales', NORM_UNITY_SLOPE)
 
         pivot = pivots[node_index]
         if not pivot:
             self._racecontext.rhui.emit_priority_message(
-                'Node {0} has no calibration to scale yet'.format(node_index + 1))
+                'Node {0} has no calibration to adjust yet'.format(node_index + 1))
             return False
 
-        # Where the pivot lands now. Both segments meet there, so holding it
-        #  fixed is what keeps a scale edit from moving the whole curve.
-        at_pivot = ((pivot - offset_ups[node_index]) * ups[node_index]) / 256.0
-        if which == 'up':
-            ups[node_index] = value
-            offset_ups[node_index] = int(round(pivot - at_pivot * 256.0 / value))
+        if which == 'offset':
+            offsets[node_index] = value
         else:
-            los[node_index] = value
-            offset_los[node_index] = int(round(pivot - at_pivot * 256.0 / value))
+            scales[node_index] = value
 
-        self._eq_busy = True
+        self._norm_busy = True
         try:
-            ok = self._racecontext.interface.set_equalisation(
-                node_index, pivot, offset_ups[node_index], ups[node_index],
-                offset_los[node_index], los[node_index])
+            ok = self._racecontext.interface.set_normalisation(
+                node_index, pivot, offsets[node_index], scales[node_index])
         finally:
-            self._eq_busy = False
+            self._norm_busy = False
         if not ok:
             self._racecontext.rhui.emit_priority_message(
-                'Node {0} did not take the scale'.format(node_index + 1))
-            self._racecontext.rhui.emit_eq_wizard_state()
+                'Node {0} did not take the {1}'.format(node_index + 1, which))
+            self._racecontext.rhui.emit_norm_wizard_state()
             return False
 
-        self._eq_store(pivots, offset_ups, ups, offset_los, los)
-        logger.info('Node %d scale_%s set to %d (x%.2f) by hand',
-                    node_index + 1, which, value, value / float(EQ_UNITY_SLOPE))
-        self._racecontext.rhui.emit_eq_wizard_state()
+        self._norm_store(pivots, offsets, scales)
+        logger.info('Node %d %s set to %d by hand', node_index + 1, which, value)
+        self._racecontext.rhui.emit_norm_wizard_state()
         return True
 
-    def _eq_discard_level(self, level):
+    def _norm_discard_level(self, level):
         """Drop every capture taken at one level, keeping the other levels.
 
         The captures at a level all share one placement of the quad, so they
-        stand or fall together. Noise and the opposite level were measured
-        somewhere else and are untouched.
+        stand or fall together. Noise was measured with no quad at all and is
+        untouched.
 
-        :param level: 'high' or 'low'
+        :param level: 'high'
         :return: How many captures were discarded
         """
-        captured = getattr(self, '_eq_captured', None) or {}
+        captured = getattr(self, '_norm_captured', None) or {}
         prefix = '{0}:'.format(level)
         doomed = [k for k in captured if k.startswith(prefix)]
         for key in doomed:
@@ -629,24 +656,26 @@ class Calibration:
             # Cancel a capture still settling, then re-stamp what survives, as
             #  stepping back does: the other levels remain valid for this
             #  configuration and must not be thrown away with these.
-            self._eq_invalidate_session()
-            self._eq_note_capture_session()
+            self._norm_invalidate_session()
+            self._norm_note_capture_session()
         return len(doomed)
 
-    def _eq_min_gap(self, node_index=0):
-        """The smallest high-to-low gap a node may report and still be fitted."""
-        return max(1, int(round(EQ_MIN_LEVEL_FRACTION * self._eq_scale(node_index))))
+    def _norm_min_gap(self, node_index=0):
+        """The smallest floor-to-gate gap a node may report and still be fitted."""
+        return max(1, int(round(NORM_MIN_LEVEL_FRACTION * self._norm_scale(node_index))))
 
-    def _eq_reject_reason(self, level, channel, vals):
+    def _norm_reject_reason(self, level, channel, vals):
         """Why this capture cannot be filed, or None when it can.
 
-        A level is only checked against its counterpart, so the first of the
-        pair is always accepted and the second is what fails. High is captured
-        before low, so in practice this rejects a low taken with the quad still
-        too near the gate - the case that otherwise fits a huge slope to a
-        handful of counts and is not noticed until Apply.
+        The gate is checked against the noise floor already captured, which is
+        the one pair the fit divides by. It rejects a gate reading taken with
+        the quad too far from the gate, or on the wrong channel - the case that
+        otherwise fits a huge scale to a handful of counts and is not noticed
+        until Apply.
 
-        :param level: 'noise', 'high' or 'low'
+        Noise is captured first and stands alone, so it is always accepted.
+
+        :param level: 'noise' or 'high'
         :param channel: The channel being captured, or None for noise
         :param vals: This capture's reading per node
         :return: A message naming the node and what to do, or None
@@ -654,32 +683,26 @@ class Calibration:
         if level == 'noise' or channel is None:
             return None  # noise stands alone; nothing to compare it against
 
-        other = 'low' if level == 'high' else 'high'
-        stored = (getattr(self, '_eq_captured', None) or {}).get(
-            '{0}:{1}'.format(other, channel))
-        if not stored:
-            return None  # first of the pair
+        noise = (getattr(self, '_norm_captured', None) or {}).get('noise')
+        if not noise:
+            return None  # no floor to compare against yet
 
         # Only nodes tuned to this channel measure it; the rest are bystanders
         #  reading bleed from an adjacent channel and say nothing useful here.
-        labels = self._eq_node_channels()
-        gap = self._eq_min_gap()
-        for idx in self._eq_participants():
+        labels = self._norm_node_channels()
+        gap = self._norm_min_gap()
+        for idx in self._norm_participants():
             if labels[idx] != channel:
                 continue
-            new, old = vals[idx], stored[idx]
-            if new is None or old is None:
+            hi, fl = vals[idx], noise[idx]
+            if hi is None or fl is None:
                 continue
-            hi, lo = (new, old) if level == 'high' else (old, new)
-            if (hi - lo) < gap:
-                return ('Node {0} ({1}): high {2} and low {3} are only {4} '
-                        'apart, need {5}. The quad is too {6} - move it '
-                        'further {7} and capture the whole {8} pass again '
-                        'from the first channel.').format(
-                            idx + 1, channel, hi, lo, hi - lo, gap,
-                            'close' if level == 'low' else 'far',
-                            'away' if level == 'low' else 'closer',
-                            level)
+            if (hi - fl) < gap:
+                return ('Node {0} ({1}): gate {2} is only {3} above its noise '
+                        'floor {4}, need {5}. The quad is too far from the gate '
+                        'or off channel - place it on the marked spot and '
+                        'capture this pass again from the first '
+                        'channel.').format(idx + 1, channel, hi, hi - fl, fl, gap)
         return None
 
     def _vtx(self):
@@ -690,7 +713,7 @@ class Calibration:
             vtx = self._vtx_controller = VtxController(self._racecontext)
         return vtx
 
-    def eq_vtx_available(self):
+    def norm_vtx_available(self):
         """True when the wizard can command the quad's channel."""
         try:
             return self._vtx().available()
@@ -699,14 +722,14 @@ class Calibration:
             return False
 
     @catchLogExceptionsWrapper
-    def eq_vtx_switch(self):
+    def norm_vtx_switch(self):
         """Command the quad onto the channel the next capture needs.
 
         Sends and says so; nothing here waits or checks. The operator can see
         the quad's OSD, which is a better witness than anything the timer can
         infer from its own receivers, so they decide when to capture.
         """
-        state = self.eq_wizard_state()
+        state = self.norm_wizard_state()
         label = state.get('channel')
         if not label:
             # noise, applied and ready steps have no channel to command
@@ -724,45 +747,45 @@ class Calibration:
         return True
 
     @catchLogExceptionsWrapper
-    def eq_wizard_back(self):
+    def norm_wizard_back(self):
         """Drop the most recent capture and return to that step."""
-        captured = getattr(self, '_eq_captured', None) or {}
+        captured = getattr(self, '_norm_captured', None) or {}
         if not captured:
             return False
         order = [l if c is None else '{0}:{1}'.format(l, c)
-                 for l, c in self._eq_steps()]
+                 for l, c in self._norm_steps()]
         last = [k for k in order if k in captured][-1]
         del captured[last]
         # the set no longer matches the fit that was applied from it
-        self._eq_applied_captures = False
+        self._norm_applied_captures = False
         # Cancel a capture still settling, then re-stamp what remains: the
         #  earlier steps are still valid for this configuration and stepping
         #  back must not throw them away.
-        self._eq_invalidate_session()
-        self._eq_note_capture_session()
-        logger.info('Equalisation stepped back, discarded %s', last)
-        self.eq_reset_extremums()
-        self._racecontext.rhui.emit_eq_wizard_state()
+        self._norm_invalidate_session()
+        self._norm_note_capture_session()
+        logger.info('Normalisation stepped back, discarded %s', last)
+        self.norm_reset_extremums()
+        self._racecontext.rhui.emit_norm_wizard_state()
         return True
 
     @catchLogExceptionsWrapper
-    def eq_wizard_reset(self):
+    def norm_wizard_reset(self):
         """Clear the calibration and arm the wizard from the start.
 
         This drops the applied constants too. A capture is only meaningful
         against uncorrected readings, so a fresh run has to start from raw.
         """
-        self._eq_captured = {}
-        self._eq_applied_captures = False
-        self._eq_levelled_only = False
-        self._eq_invalidate_session()
+        self._norm_captured = {}
+        self._norm_applied_captures = False
+        self._norm_levelled_only = False
+        self._norm_invalidate_session()
         num = self._racecontext.race.num_nodes
-        self._eq_busy = True
+        self._norm_busy = True
         try:
-            self._eq_store([0] * num, [0] * num, [256] * num, [0] * num, [256] * num)
+            self._norm_store([0] * num, [0] * num, [NORM_UNITY_SLOPE] * num)
             failed = []
             for idx in range(num):
-                if not self._racecontext.interface.set_equalisation(idx, 0, 0, 256, 0, 256):
+                if not self._racecontext.interface.set_normalisation(idx, 0, 0, NORM_UNITY_SLOPE):
                     failed.append(idx + 1)
             if not failed:
                 # EnterAt/ExitAt are left exactly as the operator set them.
@@ -771,40 +794,38 @@ class Calibration:
                 #  the operator knows what their gate should trigger on.
                 # The tracking reset is a hardware mutation, so it belongs
                 #  inside the guard rather than after it.
-                self.eq_reset_extremums()
+                self.norm_reset_extremums()
         finally:
-            self._eq_busy = False
+            self._norm_busy = False
 
         if failed:
             # A node that did not confirm may still be correcting, so the axis
             #  is unknown and the thresholds must not be moved as though it
             #  were not.
-            self._eq_unresolved = list(failed)
-            msg = ('Equalisation reset was not accepted by node(s) {0}; '
+            self._norm_unresolved = list(failed)
+            msg = ('Normalisation reset was not accepted by node(s) {0}; '
                    'their correction is unknown - retry before racing').format(
                        ', '.join(str(n) for n in failed))
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
-            self._racecontext.rhui.emit_eq_wizard_state()
+            self._racecontext.rhui.emit_norm_wizard_state()
             return False
-        self._eq_unresolved = []
-        self._racecontext.rhui.emit_eq_wizard_state()
-        logger.info('Equalisation cleared')
+        self._norm_unresolved = []
+        self._racecontext.rhui.emit_norm_wizard_state()
+        logger.info('Normalisation cleared')
         return True
 
-    def _eq_store(self, pivots, offset_ups, slope_ups, offset_los, slope_los):
+    def _norm_store(self, pivots, offsets, scales):
         profile = self._racecontext.race.profile
         self._racecontext.race.profile = self._racecontext.rhdata.alter_profile({
             'profile_id': profile.id,
-            'eq_pivots': {"v": pivots},
-            'eq_offset_ups': {"v": offset_ups},
-            'eq_slope_ups': {"v": slope_ups},
-            'eq_offset_los': {"v": offset_los},
-            'eq_slope_los': {"v": slope_los},
+            'norm_pivots': {"v": pivots},
+            'norm_offsets': {"v": offsets},
+            'norm_scales': {"v": scales},
             })
 
     @catchLogExceptionsWrapper
-    def eq_wizard_apply(self):
+    def norm_wizard_apply(self):
         """Fit two segments per node from the captured levels and send them.
 
         Each node takes its levels from the channel it is tuned to, so a sweep
@@ -812,18 +833,19 @@ class Calibration:
         The target scale is folded into the offsets here, which is why the node
         needs no notion of it.
         """
-        if self.eq_wizard_state()['state'] != 'ready':
+        if self.norm_wizard_state()['state'] != 'ready':
             return False
 
-        captured = self._eq_captured
+        captured = self._norm_captured
         num = self._racecontext.race.num_nodes
-        labels = self._eq_node_channels()
+        labels = self._norm_node_channels()
         noise = captured['noise']
 
-        # Read every node's captures first: the destination is the widest span
-        #  in the fleet, so no node can be fitted until all of them are known.
-        #  Nodes not taking part get no fit and stay uncorrected.
-        taking_part = self._eq_participants()
+        # Read every node's captures first: the gate destination is the highest
+        #  gate reading in the fleet, so no node can be fitted until all of
+        #  them are known. Nodes not taking part get no fit and stay
+        #  uncorrected.
+        taking_part = self._norm_participants()
         if not taking_part:
             msg = 'No node is available to calibrate'
             logger.warning(msg)
@@ -832,68 +854,57 @@ class Calibration:
         levels = {}
         for idx in taking_part:
             label = labels[idx]
-            lo = captured.get('low:{0}'.format(label), [None] * num)[idx]
             hi = captured.get('high:{0}'.format(label), [None] * num)[idx]
             fl = noise[idx]
-            if lo is None or hi is None or fl is None:
+            if hi is None or fl is None:
                 msg = 'Node {0} has no reading on its own channel ({1})'.format(
                     idx + 1, label)
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            # Only the arithmetic floor is enforced: the fit divides by both
-            #  spans, so they have to be positive. How wide is worth having is
-            #  the operator's judgement, not this function's.
-            if hi <= lo or lo <= fl:
+            # Only the arithmetic floor is enforced: the fit divides by the
+            #  floor-to-pivot span, so it has to be positive. How wide is worth
+            #  having is the operator's judgement, not this function's.
+            if hi <= fl:
                 msg = ('Node {0} levels are not in order '
-                       '(noise={1}, low={2}, high={3})').format(idx + 1, fl, lo, hi)
+                       '(floor={1}, gate={2})').format(idx + 1, fl, hi)
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            levels[idx] = (fl, lo, hi)
+            levels[idx] = (fl, hi)
 
-        destination = self._eq_destination(
-            [(lo - fl, hi - lo) for fl, lo, hi in levels.values()])
-        logger.info('Equalisation destination from captured spans: %s', destination)
+        # Every node's gate lands on the highest gate reading in the fleet, so
+        #  the strongest receiver keeps its own scale and the rest are
+        #  translated up to meet it. Offsetting down instead would push the
+        #  quietest node's whole curve towards zero for no gain in resolution.
+        target_gate = max(hi for _, hi in levels.values())
+        logger.info('Normalisation gate destination from captures: %d', target_gate)
 
-        pivots, offset_ups, slope_ups, offset_los, slope_los = [], [], [], [], []
+        pivots, offsets, scales = [], [], []
         for idx in range(num):
             if idx not in levels:
                 # not taking part: pivot 0 leaves this node uncorrected
                 pivots.append(0)
-                slope_ups.append(256)
-                slope_los.append(256)
-                offset_ups.append(0)
-                offset_los.append(0)
+                offsets.append(0)
+                scales.append(NORM_UNITY_SLOPE)
                 continue
-            fl, lo, hi = levels[idx]
+            fl, hi = levels[idx]
+            pivot, offset, scale = self._norm_fit(fl, hi, target_gate)
+            pivots.append(pivot)
+            offsets.append(offset)
+            scales.append(scale)
 
-            t_floor, t_low, t_high = destination
-            s_up = max(1, min(65535, int(round(
-                (t_high - t_low) * 256.0 / (hi - lo)))))
-            s_lo = max(1, min(65535, int(round(
-                (t_low - t_floor) * 256.0 / (lo - fl)))))
-            # fold the target into the offset: corrected = (raw - offset)*slope>>8
-            #  passes through (lo -> t_low) for both segments, so they
-            #  meet at the pivot
-            pivots.append(lo)
-            slope_ups.append(s_up)
-            slope_los.append(s_lo)
-            offset_ups.append(int(round(lo - t_low * 256.0 / s_up)))
-            offset_los.append(int(round(lo - t_low * 256.0 / s_lo)))
-
-        self._eq_busy = True
+        self._norm_busy = True
         try:
-            self._eq_store(pivots, offset_ups, slope_ups, offset_los, slope_los)
+            self._norm_store(pivots, offsets, scales)
             failed = []
             for idx in range(num):
-                if not self._racecontext.interface.set_equalisation(
-                        idx, pivots[idx], offset_ups[idx], slope_ups[idx],
-                        offset_los[idx], slope_los[idx]):
+                if not self._racecontext.interface.set_normalisation(
+                        idx, pivots[idx], offsets[idx], scales[idx]):
                     failed.append(idx + 1)
 
         finally:
-            self._eq_busy = False
+            self._norm_busy = False
 
         if failed:
             # The stored fit no longer describes the hardware, so the axis is
@@ -902,67 +913,64 @@ class Calibration:
             #  thresholds are still on the old one, and the rest are in an
             #  unknown state. Neither is safe to time against, so record it
             #  and keep racing blocked until a run succeeds or clears it.
-            self._eq_unresolved = list(failed)
-            msg = ('Equalisation was not accepted by node(s) {0}; '
+            self._norm_unresolved = list(failed)
+            msg = ('Normalisation was not accepted by node(s) {0}; '
                    'their correction is unknown - re-run calibration or reset '
                    'it before racing').format(', '.join(str(n) for n in failed))
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
-            self._racecontext.rhui.emit_eq_wizard_state()
+            self._racecontext.rhui.emit_norm_wizard_state()
             return False
-        self._eq_unresolved = []
+        self._norm_unresolved = []
 
         gevent.sleep(0.5)
-        self.eq_reset_extremums()
+        self.norm_reset_extremums()
         gevent.sleep(0.5)
-        self.eq_reset_extremums()
+        self.norm_reset_extremums()
 
         # Keep the captures. They are what the fit was made from, so holding
         #  them lets a level that read wrong be corrected and re-applied
         #  without sweeping the whole fleet again. They are raw readings taken
         #  before any correction was on the nodes, so they stay valid as the
         #  source for a new fit.
-        self._eq_applied_captures = True
-        self._eq_levelled_only = False
-        self._racecontext.rhui.emit_eq_wizard_state()
-        logger.info('Equalisation applied: pivots=%s slopes=%s/%s',
-                    pivots, slope_ups, slope_los)
+        self._norm_applied_captures = True
+        self._norm_levelled_only = False
+        self._racecontext.rhui.emit_norm_wizard_state()
+        logger.info('Normalisation applied: pivots=%s offsets=%s scales=%s',
+                    pivots, offsets, scales)
         self._racecontext.rhui.emit_priority_message(
-            'Equalisation applied to {0} nodes'.format(num))
+            'Normalisation applied to {0} nodes'.format(num))
         return True
 
-    def eq_state_is_unresolved(self):
+    def norm_state_is_unresolved(self):
         """True when the correction on the nodes is not known to be correct.
 
         Set when a coefficient write is not confirmed: some nodes may be on a
         new correction with thresholds still on the old one, and others in an
         unknown state. Timing against that is worse than refusing to start.
         """
-        return bool(getattr(self, '_eq_unresolved', None))
+        return bool(getattr(self, '_norm_unresolved', None))
 
-    def eq_unresolved_nodes(self):
-        return list(getattr(self, '_eq_unresolved', []) or [])
+    def norm_unresolved_nodes(self):
+        return list(getattr(self, '_norm_unresolved', []) or [])
 
-    def eq_reset_extremums(self):
+    def norm_reset_extremums(self):
         """Restart peak/nadir tracking on every node."""
         for idx in range(self._racecontext.race.num_nodes):
             self._racecontext.interface.reset_node_extremums(idx)
 
-    def hardware_set_all_equalisation(self):
+    def hardware_set_all_normalisation(self):
         """Re-send the stored calibration; nodes keep nothing across a power cycle."""
-        pivots = self._eq_stored('eq_pivots', 0)
-        offset_ups = self._eq_stored('eq_offset_ups', 0)
-        slope_ups = self._eq_stored('eq_slope_ups', 256)
-        offset_los = self._eq_stored('eq_offset_los', 0)
-        slope_los = self._eq_stored('eq_slope_los', 256)
+        pivots = self._norm_stored('norm_pivots', 0)
+        offsets = self._norm_stored('norm_offsets', 0)
+        scales = self._norm_stored('norm_scales', NORM_UNITY_SLOPE)
         failed = []
         for idx in range(self._racecontext.race.num_nodes):
-            if not self._racecontext.interface.set_equalisation(
-                    idx, pivots[idx], offset_ups[idx], slope_ups[idx],
-                    offset_los[idx], slope_los[idx]):
+            if not self._racecontext.interface.set_normalisation(
+                    idx, pivots[idx], offsets[idx], scales[idx]):
                 failed.append(idx + 1)
         if failed:
-            msg = ('Equalisation was not accepted by node(s) {0}; '
+            msg = ('Normalisation was not accepted by node(s) {0}; '
                    'those nodes are running uncorrected').format(
                        ', '.join(str(n) for n in failed))
             logger.warning(msg)
@@ -973,53 +981,63 @@ class Calibration:
         """Fingerprint of the axis stored EnterAt/ExitAt are measured on.
 
         A threshold is compared against whatever rssiRead() returns, which is
-        the reading after equalisation, so the correction in force defines the
+        the reading after normalisation, so the correction in force defines the
         axis and a stored value only means the same thing while it holds.
-        """
-        return {'eq': self._eq_signature()}
 
-    def _eq_signature(self):
+        The key is 'norm'. A profile carrying the older 'eq' marker was written
+        against the five-coefficient fit, which no longer exists, so it reads as
+        no marker at all - and that is the honest answer: those thresholds sit
+        on an axis this code cannot reproduce.
+        """
+        return {'norm': self._norm_signature()}
+
+    def _norm_signature(self):
         """The correction in force, per node, or None where there is none."""
-        pivots = self._eq_stored('eq_pivots', 0)
+        pivots = self._norm_stored('norm_pivots', 0)
         if not any(pivots):
             return None
         return [[pivots[i],
-                 self._eq_stored('eq_offset_ups', 0)[i],
-                 self._eq_stored('eq_slope_ups', 256)[i],
-                 self._eq_stored('eq_offset_los', 0)[i],
-                 self._eq_stored('eq_slope_los', 256)[i]]
+                 self._norm_stored('norm_offsets', 0)[i],
+                 self._norm_stored('norm_scales', NORM_UNITY_SLOPE)[i]]
                 for i in range(len(pivots))]
 
     def _corrected(self, raw, coeffs):
-        """What the node reports for a raw reading under `coeffs`."""
+        """What the node reports for a raw reading under `coeffs`.
+
+        Mirrors the node's own arithmetic, shift for shift, so a threshold
+        converted here lands where the node will actually put it.
+        """
         if not coeffs:
             return raw
-        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        pivot, offset, scale = coeffs
         if not pivot:
             return raw
         if raw >= pivot:
-            adj = ((raw - off_up) * slope_up) >> 8
+            adj = raw - offset
         else:
-            adj = ((raw - off_lo) * slope_lo) >> 8
+            adj = (pivot - offset) + (((raw - pivot) * scale) >> 8)
         return max(0, adj)
 
     def _uncorrect(self, value, coeffs):
         """The raw reading that produces `value` under `coeffs`."""
         if not coeffs:
             return value
-        pivot, off_up, slope_up, off_lo, slope_lo = coeffs
+        pivot, offset, scale = coeffs
         if not pivot:
             return value
-        at_pivot = self._corrected(pivot, coeffs)
-        if value >= at_pivot:
-            return int(round(value * 256.0 / slope_up)) + off_up if slope_up else value
-        return int(round(value * 256.0 / slope_lo)) + off_lo if slope_lo else value
+        pivot_target = pivot - offset
+        if value >= pivot_target:
+            return value + offset
+        if not scale:
+            return value
+        return pivot + int(round((value - pivot_target) * 256.0 / scale))
 
     def _stored_scale_id(self, profile):
         """The axis the stored thresholds were written on, if recorded.
 
         Profiles written before this was tracked carry no marker; they predate
-        equalisation, so they are uncorrected.
+        normalisation, so they are uncorrected. So does a profile carrying the
+        superseded 'eq' marker, whose fit this code can no longer evaluate.
         """
         raw = getattr(profile, 'enter_ats', None)
         if not raw:
@@ -1028,7 +1046,7 @@ class Calibration:
             stored = json.loads(raw)
         except (TypeError, ValueError):
             return None
-        return {'eq': stored.get('eq')}
+        return {'norm': stored.get('norm')}
 
     def hardware_set_all_enter_ats(self, enter_at_levels):
         '''send update to nodes'''
@@ -1067,8 +1085,8 @@ class Calibration:
         self._racecontext.rhui.emit_enter_and_exit_at_levels()  # one broadcast for all nodes
 
     @staticmethod
-    def _eq_signature_key(signature):
-        """A comparable form of an equalisation signature.
+    def _norm_signature_key(signature):
+        """A comparable form of a normalisation signature.
 
         Stored ones arrive as JSON text, live ones as lists; None and the
         string "null" both mean no correction.
@@ -1094,9 +1112,9 @@ class Calibration:
         the time produced.
         """
         stored = self._racecontext.rhdata.get_savedrace_attribute_value(
-            race, 'eq_signature', None)
-        return self._eq_signature_key(stored) == self._eq_signature_key(
-            self._eq_signature())
+            race, 'norm_signature', None)
+        return self._norm_signature_key(stored) == self._norm_signature_key(
+            self._norm_signature())
 
     def find_best_calibration_values(self, node, seat_index):
         ''' Search race history for best tuning values '''
@@ -1120,7 +1138,7 @@ class Calibration:
                 skipped += 1
         if skipped:
             logger.debug('Ignoring %d saved race(s) timed under a different '
-                         'equalisation', skipped)
+                         'normalisation', skipped)
         pilotRaces = [p for p in self._racecontext.rhdata.get_savedPilotRaces()
                       if p.race_id in usable_race_ids]
         pilotRaces.sort(key=lambda x: x.id, reverse=True)

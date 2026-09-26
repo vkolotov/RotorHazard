@@ -132,7 +132,7 @@ class RHRace():
         # Calibration rewrites coefficients on the nodes and clears their peak
         #  tracking. Guard here rather than at the socket handler, so
         #  scheduled and API starts are covered too.
-        if getattr(self._racecontext.calibration, '_eq_busy', False):
+        if getattr(self._racecontext.calibration, '_norm_busy', False):
             logger.info("Canceling staging, calibration is updating the nodes")
             self._racecontext.rhui.emit_priority_message(
                 self.__('Wait for calibration to finish before starting a race.'), True)
@@ -141,11 +141,11 @@ class RHRace():
         # A coefficient write that was never confirmed leaves some nodes on a
         #  correction the server cannot describe, so nothing timed against
         #  them would mean anything.
-        if getattr(self._racecontext.calibration, 'eq_state_is_unresolved', lambda: False)():
-            nodes = self._racecontext.calibration.eq_unresolved_nodes()
-            logger.info("Canceling staging, equalisation unresolved on node(s) %s", nodes)
+        if getattr(self._racecontext.calibration, 'norm_state_is_unresolved', lambda: False)():
+            nodes = self._racecontext.calibration.norm_unresolved_nodes()
+            logger.info("Canceling staging, normalisation unresolved on node(s) %s", nodes)
             self._racecontext.rhui.emit_priority_message(
-                self.__('Equalisation is unresolved on node(s) {0}; re-run or reset '
+                self.__('Normalisation is unresolved on node(s) {0}; re-run or reset '
                         'calibration before racing.').format(
                             ', '.join(str(n) for n in nodes)), True)
             return False
@@ -295,7 +295,7 @@ class RHRace():
                 self._racecontext.interface.set_all_frequencies(json.loads(self.profile.frequencies))
                 self._racecontext.calibration.hardware_set_all_enter_ats([node.enter_at_level for node in self._racecontext.interface.nodes])
                 self._racecontext.calibration.hardware_set_all_exit_ats([node.exit_at_level for node in self._racecontext.interface.nodes])
-                self._racecontext.calibration.hardware_set_all_equalisation()
+                self._racecontext.calibration.hardware_set_all_normalisation()
 
                 self.clear_laps() # Clear laps before race start
                 self.init_node_cross_fields()  # set 'cur_pilot_id' and 'cross' fields on nodes
@@ -741,9 +741,9 @@ class RHRace():
                 #  threshold only means the same signal while the correction
                 #  that produced it still holds.
                 self._racecontext.rhdata.alter_savedRaceMeta(new_race.id, {
-                    'race_attr': 'eq_signature',
+                    'race_attr': 'norm_signature',
                     'value': json.dumps(
-                        self._racecontext.calibration._eq_signature()),
+                        self._racecontext.calibration._norm_signature()),
                     })
 
                 race_data = {}

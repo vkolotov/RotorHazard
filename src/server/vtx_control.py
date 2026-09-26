@@ -1,6 +1,6 @@
 """Commanding the calibration quad's video transmitter.
 
-The equalisation wizard needs the quad on a known channel at each step. Doing
+The normalisation wizard needs the quad on a known channel at each step. Doing
 that by hand means the operator walking back to the radio between every
 capture; commanding it from here leaves them at the timer.
 

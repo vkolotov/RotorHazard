@@ -959,7 +959,7 @@ def on_load_data(data):
             RaceContext.rhui.emit_node_tuning(nobroadcast=True)
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
-            RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
+            RaceContext.rhui.emit_norm_wizard_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
         elif load_type == 'start_thresh_lower_duration':
@@ -1204,7 +1204,7 @@ def on_set_language(data):
     '''Set interface language.'''
     RaceContext.serverconfig.set_item('UI', 'currentLanguage', data['language'])
 
-def eq_wizard_mutation_allowed():
+def norm_wizard_mutation_allowed():
     '''Whether the wizard may touch the nodes right now.
 
     Capturing resets peak/nadir tracking and applying changes the RSSI axis
@@ -1215,77 +1215,77 @@ def eq_wizard_mutation_allowed():
     if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE):
         RaceContext.rhui.emit_priority_message(
             __('Save or discard the current race before calibrating.'), False)
-        RaceContext.rhui.emit_eq_wizard_state()
+        RaceContext.rhui.emit_norm_wizard_state()
         return False
     return True
 
-@SOCKET_IO.on('eq_wizard_capture')
+@SOCKET_IO.on('norm_wizard_capture')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_capture(_data=None):
+def on_norm_wizard_capture(_data=None):
     '''Capture the wizard's next step.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_capture()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_capture()
 
-@SOCKET_IO.on('eq_wizard_back')
+@SOCKET_IO.on('norm_wizard_back')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_back(_data=None):
+def on_norm_wizard_back(_data=None):
     '''Discard the last captured step.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_back()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_back()
 
-@SOCKET_IO.on('eq_wizard_reset')
+@SOCKET_IO.on('norm_wizard_reset')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_reset(_data=None):
+def on_norm_wizard_reset(_data=None):
     '''Clear the calibration and start again.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_reset()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_reset()
 
-@SOCKET_IO.on('eq_wizard_apply')
+@SOCKET_IO.on('norm_wizard_apply')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_apply(_data=None):
+def on_norm_wizard_apply(_data=None):
     '''Fit and apply the captured calibration.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_apply()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_apply()
 
-@SOCKET_IO.on('eq_wizard_apply_noise')
+@SOCKET_IO.on('norm_wizard_apply_noise')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_apply_noise(_data=None):
+def on_norm_wizard_apply_noise(_data=None):
     '''Level the noise floors from the noise capture alone.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_apply_noise()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_apply_noise()
 
-@SOCKET_IO.on('eq_wizard_set_slope')
+@SOCKET_IO.on('norm_wizard_set_coefficient')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_set_slope(data=None):
-    '''Set one node's scale factor by hand.'''
-    if eq_wizard_mutation_allowed():
+def on_norm_wizard_set_coefficient(data=None):
+    '''Set one node's offset or scale by hand.'''
+    if norm_wizard_mutation_allowed():
         data = data or {}
-        RaceContext.calibration.eq_wizard_set_slope(
+        RaceContext.calibration.norm_wizard_set_coefficient(
             data.get('node'), data.get('which'), data.get('value'))
 
-@SOCKET_IO.on('eq_vtx_switch')
+@SOCKET_IO.on('norm_vtx_switch')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_vtx_switch(_data=None):
+def on_norm_vtx_switch(_data=None):
     '''Command the quad onto the channel the next capture needs.
 
     Touches no node state, so unlike the capture steps this is allowed while a
     race is loaded: it only sends a channel out over the backpack.
     '''
-    RaceContext.calibration.eq_vtx_switch()
+    RaceContext.calibration.norm_vtx_switch()
 
-@SOCKET_IO.on('eq_wizard_query')
+@SOCKET_IO.on('norm_wizard_query')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_query(_data=None):
+def on_norm_wizard_query(_data=None):
     '''Report the wizard position to the asking client.'''
-    RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
+    RaceContext.rhui.emit_norm_wizard_state(nobroadcast=True)
 
 @SOCKET_IO.on('cap_enter_at_btn')
 @requires_socketio_auth
@@ -1655,7 +1655,7 @@ def on_set_profile(data, emit_vals=True):
         RaceContext.interface.set_all_frequencies(freqs)
         RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
         RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
-        RaceContext.calibration.hardware_set_all_equalisation()
+        RaceContext.calibration.hardware_set_all_normalisation()
 
     else:
         logger.warning('Invalid set_profile value: ' + str(profile_val))

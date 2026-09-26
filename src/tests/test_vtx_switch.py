@@ -112,28 +112,28 @@ class WizardSwitchTest(unittest.TestCase):
         """
         ctrl = backpack()
         ctx, cal = context(count=2, controller=ctrl)
-        cal._eq_captured = {}
-        cal._eq_note_capture_session()
+        cal._norm_captured = {}
+        cal._norm_note_capture_session()
 
-        self.assertFalse(cal.eq_vtx_switch())  # noise step: nothing to command
+        self.assertFalse(cal.norm_vtx_switch())  # noise step: nothing to command
         ctrl.send_set_vtx_config.assert_not_called()
 
         for key, expected in (('noise', ('R', 1)),
                               ('low:R1', ('R', 1)),
                               ('high:R1', ('R', 2)),
                               ('low:R2', ('R', 2))):
-            cal._eq_captured[key] = [1, 1]
-            cal._eq_note_capture_session()
-            self.assertTrue(cal.eq_vtx_switch())
+            cal._norm_captured[key] = [1, 1]
+            cal._norm_note_capture_session()
+            self.assertTrue(cal.norm_vtx_switch())
             self.assertEqual(ctrl.send_set_vtx_config.call_args.args, expected)
 
     def test_nothing_is_sent_once_every_step_is_captured(self):
         ctrl = backpack()
         ctx, cal = context(count=1, controller=ctrl)
-        cal._eq_captured = {'noise': [10], 'low:R1': [50], 'high:R1': [90]}
-        cal._eq_note_capture_session()
-        self.assertEqual(cal.eq_wizard_state()['state'], 'ready')
-        self.assertFalse(cal.eq_vtx_switch())
+        cal._norm_captured = {'noise': [10], 'low:R1': [50], 'high:R1': [90]}
+        cal._norm_note_capture_session()
+        self.assertEqual(cal.norm_wizard_state()['state'], 'ready')
+        self.assertFalse(cal.norm_vtx_switch())
         ctrl.send_set_vtx_config.assert_not_called()
 
     def test_a_failed_send_is_reported_and_not_raised(self):
@@ -141,35 +141,35 @@ class WizardSwitchTest(unittest.TestCase):
         ctrl = backpack()
         ctrl.send_set_vtx_config.side_effect = RuntimeError('backpack is offline')
         ctx, cal = context(count=1, controller=ctrl)
-        cal._eq_captured = {'noise': [10]}
-        cal._eq_note_capture_session()
-        self.assertFalse(cal.eq_vtx_switch())
+        cal._norm_captured = {'noise': [10]}
+        cal._norm_note_capture_session()
+        self.assertFalse(cal.norm_vtx_switch())
         self.assertTrue(ctx.rhui.emit_priority_message.called)
 
     def test_the_state_says_whether_a_channel_can_be_commanded(self):
         """The page hides the button without a backpack, so the flag must be right."""
         _, without = context(count=1)
-        self.assertFalse(without.eq_wizard_state()['vtx'])
+        self.assertFalse(without.norm_wizard_state()['vtx'])
 
         ctx, with_bp = context(count=1, controller=backpack())
-        state = with_bp.eq_wizard_state()
+        state = with_bp.norm_wizard_state()
         self.assertTrue(state['vtx'])
         self.assertIsNone(state['channel'])  # noise step, so still no button
 
-        with_bp._eq_captured = {'noise': [10]}
-        with_bp._eq_note_capture_session()
-        self.assertEqual(with_bp.eq_wizard_state()['channel'], 'R1')
+        with_bp._norm_captured = {'noise': [10]}
+        with_bp._norm_note_capture_session()
+        self.assertEqual(with_bp.norm_wizard_state()['channel'], 'R1')
 
     def test_capturing_still_works_with_no_backpack_at_all(self):
-        """Manual equalisation must not start depending on a plugin being there."""
+        """Manual normalisation must not start depending on a plugin being there."""
         ctx, cal = context(count=1)
-        cal._eq_captured = {}
-        cal._eq_note_capture_session()
-        self.assertFalse(cal.eq_vtx_switch())
+        cal._norm_captured = {}
+        cal._norm_note_capture_session()
+        self.assertFalse(cal.norm_vtx_switch())
         with patch('calibration.gevent.sleep'):
             ctx.interface.nodes[0].node_nadir_rssi = 12
-            self.assertTrue(cal.eq_wizard_capture())
-        self.assertEqual(cal._eq_captured['noise'], [12])
+            self.assertTrue(cal.norm_wizard_capture())
+        self.assertEqual(cal._norm_captured['noise'], [12])
 
 
 if __name__ == '__main__':

@@ -439,10 +439,10 @@
 		});
 
 		/* Profiles */
-		socket.on('eq_wizard_state', function (msg) {
-			var btn = $('#eq_wizard_action');
-			var prog = $('#eq_wizard_progress');
-			var vtx = $('#eq_vtx_switch');
+		socket.on('norm_wizard_state', function (msg) {
+			var btn = $('#norm_wizard_action');
+			var prog = $('#norm_wizard_progress');
+			var vtx = $('#norm_vtx_switch');
 			if (window.eqTick) { clearInterval(window.eqTick); window.eqTick = null; }
 
 			/* Only offer the channel command where there is a channel to send
@@ -455,11 +455,11 @@
 
 			/* Noise alone levels the floors, so offer that the moment it is
 			   captured rather than only at the end of the sweep. */
-			$('#eq_apply_noise').toggle(!!msg.noise_ready);
+			$('#norm_apply_noise').toggle(!!msg.noise_ready);
 
 			if (msg.busy) {
 				var left = msg.settle || 5;
-				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset, #eq_vtx_switch, #eq_apply_noise').prop('disabled', true);
+				$('#norm_wizard_action, #norm_wizard_back, #norm_wizard_reset, #norm_vtx_switch, #norm_apply_noise').prop('disabled', true);
 				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
 				window.eqTick = setInterval(function () {
 					left -= 1;
@@ -470,89 +470,91 @@
 					}
 				}, 1000);
 			} else {
-				$('#eq_wizard_reset').prop('disabled', false);
+				$('#norm_wizard_reset').prop('disabled', false);
 				vtx.prop('disabled', false);
-				$('#eq_apply_noise').prop('disabled', false);
+				$('#norm_apply_noise').prop('disabled', false);
 				if (msg.state == 'applied') {
-					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
+					btn.text("{{ __('Normalised') }}").data('act', '').prop('disabled', true);
 					prog.text('');
-					$('#eq_wizard_back').prop('disabled', true);
+					$('#norm_wizard_back').prop('disabled', true);
 				} else if (msg.state == 'ready') {
 					btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
 					prog.text("{{ __('all steps captured') }}");
-					$('#eq_wizard_back').prop('disabled', false);
+					$('#norm_wizard_back').prop('disabled', false);
 				} else {
 					var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
 					btn.text("{{ __('Capture') }}: " + label).data('act', 'capture').prop('disabled', false);
 					prog.text(msg.index + ' / ' + msg.total);
-					$('#eq_wizard_back').prop('disabled', msg.index === 0);
+					$('#norm_wizard_back').prop('disabled', msg.index === 0);
 				}
 			}
 
 			if (msg.captured) {
 				for (var i = 0; i < msg.captured.length; i++) {
 					var r = msg.captured[i];
-					/* The readout keeps the three measured levels; the two
-					   scale fields are what the operator edits. */
-					var lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Eq') }}";
-					$('#eq_lbl_' + i).text(lbl);
-					$.each({'a': r.noise, 'b': r.low, 'c': r.high}, function (k, v) {
-						var el = $('#eq_' + k + '_' + i);
-						var set = v !== null && v !== undefined;
-						el.text(set ? v : '\u2013');
-						el.toggleClass('eq-set', set);
-					});
+					/* The readout keeps the two measured levels and the
+					   derived pivot; offset and scale are what the operator
+					   edits. */
+					var lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Norm') }}";
+					$('#norm_lbl_' + i).text(lbl);
+					$.each({'a': r.noise, 'b': r.high, 'p': r.pivot},
+						function (k, v) {
+							var el = $('#norm_' + k + '_' + i);
+							var set = v !== null && v !== undefined && v !== 0;
+							el.text(set ? v : '\u2013');
+							el.toggleClass('norm-set', set);
+						});
 
-					$.each({'up': r.slope_up, 'lo': r.slope_lo}, function (k, v) {
-						var el = $('#eq_' + k + '_' + i);
+					$.each({'offset': r.offset, 'scale': r.scale}, function (k, v) {
+						var el = $('#norm_' + k + '_' + i);
 						/* Leave a field being typed in alone, or the next
 						   state push overwrites it mid-edit. */
 						if (!el.is(':focus')) {
 							el.val(v === null || v === undefined ? '' : v);
 						}
-						/* Say what the number means, since 256 = x1.00 is not
-						   obvious from the digits alone. */
-						$('#eq_' + k + '_x_' + i).text(
-							v ? '\u00d7' + (v / 256).toFixed(2) : '');
 					});
+					/* Say what the scale means, since 256 = x1.00 is not
+					   obvious from the digits alone. */
+					$('#norm_scale_x_' + i).text(
+						r.scale ? '\u00d7' + (r.scale / 256).toFixed(2) : '');
 				}
 			}
 		});
 
-		$('.eq-edit').change(function (event) {
+		$('.norm-edit').change(function (event) {
 			var el = $(this);
 			var raw = el.val();
 			if (raw === '') { return; }
-			socket.emit('eq_wizard_set_slope', {
+			socket.emit('norm_wizard_set_coefficient', {
 				node: parseInt(el.data('node')),
 				which: el.data('which'),
 				value: parseInt(raw)
 			});
 		});
 
-		$('#eq_apply_noise').click(function (event) {
-			socket.emit('eq_wizard_apply_noise');
+		$('#norm_apply_noise').click(function (event) {
+			socket.emit('norm_wizard_apply_noise');
 		});
 
-		$('#eq_vtx_switch').click(function (event) {
-			socket.emit('eq_vtx_switch');
+		$('#norm_vtx_switch').click(function (event) {
+			socket.emit('norm_vtx_switch');
 		});
 
-		$('#eq_wizard_action').click(function (event) {
-			socket.emit($(this).data('act') == 'apply' ? 'eq_wizard_apply' : 'eq_wizard_capture');
+		$('#norm_wizard_action').click(function (event) {
+			socket.emit($(this).data('act') == 'apply' ? 'norm_wizard_apply' : 'norm_wizard_capture');
 		});
 
-		$('#eq_wizard_back').click(function (event) {
-			socket.emit('eq_wizard_back');
+		$('#norm_wizard_back').click(function (event) {
+			socket.emit('norm_wizard_back');
 		});
 
-		$('#eq_wizard_reset').click(function (event) {
+		$('#norm_wizard_reset').click(function (event) {
 			if (confirm("{{ __('Clear the calibration on every node and start again?') }}")) {
-				socket.emit('eq_wizard_reset');
+				socket.emit('norm_wizard_reset');
 			}
 		});
 
-		socket.emit('eq_wizard_query');
+		socket.emit('norm_wizard_query');
 
 		socket.on('node_tuning', function (msg) {
 			$('#set_profile').empty();
@@ -2720,22 +2722,23 @@
 <style>
 /* match the flex sizing ol.form gives its inputs, so the wizard row lines up
    with the controls below it */
-.eq-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
+.norm-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
              flex: 1 1 0; margin-left: 0.5em; }
-.eq-wizard button { margin: 0; }
-.eq-wizard #eq_wizard_action { flex: 1 1 auto; }
-.eq-wizard .eq-progress { opacity: 0.7; white-space: nowrap; font-style: italic;
+.norm-wizard button { margin: 0; }
+.norm-wizard #norm_wizard_action { flex: 1 1 auto; }
+.norm-wizard .norm-progress { opacity: 0.7; white-space: nowrap; font-style: italic;
                           font-size: 0.9em; flex: 0 0 auto; }
-.eq-readout { display: flex; align-items: center; gap: 0.35em; font-size: 0.85em;
+.norm-readout { display: flex; align-items: center; gap: 0.35em; font-size: 0.85em;
               margin-top: 0.3em; }
-.eq-readout .eq-lbl { opacity: 0.6; }
-.eq-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
+.norm-readout .norm-lbl { opacity: 0.6; }
+.norm-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
           font-variant-numeric: tabular-nums; }
-.eq-cap.eq-set { opacity: 1; }
-/* EqLow/EqHigh sit in .enter-exit-control rows beside EnterAt/ExitAt and take
-   that styling; they only need the empty-vs-set cue the readout spans have. */
-input.eq-edit:disabled { opacity: 0.5; }
-.eq-gain { opacity: 0.6; font-size: 0.85em; margin-left: 0.3em;
+.norm-cap.norm-set { opacity: 1; }
+/* NormOffset/NormScale sit in .enter-exit-control rows beside EnterAt/ExitAt
+   and take that styling; they only need the empty-vs-set cue the readout spans
+   have. */
+input.norm-edit:disabled { opacity: 0.5; }
+.norm-gain { opacity: 0.6; font-size: 0.85em; margin-left: 0.3em;
            font-variant-numeric: tabular-nums; }
 </style>
 {% endblock %} {% block content %}
@@ -2845,22 +2848,21 @@ input.eq-edit:disabled { opacity: 0.5; }
 					</div>
 
 					<div class="enter-exit-control">
-						<label for="eq_up_{{ node }}">{{ __('EqScale') }}</label>
-						<input type="number" id="eq_up_{{ node }}" class="eq-edit" data-node="{{ node }}" data-which="up" min="32" max="2048" step="8" title="{{ __('Scale above the pivot. 256 = no change') }}">
-						<span class="eq-gain" id="eq_up_x_{{ node }}"></span>
+						<label for="norm_offset_{{ node }}">{{ __('NormOffset') }}</label>
+						<input type="number" id="norm_offset_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="offset" min="-255" max="255" step="1" title="{{ __('Offset in counts. Moves the whole curve; above the pivot this is the only correction') }}">
 					</div>
 
 					<div class="enter-exit-control">
-						<label for="eq_lo_{{ node }}">{{ __('EqScaleLo') }}</label>
-						<input type="number" id="eq_lo_{{ node }}" class="eq-edit" data-node="{{ node }}" data-which="lo" min="32" max="2048" step="8" title="{{ __('Scale below the pivot. 256 = no change') }}">
-						<span class="eq-gain" id="eq_lo_x_{{ node }}"></span>
+						<label for="norm_scale_{{ node }}">{{ __('NormScale') }}</label>
+						<input type="number" id="norm_scale_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="scale" min="32" max="2048" step="8" title="{{ __('Scale below the pivot. 256 = no change') }}">
+						<span class="norm-gain" id="norm_scale_x_{{ node }}"></span>
 					</div>
 
-					<div class="eq-readout" data-node="{{ node }}">
-						<span class="eq-lbl" id="eq_lbl_{{ node }}">{{ __('Cal') }}</span>
-						<span class="eq-cap" id="eq_a_{{ node }}">&ndash;</span>
-						<span class="eq-cap" id="eq_b_{{ node }}">&ndash;</span>
-						<span class="eq-cap" id="eq_c_{{ node }}">&ndash;</span>
+					<div class="norm-readout" data-node="{{ node }}">
+						<span class="norm-lbl" id="norm_lbl_{{ node }}">{{ __('Cal') }}</span>
+						<span class="norm-cap" id="norm_a_{{ node }}" title="{{ __('Noise floor') }}">&ndash;</span>
+						<span class="norm-cap" id="norm_b_{{ node }}" title="{{ __('Gate') }}">&ndash;</span>
+						<span class="norm-cap" id="norm_p_{{ node }}" title="{{ __('Pivot (derived)') }}">&ndash;</span>
 					</div>
 				</div>
 				<table>
@@ -2910,15 +2912,15 @@ input.eq-edit:disabled { opacity: 0.5; }
 		<ol class="form">
 			<li>
 				<div class="label-block">
-					<label>{{ __('Equalise Nodes') }}</label>
+					<label>{{ __('Normalise Nodes') }}</label>
 				</div>
-				<div class="eq-wizard">
-					<button id="eq_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
-					<button id="eq_wizard_back" class="alt-button">{{ __('Back') }}</button>
-					<button id="eq_apply_noise" class="alt-button" style="display: none;">{{ __('Level Floors') }}</button>
-					<button id="eq_vtx_switch" class="alt-button" style="display: none;"></button>
-					<button id="eq_wizard_action"></button>
-					<span class="eq-progress" id="eq_wizard_progress"></span>
+				<div class="norm-wizard">
+					<button id="norm_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
+					<button id="norm_wizard_back" class="alt-button">{{ __('Back') }}</button>
+					<button id="norm_apply_noise" class="alt-button" style="display: none;">{{ __('Level Floors') }}</button>
+					<button id="norm_vtx_switch" class="alt-button" style="display: none;"></button>
+					<button id="norm_wizard_action"></button>
+					<span class="norm-progress" id="norm_wizard_progress"></span>
 				</div>
 			</li>
 			<li>

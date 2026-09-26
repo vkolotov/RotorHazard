@@ -1,19 +1,22 @@
-"""Add the per-node equalisation columns to an existing RotorHazard database.
+"""Add the per-node normalisation columns to an existing RotorHazard database.
 
 Idempotent. Existing profiles get NULL, which the server reads as "no
 calibration", so behaviour is unchanged until one is applied.
 
-    python3 util/add_equalisation_columns.py <path-to-database.db>
+    python3 util/add_normalisation_columns.py <path-to-database.db>
+
+A database carrying the superseded eq_* columns is left holding them: SQLite
+drops a column awkwardly, and they cost nothing but space. The fits they hold
+are not carried over - they were made by a different transfer function, so
+every timer calibrates once against the new one.
 """
 import sqlite3
 import sys
 
 COLUMNS = (
-    ("eq_pivots", "VARCHAR(256)"),
-    ("eq_offset_ups", "VARCHAR(256)"),
-    ("eq_slope_ups", "VARCHAR(256)"),
-    ("eq_offset_los", "VARCHAR(256)"),
-    ("eq_slope_los", "VARCHAR(256)"),
+    ("norm_pivots", "VARCHAR(256)"),
+    ("norm_offsets", "VARCHAR(256)"),
+    ("norm_scales", "VARCHAR(256)"),
 )
 
 

@@ -170,13 +170,12 @@ class InterfaceMapper:
         local_index = mapped_node.index
         return mapped_node.interface.set_exit_at_level(local_index, level)
 
-    def set_equalisation(self, node_index, pivot, offset_up, slope_up,
-                         offset_lo, slope_lo):
+    def set_normalisation(self, node_index, pivot, offset, scale):
         mapped_node = self._node_map[node_index]
         local_index = mapped_node.index
-        if hasattr(mapped_node.interface, "set_equalisation"):
-            return mapped_node.interface.set_equalisation(
-                local_index, pivot, offset_up, slope_up, offset_lo, slope_lo)
+        if hasattr(mapped_node.interface, "set_normalisation"):
+            return mapped_node.interface.set_normalisation(
+                local_index, pivot, offset, scale)
 
     def reset_node_extremums(self, node_index):
         mapped_node = self._node_map[node_index]
