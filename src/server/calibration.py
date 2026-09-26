@@ -188,20 +188,26 @@ class Calibration:
         return out
 
     def _eq_steps(self):
-        """The capture sequence: one noise step, then low/high per channel.
+        """The capture sequence: noise, then every channel high, then every low.
 
         Noise needs no quad and no channel change, so it is captured once.
-        Every distinct channel then needs the quad on it at two power levels.
+        Every distinct channel then needs the quad on it at two signal levels.
+
+        Level is the outer loop rather than the inner one because the levels
+        are set by where the quad physically is - at the gate for "high", away
+        from it for "low" - while the channel is set by a command. Sweeping all
+        the channels at one level means the operator places the quad twice for
+        the whole run instead of twice per channel.
         """
-        steps = [('noise', None)]
         seen = []
         for label in self._eq_node_channels():
             if label is None:
                 continue  # node is not taking part
             if label not in seen:
                 seen.append(label)
-                steps.append(('low', label))
-                steps.append(('high', label))
+        steps = [('noise', None)]
+        for level in ('high', 'low'):
+            steps.extend((level, label) for label in seen)
         return steps
 
     def _eq_scale(self, node_index):

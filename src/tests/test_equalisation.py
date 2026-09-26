@@ -107,6 +107,51 @@ class EqualisationTest(unittest.TestCase):
         labels = [chan for _, chan in cal._eq_steps() if chan]
         self.assertEqual(sorted(set(labels)), ['R1'])
 
+    def test_every_channel_is_captured_high_before_any_is_captured_low(self):
+        """Level is the outer loop, so the quad is placed twice per run.
+
+        The levels come from where the quad physically is; the channel comes
+        from a command. Sweeping the channels within a level means one move
+        between "high" and "low" rather than one per channel.
+        """
+        _, _, cal = self.context(count=3)
+        steps = cal._eq_steps()
+        self.assertEqual(steps[0], ('noise', None))
+        self.assertEqual(steps[1:], [('high', 'R1'), ('high', 'R2'), ('high', 'R3'),
+                                     ('low', 'R1'), ('low', 'R2'), ('low', 'R3')])
+
+    def test_reordering_the_steps_still_fits_the_same_constants(self):
+        """The captures are keyed by level and channel, not by position."""
+        values = [90, 150, 210]
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context()
+            # filed in capture order: noise, then high, then low
+            cal._eq_captured = {'noise': [values[0]],
+                                'high:R1': [values[2]],
+                                'low:R1': [values[1]]}
+            cal._eq_note_capture_session()
+            self.assertEqual(cal.eq_wizard_state()['state'], 'ready')
+            self.assertTrue(cal.eq_wizard_apply())
+            _, pivot, ou, su, ol, sl = ctx.interface.set_equalisation.call_args.args
+            targets = cal._eq_destination([(values[1] - values[0],
+                                            values[2] - values[1])])
+            def corrected(raw):
+                return ((raw - ou) * su if raw >= pivot else (raw - ol) * sl) >> 8
+            for raw, target in zip(values, targets):
+                self.assertLessEqual(abs(corrected(raw) - target), 2)
+
+    def test_back_discards_the_step_most_recently_captured(self):
+        """Back follows the new order, so it drops a low before a high."""
+        _, _, cal = self.context(count=2)
+        cal._eq_captured = {'noise': [1, 1], 'high:R1': [2, 2],
+                            'high:R2': [3, 3], 'low:R1': [4, 4]}
+        cal._eq_note_capture_session()
+        self.assertTrue(cal.eq_wizard_back())
+        self.assertNotIn('low:R1', cal._eq_captured)
+        self.assertIn('high:R2', cal._eq_captured)
+        self.assertEqual(cal.eq_wizard_state()['level'], 'low')
+        self.assertEqual(cal.eq_wizard_state()['channel'], 'R1')
+
     def test_unconfirmed_write_is_not_recorded(self):
         """A coefficient write the node never acknowledged is not success."""
         import RHInterface
@@ -212,7 +257,8 @@ class EqualisationTest(unittest.TestCase):
         self.assertTrue(cal._eq_captures_are_current())
         # the state query must not discard what Back kept
         cal.eq_wizard_state()
-        self.assertEqual(sorted(cal._eq_captured), ['low:R1', 'noise'])
+        # low is the last step now, so high is what survives
+        self.assertEqual(sorted(cal._eq_captured), ['high:R1', 'noise'])
 
     def test_history_ignores_races_under_another_correction(self):
         """Adaptive calibration must not restore thresholds from another axis."""
