@@ -45,27 +45,12 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  previous step would already hold whatever the VTX did while its channel was
 #  being changed.
 #
-# Give the receiver seven seconds to settle before capturing or confirming a
-#  commanded channel during an automatic sweep.
+# Manual/noise capture window; automatic signal captures have their own window.
 EQ_SETTLE_SECONDS = 3.0
 
-# How long to leave the quad alone after one channel before commanding the next.
-#
-# Two things need this wait. The reading the next change is measured against
-#  must not itself still be rising, which takes about three seconds. And the
-#  quad has to be ready to receive: a configuration write restarts the flight
-#  controller, the link drops, and the handset then discards queued packets and
-#  refuses to send VTX configuration for ten seconds
-#  (VTX_DISCONNECT_DEBOUNCE_MS in the ELRS firmware). A command sent inside that
-#  window is dropped rather than delayed, and the channel simply never switches.
-#
-# Past the debounce, therefore. Attempts to measure the window from here could
-#  not reproduce it - a second command two seconds after the first still
-#  arrived - but the operator sees the quad still booting when commands go out
-#  this fast, and the firmware plainly has the window, so the measurement is
-#  more likely wrong than they are. Waiting costs a few seconds per channel on
-#  a run that happens rarely; not waiting costs a silently wrong calibration.
-EQ_CHANNEL_SETTLE_SECONDS = 12.0
+# Allow the initial parking command to settle before measuring the transition
+# to the first capture channel. This is not a firmware debounce requirement.
+EQ_CHANNEL_SETTLE_SECONDS = 7.0
 
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed
@@ -993,6 +978,22 @@ class Calibration:
         #  here meant a run could be blocked, or worse run against a stale one,
         #  for a measurement it never used.
         captured = getattr(self, '_eq_captured', None) or {}
+        if not captured.get('noise') or not self._eq_captures_are_current():
+            self._racecontext.rhui.emit_priority_message(
+                'Capture the noise floor with the quad powered off before sweeping')
+            return False
+        channels = self.eq_sweep_channels()
+        node_channels = self._eq_node_channels()
+        watched = set(c for c in node_channels if c)
+        if not channels or any(c not in watched for c in channels):
+            self._racecontext.rhui.emit_priority_message(
+                'Automatic calibration can only sweep channels watched by an enabled node; use Current channels')
+            return False
+        parking = next((c for c in reversed(node_channels) if c and c != channels[0]), None)
+        if parking is None:
+            self._racecontext.rhui.emit_priority_message(
+                'Automatic calibration needs two distinct receiver channels; use manual calibration for one channel')
+            return False
 
         pilot_id = self._racecontext.rhdata.get_optionInt('eq_sweep_pilot', 0)
         if not pilot_id:
@@ -1042,15 +1043,29 @@ class Calibration:
                     }
                     self._racecontext.rhui.emit_eq_wizard_state()
 
-                # Switching starts here and runs until the change is seen: the
-                #  wait for the previous channel to settle is part of getting
-                #  to this one, not a phase of its own.
-                phase('switching', EQ_CHANNEL_SETTLE_SECONDS
-                      + VTX_CONFIRM_TIMEOUT_SECONDS)
-                gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
+                # Establish a measurable transition even if the quad starts on
+                # the first capture channel. Parking is not itself a capture
+                # or a claim of confirmation: the following target rise must
+                # still be observed. If parking was already tuned, that is OK.
+                if label == channels[0]:
+                    phase('preparing', EQ_CHANNEL_SETTLE_SECONDS)
+                    self._eq_progress['channel'] = parking
+                    self._racecontext.rhui.emit_eq_wizard_state()
+                    try:
+                        vtx.command_channel(pilot_id, parking)
+                    except Exception as exc:
+                        skipped.append('{0} (could not prepare: {1})'.format(label, exc))
+                        break
+                    deadline = time.monotonic() + EQ_CHANNEL_SETTLE_SECONDS
+                    while time.monotonic() < deadline:
+                        if stop():
+                            return False
+                        gevent.sleep(min(0.1, max(0, deadline - time.monotonic())))
                 if stop():
                     return False
                 before = vtx.read_levels()
+                switch_deadline = time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS
+                phase('switching', VTX_CONFIRM_TIMEOUT_SECONDS)
 
                 confirmed = False
                 detail = 'not commanded'
@@ -1069,7 +1084,7 @@ class Calibration:
 
                     def resend():
                         tries[0] += 1
-                        phase('switching', VTX_CONFIRM_TIMEOUT_SECONDS,
+                        phase('switching', max(0, switch_deadline - time.monotonic()),
                               attempt=tries[0])
                         try:
                             vtx.command_channel(pilot_id, label)
@@ -1123,7 +1138,7 @@ class Calibration:
             if skipped:
                 done = sum(
                     1 for c in channels
-                    if '{0}:{1}'.format(level, c) in (self._eq_captured or {}))
+                    if '{0}:{1}'.format(level, c) in (getattr(self, '_eq_captured', None) or {}))
                 self._racecontext.rhui.emit_priority_message(
                     'Stopped at {0} of {1}: {2}'.format(
                         done + 1, len(channels), skipped[0]))

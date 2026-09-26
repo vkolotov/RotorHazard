@@ -25,6 +25,22 @@ import vtx_control
 class SweepTest(unittest.TestCase):
     """Fixtures: a fleet of nodes on R1..Rn with settable peaks."""
 
+    def setUp(self):
+        # Drive polling/settling deterministically, including tests that patch
+        # sleep themselves. No wall-clock waiting or RF hardware is involved.
+        self.now = 0.0
+        def clock():
+            self.now += 0.01
+            return self.now
+        def advance(seconds):
+            self.now += seconds
+        clock_patch = patch('vtx_control.time.monotonic', side_effect=clock)
+        sleep_patch = patch('vtx_control.gevent.sleep', side_effect=advance)
+        clock_patch.start()
+        sleep_patch.start()
+        self.addCleanup(clock_patch.stop)
+        self.addCleanup(sleep_patch.stop)
+
     def context(self, count=3, bands=None):
         nodes = []
         for _ in range(count):
@@ -297,7 +313,7 @@ class SweepTest(unittest.TestCase):
             nodes[1].current_rssi = 175
             self.assertTrue(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1', 'R2'])
+        self.assertEqual(sent, ['R2', 'R1', 'R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
@@ -329,7 +345,7 @@ class SweepTest(unittest.TestCase):
             self.assertTrue(cal.eq_sweep_level('high'))
 
         # Three sends for the first channel: the original plus two resends.
-        self.assertEqual(sent, ['R1', 'R1', 'R1', 'R2', 'R2', 'R2'])
+        self.assertEqual(sent, ['R2', 'R1', 'R1', 'R1', 'R2', 'R2', 'R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
@@ -353,7 +369,7 @@ class SweepTest(unittest.TestCase):
 
         # One wait for the first channel, then the sweep stops.
         self.assertEqual(calls, ['R1'])
-        self.assertEqual(sent, ['R1'])
+        self.assertEqual(sent, ['R2', 'R1'])
 
     def test_cancel_during_failed_confirmation_does_not_retry(self):
         ctx, nodes, cal = self.context(count=2)
@@ -367,7 +383,7 @@ class SweepTest(unittest.TestCase):
         with patch.object(cal._vtx(), 'confirm_channel', side_effect=cancel), \
                 patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
-        self.assertEqual(sent, ['R1'])
+        self.assertEqual(sent, ['R2', 'R1'])
         self.assertNotIn('high:R1', cal._eq_captured)
 
     def test_an_unconfirmed_channel_is_never_captured(self):
@@ -414,7 +430,7 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1'])
+        self.assertEqual(sent, ['R2', 'R1'])
         self.assertNotIn('high:R1', cal._eq_captured)
         self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
 
@@ -439,7 +455,7 @@ class SweepTest(unittest.TestCase):
             nodes[1].current_rssi = 175
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1'])
+        self.assertEqual(sent, ['R2', 'R1'])
 
     def test_cancel_drops_the_run_but_not_the_applied_calibration(self):
         ctx, _, cal = self.context(count=2)
@@ -538,6 +554,112 @@ class SweepTest(unittest.TestCase):
         self.assertTrue(cal.eq_wizard_back())
         self.assertIsNone(cal.eq_wizard_mode())
         self.assertEqual(cal.eq_wizard_state()['state'], 'choosing')
+
+    def simulated_quad(self, start='R1', dropped=None, weak=False):
+        ctx, nodes, cal = self.context(count=8)
+        labels = self.LABELS
+        sent = []
+        floors = [90, 95, 70, 116, 95, 109, 88, 89]
+        dropped = dict(dropped or {})
+        ctx.signal_gain = 10 if weak else 45
+        def tune(label):
+            for idx, node in enumerate(nodes):
+                gain = ctx.signal_gain if labels[idx] == label else 1
+                node.current_rssi = floors[idx] + gain
+                node.node_peak_rssi = node.current_rssi
+        tune(start)
+        def send(band, channel):
+            label = band + str(channel)
+            sent.append(label)
+            if dropped.get(label, 0):
+                dropped[label] -= 1
+            else:
+                tune(label)
+        ctx.vrx_manager = SimpleNamespace(controllers={'radio': SimpleNamespace(
+            send_set_vtx_config=send)})
+        ctx.interface.reset_node_extremums.side_effect = \
+            lambda idx: setattr(nodes[idx], 'node_peak_rssi', nodes[idx].current_rssi)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': floors}
+        cal._eq_note_capture_session()
+        return ctx, nodes, cal, sent
+
+    def test_real_detector_completes_from_any_starting_channel(self):
+        for start in self.LABELS:
+            with self.subTest(start=start):
+                ctx, nodes, cal, sent = self.simulated_quad(start)
+                self.assertTrue(cal.eq_sweep_level('high'))
+                self.assertEqual(sent, ['R8'] + self.LABELS)
+                for idx, label in enumerate(self.LABELS):
+                    values = cal._eq_captured['high:' + label]
+                    self.assertEqual(values[idx] - cal._eq_captured['noise'][idx], 45)
+
+    def test_real_detector_retries_dropped_commands(self):
+        ctx, nodes, cal, sent = self.simulated_quad(dropped={'R1': 2})
+        self.assertTrue(cal.eq_sweep_level('high'))
+        self.assertEqual(sent[:4], ['R8', 'R1', 'R1', 'R1'])
+
+    def test_real_detector_never_captures_a_channel_that_did_not_switch(self):
+        ctx, nodes, cal, sent = self.simulated_quad(dropped={'R2': 99})
+        self.assertFalse(cal.eq_sweep_level('high'))
+        self.assertIn('high:R1', cal._eq_captured)
+        self.assertNotIn('high:R2', cal._eq_captured)
+        self.assertEqual(sent.count('R2'), 4)
+        self.assertNotIn('R3', sent)
+
+    def test_real_detector_handles_weak_far_position(self):
+        ctx, nodes, cal, sent = self.simulated_quad(start='R1', weak=True)
+        self.assertTrue(cal.eq_sweep_level('low'))
+        self.assertEqual(cal.eq_sweep_state()['captured']['low'], self.LABELS)
+
+    def test_capture_both_levels_then_apply(self):
+        ctx, nodes, cal, sent = self.simulated_quad()
+        profile = ctx.race.profile
+        profile.enter_ats = json.dumps({'v': [160] * 8})
+        profile.exit_ats = json.dumps({'v': [150] * 8})
+        def save(data):
+            for key, value in data.items():
+                if key != 'profile_id':
+                    setattr(profile, key, json.dumps(value))
+            return profile
+        ctx.rhdata.alter_profile.side_effect = save
+        ctx.rhdata.get_profile.return_value = profile
+        ctx.interface.set_equalisation.return_value = True
+        self.assertTrue(cal.eq_sweep_level('high'))
+        ctx.signal_gain = 10
+        self.assertTrue(cal.eq_sweep_level('low'))
+        self.assertEqual(cal.eq_sweep_state()['stage'], 'ready')
+        captures = dict(cal._eq_captured)
+        self.assertTrue(cal.eq_wizard_apply())
+        self.assertEqual(ctx.interface.set_equalisation.call_count, 8)
+        targets = cal._eq_destination([(10, 35)] * 8)
+        for call in ctx.interface.set_equalisation.call_args_list:
+            idx, pivot, ou, su, ol, sl = call.args
+            levels = [captures['noise'][idx], captures['low:' + self.LABELS[idx]][idx],
+                      captures['high:' + self.LABELS[idx]][idx]]
+            for raw, expected in zip(levels, targets):
+                value = ((raw - ou) * su if raw >= pivot else (raw - ol) * sl) >> 8
+                self.assertLessEqual(abs(value - expected), 2)
+
+    def test_nearly_equal_rises_are_ambiguous(self):
+        ctx, nodes, cal = self.context(count=2)
+        self.assertIsNone(cal._vtx().find_switch([90, 95], [120, 124], ['R1', 'R2'])[0])
+
+    def test_unwatched_channels_are_rejected_before_sending(self):
+        ctx, nodes, cal, sent = self.simulated_quad()
+        cal._eq_scope = 'rl'
+        self.assertFalse(cal.eq_sweep_level('high'))
+        self.assertEqual(sent, [])
+
+    def test_cancel_during_parking_sends_no_target(self):
+        ctx, nodes, cal, sent = self.simulated_quad()
+        def cancel(seconds):
+            cal._eq_cancelled = True
+            self.now += seconds
+        with patch('calibration.gevent.sleep', side_effect=cancel):
+            self.assertFalse(cal.eq_sweep_level('high'))
+        self.assertEqual(sent, ['R8'])
+        self.assertEqual(list(cal._eq_captured), ['noise'])
 
     #
     # Stepping the VTX by hand

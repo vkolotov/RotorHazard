@@ -474,7 +474,9 @@
 				if (!p) {
 					where = "{{ __('Measuring') }}";
 				} else {
-					var what = p.phase == 'capturing'
+					var what = p.phase == 'preparing'
+						? "{{ __('Preparing via') }}"
+						: p.phase == 'capturing'
 						? "{{ __('Capturing') }}"
 						: "{{ __('Switching to') }}";
 					where = what + ' ' + p.channel

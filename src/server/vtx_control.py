@@ -19,6 +19,7 @@ VTX that stayed silent, sat in pit mode, or never had a control wire at all.
 """
 
 import logging
+from contextlib import nullcontext
 import time
 
 import gevent
@@ -36,11 +37,11 @@ VTX_BANDS = 'ABEFRL'
 #  rather than a count, so it follows the width of the pipeline.
 VTX_CONFIRM_MARGIN_FRACTION = 0.15
 
-# How far a node's reading has to climb before it counts as the transmitter
-#  arriving rather than noise or drift. Measured rises on arrival are 30 counts
-#  on the least sensitive receiver and around 100 on the best, against a couple
-#  of counts of jitter when nothing happens, so there is a wide gap to sit in.
-VTX_SWITCH_RISE_FRACTION = 0.08
+# Six counts on the legacy pipeline clears the measured 1-2 count jitter
+# without excluding a weak far-position signal. Require a clear winner and
+# consecutive observations as well; a single rise is not confirmation.
+VTX_SWITCH_RISE_FRACTION = 6.0 / 255
+VTX_SWITCH_SEPARATION_FRACTION = 3.0 / 255
 
 # How far up the pipeline the loudest channel has to be before anything counts
 #  as on air at all. Below this every channel is idle and there is nothing to
@@ -61,35 +62,13 @@ VTX_HIGH_OF_LOUDEST = 0.80
 #  with the signal that causes it.
 VTX_CONFIRM_SEPARATION_FRACTION = 0.10
 
-# How long to keep looking for the commanded channel to appear. Measured on a
-#  quad at the gate, a commanded channel lands three seconds after the command:
-#  the handset waits a second before its first send, then repeats twice more at
-#  half-second intervals, and the receiver has to pass the change to the VTX.
-#
-# Long enough to outlast the handset's ten second disconnect debounce and still
-#  leave room for a resend afterwards, because a command that arrives during
-#  that window is discarded rather than delayed. Polling returns as soon as the
-#  change is visible, so this costs nothing when things are working.
-VTX_CONFIRM_TIMEOUT_SECONDS = 30.0
-
-# How long to let the backpack change the address it sends to before using it,
-#  and to let a packet leave before the address is put back.
+# One initial send and at most three retries, all inside one bounded wait.
+# ELRS performs its own three-send sequence once the command reaches the TX.
+# Do not continually restart that sequence with rapid duplicate commands.
+VTX_RESEND_SECONDS = 7.0
+VTX_MAX_RETRIES = 3
+VTX_CONFIRM_TIMEOUT_SECONDS = VTX_RESEND_SECONDS * (VTX_MAX_RETRIES + 1)
 VTX_ADDRESS_SETTLE_SECONDS = 0.5
-
-# How long to wait for a change before commanding the channel again.
-#
-# Past the handset's disconnect debounce, which is the constraint that matters.
-#  When the quad's link drops - as it does if the flight controller restarts
-#  after a configuration write - the handset discards the queued packets and
-#  refuses to send VTX configuration for ten seconds
-#  (VTX_DISCONNECT_DEBOUNCE_MS in the ELRS firmware). Anything commanded inside
-#  that window updates the handset's stored configuration and never reaches the
-#  quad, so resending faster than the debounce achieves nothing and only adds
-#  flash writes.
-#
-# A change that is going to work is visible in about three seconds, so a resend
-#  only ever happens once the first command has genuinely not arrived.
-VTX_RESEND_SECONDS = 12.0
 
 # How long each read of the nodes watches for, the gap between those reads, and
 #  how often the live reading is sampled inside one.
@@ -165,22 +144,21 @@ class VtxController:
         set_uid = getattr(controller, 'set_send_uid', None)
         reset_uid = getattr(controller, 'reset_send_uid', None)
 
-        # Addressing a pilot makes the backpack drop its peer, change its MAC
-        #  and register the new one. That is not instant, and a packet sent
-        #  before it completes leaves on the old address - so give it a moment,
-        #  as the controller's own addressed sends do.
-        if callable(uid_getter) and callable(set_uid):
-            set_uid(uid_getter(pilot_id))
-            gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
-        try:
-            controller.send_set_vtx_config(band, channel)
-            logger.info('Commanded VTX channel %s for pilot %s', label, pilot_id)
-            # Hold the address until the packet has been written, for the same
-            #  reason: resetting it underneath a queued send re-points it.
-            gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
-        finally:
-            if callable(reset_uid):
-                reset_uid()
+        # Keep the pilot address and command together. Other plugin tasks use
+        # this same lock for addressed OSD sends and must not reset our address
+        # while we yield for the backpack to settle.
+        lock = getattr(controller, '_queue_lock', None)
+        with lock if lock is not None else nullcontext():
+            try:
+                if callable(uid_getter) and callable(set_uid):
+                    set_uid(uid_getter(pilot_id))
+                    gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
+                controller.send_set_vtx_config(band, channel)
+                logger.info('Commanded VTX channel %s for pilot %s', label, pilot_id)
+                gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
+            finally:
+                if callable(reset_uid):
+                    reset_uid()
 
     #
     # Confirming
@@ -281,8 +259,8 @@ class VtxController:
         most, provided it rose enough to be a signal arriving rather than
         noise or drift.
 
-        Bleed rises too, but always less than the channel the transmitter
-        actually moved to, so the largest rise is the right one. Nothing here
+        A clear largest rise is evidence of arrival; similar rises are ambiguous
+        and must not be accepted. Nothing here
         needs a noise floor, a per-node threshold, or a comparison between
         different nodes' levels.
 
@@ -293,6 +271,8 @@ class VtxController:
         """
         rises = []
         for idx in range(min(len(before), len(after))):
+            if idx >= len(channels) or not channels[idx]:
+                continue
             if before[idx] is None or after[idx] is None:
                 continue
             rises.append((after[idx] - before[idx], idx))
@@ -306,7 +286,10 @@ class VtxController:
         need = max(1, int(round(
             self._racecontext.calibration.eq_scale(winner)
             * VTX_SWITCH_RISE_FRACTION)))
-        if rise < need:
+        separation = max(1, int(round(
+            self._racecontext.calibration.eq_scale(winner)
+            * VTX_SWITCH_SEPARATION_FRACTION)))
+        if rise < need or rise - runner_up < max(separation, rise * 0.2):
             return (None, rise, runner_up)
 
         label = channels[winner] if winner < len(channels) else None
@@ -350,8 +333,7 @@ class VtxController:
 
         Compares each node against its own reading from before the command.
         The node for the commanded channel climbs when the transmitter arrives;
-        bleed climbs too but always less, so the largest rise names the
-        destination.
+        bleed can climb too, so only a clear largest rise is accepted.
 
         Nothing here uses a noise floor. A floor is needed to turn a reading
         into a signal level, which the captures want, but a switch is a change
@@ -371,16 +353,12 @@ class VtxController:
         deadline = time.monotonic() + timeout
         next_resend = time.monotonic() + VTX_RESEND_SECONDS
         agreed = 0
+        retries = 0
         last = 'nothing moved'
 
         while time.monotonic() < deadline:
             if cancelled is not None and cancelled():
                 return (False, 'cancelled')
-
-            if resend is not None and time.monotonic() >= next_resend:
-                logger.info('Re-sending VTX channel %s', label)
-                resend()
-                next_resend = time.monotonic() + VTX_RESEND_SECONDS
 
             after = self.read_levels()
             seen, rise, runner_up = self.find_switch(before, after, channels)
@@ -400,6 +378,17 @@ class VtxController:
                     last = 'largest rise {0}, too small to be a switch'.format(
                         rise)
 
+            # Observe first: do not send another command just as the previous
+            # one succeeds. Two agreeing reads take priority over a retry.
+            if (not agreed and resend is not None and retries < VTX_MAX_RETRIES
+                    and time.monotonic() >= next_resend):
+                if cancelled is not None and cancelled():
+                    return (False, 'cancelled')
+                retries += 1
+                logger.info('Re-sending VTX channel %s (%s/%s)',
+                            label, retries, VTX_MAX_RETRIES)
+                resend()
+                next_resend = time.monotonic() + VTX_RESEND_SECONDS
             gevent.sleep(VTX_CONFIRM_POLL_SECONDS)
 
         logger.warning('Could not confirm VTX on %s: %s', label, last)
