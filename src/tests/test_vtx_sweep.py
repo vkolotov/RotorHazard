@@ -178,7 +178,14 @@ class SweepTest(unittest.TestCase):
             label, _, _ = vtx.observed_channel([90, 90], ['R1', 'R2'])
         self.assertIsNone(label)
 
-    def _confirm(self, cal, ctx, nodes, floors, before, after, label, labels):
+    def _state(self, ctx, nodes, floors, levels):
+        for idx, node in enumerate(nodes):
+            node.current_rssi = floors[idx] + levels[idx]
+        vtx = vtx_control.VtxController(ctx)
+        with patch('vtx_control.gevent.sleep'):
+            return vtx, vtx.channel_state(floors)
+
+    def _confirm(self, ctx, nodes, floors, before, after, label, labels):
         for idx, node in enumerate(nodes):
             node.current_rssi = floors[idx] + after[idx]
         vtx = vtx_control.VtxController(ctx)
@@ -187,64 +194,94 @@ class SweepTest(unittest.TestCase):
                       side_effect=[0] + list(range(1, 400))):
             return vtx.confirm_channel(label, floors, labels, before=before)
 
-    def test_a_change_is_the_source_falling_and_the_target_rising(self):
-        """Measured: the node being left fell 98 as the target rose 88."""
+    FLOORS = [91, 95, 70, 116, 95, 109, 88, 89]
+    LABELS = ['R{0}'.format(n + 1) for n in range(8)]
+
+    def test_one_transmitter_marks_one_channel_high(self):
+        """Bleed lifts the neighbours; only the occupied channel is on air.
+
+        Measured with the quad on R6: R7 read 64 over its floor against R6's
+        99, so a level alone cannot separate them. Judged against the loudest,
+        it can.
+        """
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        labels = ['R{0}'.format(n + 1) for n in range(8)]
-        before = [-4, 0, -1, -3, 4, 9, 57, 99]
-        after = [2, 16, 45, 86, 42, 16, 9, 1]
+        _, state = self._state(ctx, nodes, self.FLOORS,
+                               [0, 0, 5, 9, 46, 99, 64, 3])
+        high = [self.LABELS[i] for i, (_, h) in enumerate(state) if h]
+        self.assertEqual(high, ['R6'])
+
+    def test_nothing_on_air_is_all_low(self):
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        _, state = self._state(ctx, nodes, self.FLOORS,
+                               [2, 1, 0, 3, 1, 2, 0, 1])
+        self.assertEqual([h for _, h in state], [False] * 8)
+
+    def test_a_change_is_one_channel_off_and_another_on(self):
+        """Measured across a real change: R8 went 97 -> 1, R4 went -2 -> 86."""
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        _, before = self._state(ctx, nodes, self.FLOORS,
+                                [-4, 0, -1, -3, 4, 9, 57, 99])
+        for idx, node in enumerate(nodes):
+            node.current_rssi = self.FLOORS[idx] + [2, 16, 45, 86, 42, 16, 9, 1][idx]
+        vtx = vtx_control.VtxController(ctx)
+        with patch('vtx_control.gevent.sleep'):
+            went_low, went_high, _ = vtx.channel_change(
+                self.FLOORS, before, self.LABELS)
+        self.assertEqual(went_low, 'R8')
+        self.assertEqual(went_high, 'R4')
+
+    def test_the_commanded_channel_coming_on_air_confirms(self):
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        _, before = self._state(ctx, nodes, self.FLOORS,
+                                [-4, 0, -1, -3, 4, 9, 57, 99])
         confirmed, detail = self._confirm(
-            cal, ctx, nodes, floors, before, after, 'R4', labels)
+            ctx, nodes, self.FLOORS, before,
+            [2, 16, 45, 86, 42, 16, 9, 1], 'R4', self.LABELS)
         self.assertTrue(confirmed, detail)
 
     def test_an_insensitive_node_still_confirms(self):
-        """The threshold follows what the channel was carrying, not a fixed bar.
-
-        Node 4 has the highest floor and the narrowest span in the measured
-        fleet, and rose only thirty counts where the best node rose a hundred.
-        It switched perfectly well, so it has to be confirmed.
-        """
+        """Node 4 reads lowest in the fleet; it is still the occupied channel."""
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        labels = ['R{0}'.format(n + 1) for n in range(8)]
-        before = [0, 0, 0, 30, 0, 0, 0, 0]
-        after = [0, 0, 0, 2, 0, 0, 30, 0]
+        _, before = self._state(ctx, nodes, self.FLOORS,
+                                [0, 0, 0, 0, 0, 0, 30, 0])
         confirmed, detail = self._confirm(
-            cal, ctx, nodes, floors, before, after, 'R7', labels)
+            ctx, nodes, self.FLOORS, before,
+            [0, 0, 0, 30, 0, 0, 2, 0], 'R4', self.LABELS)
         self.assertTrue(confirmed, detail)
 
-    def test_bleed_without_the_source_falling_is_not_a_change(self):
-        """A neighbour lifted while the quad stays put has not been switched to."""
+    def test_a_channel_that_stays_off_air_is_not_confirmed(self):
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        labels = ['R{0}'.format(n + 1) for n in range(8)]
-        before = [0, 99, 0, 0, 0, 0, 0, 0]
-        after = [0, 95, 0, 0, 0, 0, 25, 0]
+        _, before = self._state(ctx, nodes, self.FLOORS,
+                                [0, 99, 0, 0, 0, 0, 0, 0])
         confirmed, _ = self._confirm(
-            cal, ctx, nodes, floors, before, after, 'R7', labels)
+            ctx, nodes, self.FLOORS, before,
+            [0, 99, 0, 0, 0, 0, 25, 0], 'R7', self.LABELS)
         self.assertFalse(confirmed)
 
-    def test_the_transmitter_going_quiet_is_not_a_change(self):
-        """The source falling alone is a VTX that went off, not one that moved."""
+    def test_a_quad_arriving_from_an_unwatched_channel_confirms(self):
+        """Nothing was on air before, so there is no channel to go LOW."""
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
-        floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        labels = ['R{0}'.format(n + 1) for n in range(8)]
-        before = [0, 99, 0, 0, 0, 0, 0, 0]
-        after = [0, 2, 0, 0, 0, 0, 3, 0]
-        confirmed, _ = self._confirm(
-            cal, ctx, nodes, floors, before, after, 'R7', labels)
-        self.assertFalse(confirmed)
+        _, before = self._state(ctx, nodes, self.FLOORS,
+                                [1, 0, 2, 1, 0, 1, 0, 2])
+        confirmed, detail = self._confirm(
+            ctx, nodes, self.FLOORS, before,
+            [0, 0, 0, 0, 0, 99, 60, 0], 'R6', self.LABELS)
+        self.assertTrue(confirmed, detail)
 
-    def test_confirmation_needs_consecutive_agreement(self):
-        """One read can land mid-transition, so a single match is not enough."""
-        ctx, nodes, cal = self.context(count=2)
+    def test_a_single_agreeing_read_is_not_enough(self):
+        """One read can land mid-transition, so agreement has to hold."""
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
         vtx = vtx_control.VtxController(ctx)
-        reads = iter([('R2', 90, 80), ('R1', 90, 80), ('R2', 90, 80),
-                      ('R2', 90, 80)])
-        with patch.object(vtx, 'observed_channel', side_effect=lambda *a: next(reads)), \
+        states = iter([
+            [(0, False)] * 5 + [(99, True)] + [(0, False)] * 2,   # R6 briefly
+            [(99, True)] + [(0, False)] * 7,                      # then R1
+            [(0, False)] * 5 + [(99, True)] + [(0, False)] * 2,   # R6 again
+            [(0, False)] * 5 + [(99, True)] + [(0, False)] * 2,   # and holds
+        ])
+        with patch.object(vtx, 'channel_state', side_effect=lambda *a, **k: next(states)), \
                 patch('vtx_control.gevent.sleep'):
-            confirmed, _ = vtx.confirm_channel('R2', [90, 90], ['R1', 'R2'])
+            confirmed, _ = vtx.confirm_channel(
+                'R6', self.FLOORS, self.LABELS)
         self.assertTrue(confirmed)
 
     #

@@ -79,13 +79,6 @@ EQ_SCOPE_BANDS = {
     'rl': ('R', 'L'),
 }
 
-# How far above the others a node may read during a noise capture before the
-#  capture is refused. Anything still transmitting shows up as one node well
-#  clear of the rest - measured, a quad on air put its node 90 counts above the
-#  others - while genuinely idle receivers sit within about 45 counts of each
-#  other even with their differing floors.
-EQ_NOISE_QUIET_MARGIN = 60
-
 # Channels a scope is cut down to while testing. None means all of them.
 EQ_SCOPE_LIMIT = None
 EQ_DEFAULT_SCOPE = 'current'
@@ -959,24 +952,6 @@ class Calibration:
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
 
-            # A floor recorded while the quad is still on air is not a floor:
-            #  the node watching that channel keeps the signal in its baseline,
-            #  and every later comparison is measured from the wrong place. One
-            #  node reading far above the rest is what that looks like.
-            taking_part = [i for i in self._eq_participants() if vals[i] is not None]
-            if len(taking_part) > 2:
-                levels = sorted(vals[i] for i in taking_part)
-                median = levels[len(levels) // 2]
-                loudest = max(taking_part, key=lambda i: vals[i])
-                if vals[loudest] - median >= EQ_NOISE_QUIET_MARGIN:
-                    msg = ('Noise capture failed: node {0} reads {1} against a '
-                           'typical {2}. Power the video transmitter off '
-                           'completely - pit mode still transmits.').format(
-                               loudest + 1, vals[loudest], median)
-                    logger.warning(msg)
-                    self._racecontext.rhui.emit_priority_message(msg)
-                    return False
-
             self._eq_captured = getattr(self, '_eq_captured', {})
             self._eq_captured['noise'] = vals
             self._eq_sweep_skipped = []
@@ -1059,7 +1034,7 @@ class Calibration:
                 gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
                 if stop():
                     return False
-                before = vtx.read_excess(floors)
+                before = vtx.channel_state(floors)
 
                 confirmed = False
                 detail = 'not commanded'
