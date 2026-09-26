@@ -47,10 +47,13 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #
 # Give the receiver seven seconds to settle before capturing or confirming a
 #  commanded channel during an automatic sweep.
-EQ_SETTLE_SECONDS = 7.0
+EQ_SETTLE_SECONDS = 3.0
 
-# Additional attempts after the first channel command fails confirmation.
-EQ_CHANNEL_RETRIES = 3
+# Additional attempts after the first channel command fails confirmation. One:
+#  a command that arrives is confirmed within a few seconds, so a second go
+#  covers a packet that was genuinely lost, while more only multiply the wait
+#  before reporting a chain that is not working at all.
+EQ_CHANNEL_RETRIES = 1
 
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed
@@ -1005,7 +1008,7 @@ class Calibration:
                     self._eq_progress = {
                         'level': level, 'channel': label,
                         'index': channels.index(label) + 1, 'total': len(channels),
-                        'until': time.monotonic() + EQ_SETTLE_SECONDS + VTX_CONFIRM_TIMEOUT_SECONDS,
+                        'until': time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS,
                     }
                     self._racecontext.rhui.emit_eq_wizard_state()
 
@@ -1016,10 +1019,11 @@ class Calibration:
                         detail = str(exc)
                         break
 
-                    gevent.sleep(EQ_SETTLE_SECONDS)
-                    if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
-                        return False
-
+                    # No blind wait before looking: confirmation polls, so it
+                    #  returns as soon as the change is visible and waits out
+                    #  its own limit when it is not. Sleeping first only adds
+                    #  that time to every channel, including the ones that
+                    #  switched immediately.
                     confirmed, detail = vtx.confirm_channel(
                         label, floors, node_channels,
                         cancelled=lambda: getattr(self, '_eq_cancelled', False)

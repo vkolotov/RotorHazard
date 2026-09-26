@@ -56,9 +56,11 @@ VTX_CONFIRM_TIMEOUT_SECONDS = 15.0
 #  and to let a packet leave before the address is put back.
 VTX_ADDRESS_SETTLE_SECONDS = 0.5
 
-# How long each read of the nodes watches for, and the gap between reads.
+# How long each read of the nodes watches for, the gap between those reads, and
+#  how often the live reading is sampled inside one.
 VTX_CONFIRM_READ_SECONDS = 0.5
 VTX_CONFIRM_POLL_SECONDS = 0.3
+VTX_SAMPLE_SECONDS = 0.1
 
 # How many consecutive good reads confirm a change. Two, because a single read
 #  can land mid-transition: the node being left behind decays while the new one
@@ -157,24 +159,42 @@ class VtxController:
         idle high-floor node outranks a genuinely lit low-floor one on raw
         values alone.
 
+        Samples the live reading over a short window and takes the highest each
+        node showed. Deliberately not the node's own peak tracking: that would
+        have to be cleared before every read, which is a write to every node on
+        the bus several times a second, and it throws away the peaks and nadirs
+        the rest of the system is displaying. It also reads badly here - a peak
+        cleared half a second ago holds whatever arrived in that half second,
+        which during a channel change is as likely to be the channel being left
+        as the one being joined.
+
         :param floors: Per-node noise floor, None where unknown
         :param seconds: How long to watch the nodes
         :return: Per-node excess, None where it cannot be computed
         """
         nodes = self._racecontext.interface.nodes
         num = self._racecontext.race.num_nodes
-        self._racecontext.calibration.eq_reset_extremums()
-        gevent.sleep(seconds)
+
+        best = [None] * num
+        deadline = time.monotonic() + seconds
+        while True:
+            for idx in range(num):
+                node = nodes[idx] if idx < len(nodes) else None
+                value = getattr(node, 'current_rssi', None) if node else None
+                if value and value < node.max_rssi_value:
+                    if best[idx] is None or value > best[idx]:
+                        best[idx] = int(value)
+            if time.monotonic() >= deadline:
+                break
+            gevent.sleep(VTX_SAMPLE_SECONDS)
 
         out = []
         for idx in range(num):
-            node = nodes[idx] if idx < len(nodes) else None
             floor = floors[idx] if idx < len(floors) else None
-            peak = getattr(node, 'node_peak_rssi', None) if node else None
-            if not peak or floor is None or peak >= node.max_rssi_value:
+            if best[idx] is None or floor is None:
                 out.append(None)
                 continue
-            out.append(int(peak) - int(floor))
+            out.append(best[idx] - int(floor))
         return out
 
     def _thresholds(self, node_index):

@@ -121,19 +121,46 @@ class SweepTest(unittest.TestCase):
         outright; on excess over its own floor node 2 is the one carrying signal.
         """
         ctx, nodes, cal = self.context(count=2)
-        nodes[0].node_peak_rssi = 118
-        nodes[1].node_peak_rssi = 160
+        nodes[0].current_rssi = 118
+        nodes[1].current_rssi = 160
         vtx = vtx_control.VtxController(ctx)
         with patch('vtx_control.gevent.sleep'):
             label, margin, _ = vtx.observed_channel([116, 70], ['R1', 'R2'])
         self.assertEqual(label, 'R2')
         self.assertEqual(margin, 90)
 
+    def test_reading_the_nodes_does_not_clear_their_extremes(self):
+        """Confirmation must not reset peak/nadir tracking.
+
+        Clearing the extremes is a write to every node on the bus, and the
+        confirmation polls several times a second; doing it per read wipes the
+        peaks and nadirs the rest of the system displays. It also reads badly,
+        since a peak cleared moments ago holds whatever arrived since, which
+        during a change is as likely to be the channel being left behind.
+        """
+        ctx, nodes, cal = self.context(count=2)
+        nodes[0].current_rssi = 150
+        nodes[1].current_rssi = 95
+        vtx = vtx_control.VtxController(ctx)
+        with patch('vtx_control.gevent.sleep'):
+            vtx.observed_channel([90, 90], ['R1', 'R2'])
+        ctx.interface.reset_node_extremums.assert_not_called()
+
+    def test_confirmation_reads_the_live_value(self):
+        ctx, nodes, cal = self.context(count=2)
+        nodes[0].current_rssi = 96
+        nodes[1].current_rssi = 175
+        vtx = vtx_control.VtxController(ctx)
+        with patch('vtx_control.gevent.sleep'):
+            label, margin, _ = vtx.observed_channel([90, 90], ['R1', 'R2'])
+        self.assertEqual(label, 'R2')
+        self.assertEqual(margin, 85)
+
     def test_confirmation_refuses_an_ambiguous_read(self):
         """Adjacent-channel bleed must not be mistaken for the commanded channel."""
         ctx, nodes, cal = self.context(count=2)
-        nodes[0].node_peak_rssi = 150  # 60 over its floor
-        nodes[1].node_peak_rssi = 145  # 55 over its floor: no clear winner
+        nodes[0].current_rssi = 150  # 60 over its floor
+        nodes[1].current_rssi = 145  # 55 over its floor: no clear winner
         vtx = vtx_control.VtxController(ctx)
         with patch('vtx_control.gevent.sleep'):
             label, _, separation = vtx.observed_channel([90, 90], ['R1', 'R2'])
@@ -143,8 +170,8 @@ class SweepTest(unittest.TestCase):
     def test_confirmation_refuses_a_silent_vtx(self):
         """Nothing above the floor means the VTX is off, in pit mode, or away."""
         ctx, nodes, cal = self.context(count=2)
-        nodes[0].node_peak_rssi = 92
-        nodes[1].node_peak_rssi = 91
+        nodes[0].current_rssi = 92
+        nodes[1].current_rssi = 91
         vtx = vtx_control.VtxController(ctx)
         with patch('vtx_control.gevent.sleep'):
             label, _, _ = vtx.observed_channel([90, 90], ['R1', 'R2'])
