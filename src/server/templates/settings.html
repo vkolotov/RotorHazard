@@ -470,10 +470,19 @@
 			if (running) {
 				var p = sweep.progress;
 				var left = p ? p.remaining : (msg.settle || 3);
-				var where = p
-					? "{{ __('Capturing') }} " + p.channel
-						+ ' (' + p.index + '/' + p.total + ')'
-					: "{{ __('Measuring') }}";
+				var where;
+				if (!p) {
+					where = "{{ __('Measuring') }}";
+				} else {
+					var what = p.phase == 'capturing'
+						? "{{ __('Capturing') }}"
+						: "{{ __('Switching to') }}";
+					where = what + ' ' + p.channel
+						+ ' (' + p.index + '/' + p.total + ')';
+					if (p.attempt > 1) {
+						where += ' ' + "{{ __('retry') }}" + ' ' + (p.attempt - 1);
+					}
+				}
 				var tick = function () {
 					prog.text(where + ' \u2026 ' + Math.max(0, left).toFixed(0) + 's');
 				};

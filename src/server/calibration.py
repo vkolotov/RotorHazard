@@ -82,7 +82,7 @@ EQ_SCOPE_BANDS = {
 # How long to watch after clearing the peaks before reading them. Only has to
 #  cover a few passes of the node's own filtering, since the channel is already
 #  confirmed and steady by this point.
-EQ_PEAK_SETTLE_SECONDS = 2.0
+EQ_PEAK_SETTLE_SECONDS = 3.0
 
 # Channels a scope is cut down to while testing. None means all of them.
 EQ_SCOPE_LIMIT = None
@@ -1025,17 +1025,28 @@ class Calibration:
                 stop = (lambda: getattr(self, '_eq_cancelled', False)
                         or self._eq_session() != session)
 
-                self._eq_progress = {
-                    'level': level, 'channel': label,
-                    'index': channels.index(label) + 1, 'total': len(channels),
-                    'until': time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS,
-                }
-                self._racecontext.rhui.emit_eq_wizard_state()
+                def phase(name, seconds, attempt=0):
+                    """Say what is happening now, not what is about to.
 
-                # Let the previous channel finish arriving before reading the
-                #  level this change is measured against: a reading taken while
-                #  the last change is still settling is already rising, and the
-                #  rise that follows would be counted from part way up.
+                    Two phases to a channel: switching to it, then capturing
+                    it. Each carries the time it has left, so the countdown
+                    means something - announcing the next channel before the
+                    quad had left the last one is what made the display claim
+                    to be capturing R2 while it was still on R1.
+                    """
+                    self._eq_progress = {
+                        'level': level, 'channel': label, 'phase': name,
+                        'index': channels.index(label) + 1,
+                        'total': len(channels), 'attempt': attempt,
+                        'until': time.monotonic() + seconds,
+                    }
+                    self._racecontext.rhui.emit_eq_wizard_state()
+
+                # Switching starts here and runs until the change is seen: the
+                #  wait for the previous channel to settle is part of getting
+                #  to this one, not a phase of its own.
+                phase('switching', EQ_CHANNEL_SETTLE_SECONDS
+                      + VTX_CONFIRM_TIMEOUT_SECONDS)
                 gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
                 if stop():
                     return False
@@ -1054,7 +1065,12 @@ class Calibration:
                     #  within a few seconds instead of after a whole timeout
                     #  has expired, and a channel that is simply never going to
                     #  switch still costs one timeout rather than several.
+                    tries = [1]
+
                     def resend():
+                        tries[0] += 1
+                        phase('switching', VTX_CONFIRM_TIMEOUT_SECONDS,
+                              attempt=tries[0])
                         try:
                             vtx.command_channel(pilot_id, label)
                         except Exception as exc:  # noqa: BLE001
@@ -1084,6 +1100,7 @@ class Calibration:
                 #  rest of the system displays, several times a second; doing
                 #  it once per capture costs one settle and is what makes the
                 #  capture mean this channel.
+                phase('capturing', EQ_PEAK_SETTLE_SECONDS, attempt=0)
                 self.eq_reset_extremums()
                 gevent.sleep(EQ_PEAK_SETTLE_SECONDS)
                 if stop():
