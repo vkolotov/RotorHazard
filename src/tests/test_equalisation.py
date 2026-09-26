@@ -265,7 +265,9 @@ class EqualisationTest(unittest.TestCase):
         self.assertFalse(cal.eq_wizard_set_level(0, 'noise', 50))
         self.assertFalse(cal.eq_wizard_set_level(0, 'high', 'abc'))
         self.assertFalse(cal.eq_wizard_set_level(9, 'high', 100))
-        self.assertFalse(cal.eq_wizard_set_level(0, 'low', 100))  # not captured
+        # a level not captured yet can still be typed in
+        self.assertTrue(cal.eq_wizard_set_level(0, 'low', 100))
+        self.assertEqual(cal._eq_captured['low:R1'], [100])
         self.assertEqual(cal._eq_captured['high:R1'], [187])
         self.assertEqual(cal._eq_captured['noise'], [90])
 

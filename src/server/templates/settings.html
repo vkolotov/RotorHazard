@@ -488,14 +488,11 @@
 				for (var i = 0; i < msg.captured.length; i++) {
 					var r = msg.captured[i];
 					var lbl, a, b, d;
-					if (r.mode == 'applied') {
-						/* no captures kept: only the constants are knowable */
-						lbl = "{{ __('Eq') }}"; a = r.low; b = r.high; d = r.slope_lo;
-					} else {
-						lbl = r.mode == 'applied-capture' ? "{{ __('Eq') }}"
-						                                  : "{{ __('Cal') }}";
-						a = r.noise; b = r.low; d = r.high;
-					}
+					/* EqLow/EqHigh always show the captured levels, so the
+					   fields hold what they edit. Empty is a level not captured
+					   yet, which the operator can simply type in. */
+					lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Eq') }}";
+					a = r.noise; b = r.low; d = r.high;
 					$('#eq_lbl_' + i).text(lbl);
 					/* Noise stays a readout: it is the one level measured with
 					   no quad in the air, so there is nothing to hand-correct. */
@@ -511,11 +508,6 @@
 						if (!el.is(':focus')) {
 							el.val(set ? v : '');
 						}
-						/* Captured levels are editable, including after a fit has
-						   been applied from them - correcting one and re-applying
-						   beats sweeping the fleet again. Only the bare constants
-						   of a fit whose captures are gone cannot be retyped. */
-						el.prop('disabled', r.mode == 'applied');
 						el.toggleClass('eq-set', set);
 					});
 				}

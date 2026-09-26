@@ -447,7 +447,10 @@ class Calibration:
             return False  # node is not taking part
         key = '{0}:{1}'.format(level, channel)
         if key not in captured:
-            return False  # that step has not been captured yet
+            # Typing into a level that was never captured, or whose captures
+            #  the fit discarded. Start the row from whatever is known so the
+            #  edit has somewhere to land.
+            captured[key] = [None] * num
 
         if value is not None:
             if value < 0 or value >= self._eq_scale(node_index):
