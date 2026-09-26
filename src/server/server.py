@@ -1267,6 +1267,21 @@ def on_eq_wizard_mode(data=None):
     if eq_wizard_mutation_allowed():
         RaceContext.calibration.eq_wizard_set_mode((data or {}).get('mode'))
 
+@SOCKET_IO.on('eq_wizard_cancel')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_cancel(_data=None):
+    '''Abandon the calibration run in progress.'''
+    RaceContext.calibration.eq_wizard_cancel()
+
+@SOCKET_IO.on('eq_sweep_scope')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_sweep_scope(data=None):
+    '''Choose how much of the band a calibration run covers.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_sweep_set_scope((data or {}).get('scope'))
+
 @SOCKET_IO.on('eq_sweep_noise')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
