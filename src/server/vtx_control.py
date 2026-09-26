@@ -36,6 +36,14 @@ VTX_BANDS = 'ABEFRL'
 #  rather than a count, so it follows the width of the pipeline.
 VTX_CONFIRM_MARGIN_FRACTION = 0.15
 
+# How far above its floor a node has to read before it counts as carrying the
+#  signal the quad is about to leave. Low, because the point is only to tell a
+#  node holding something from one holding nothing: a node that was never on
+#  air cannot fall, and requiring it to would reject real changes. The least
+#  sensitive receiver measured sat 30 counts up on its own channel, so this has
+#  to be comfortably below that.
+VTX_CONFIRM_CARRYING_FRACTION = 0.08
+
 # How far a node's own reading has to rise before the quad counts as having
 #  arrived on its channel. Measured: the node for the commanded channel rose
 #  around ninety counts on a byte-wide pipeline, while bleed moved the others by
@@ -315,6 +323,11 @@ class VtxController:
         # The node the quad is leaving, so the change can be read as the pair it
         #  is: that one falls as the target rises. Whichever node was carrying
         #  the signal before the command, unless that is the target itself.
+        # The node the quad is leaving, so the change can be read as the pair
+        #  it is: that one falls as the target rises. Only counts as a source
+        #  if it was carrying enough to be worth watching - a node holding
+        #  nothing before the command cannot fall, and demanding that it does
+        #  rejects changes that plainly happened.
         source = None
         best_before = 0
         for idx, value in enumerate(before):
@@ -322,6 +335,14 @@ class VtxController:
                 continue
             if value > best_before:
                 best_before, source = value, idx
+
+        carrying = max(1, int(round(
+            self._racecontext.calibration.eq_scale(target)
+            * VTX_CONFIRM_CARRYING_FRACTION)))
+        if best_before < carrying:
+            # Nothing was clearly on air beforehand, so there is no fall to
+            #  pair the rise with.
+            source = None
 
         deadline = time.monotonic() + timeout
         agreed = 0
@@ -371,13 +392,16 @@ class VtxController:
 
             if fell is None:
                 # Nothing was carrying the signal beforehand, so there is no
-                #  fall to look for and the rise has to stand on its own.
+                #  fall to look for and the rise has to stand on its own. It
+                #  still has to be the largest, or bleed onto a neighbour would
+                #  pass as a change.
                 need = max(1, int(round(
                     self._racecontext.calibration.eq_scale(target)
                     * VTX_CONFIRM_RISE_FRACTION)))
-                moved = rise >= need
+                moved = rise >= need and rise > biggest_other
                 detail = 'rose {0} to {1}'.format(rise, now)
-                shortfall = 'rose only {0}, needs {1}'.format(rise, need)
+                shortfall = 'rose {0}, needs {1} and more than the {2} ' \
+                            'elsewhere'.format(rise, need, biggest_other)
             else:
                 # The target has to rise, the source has to fall, and the
                 #  target has to have gained more than any other node - that
@@ -389,9 +413,17 @@ class VtxController:
                 #  change the sample lands, while the rise is the thing being
                 #  waited for. Sizing both was too strict - a real change was
                 #  rejected for a source that had only half finished emptying.
+                #  A decisive rise stands on its own even if the node picked
+                #  as the source did not fall: the quad may have come from a
+                #  channel nothing is watching, and rejecting a change that
+                #  plainly happened is worse than accepting one twice.
                 need = max(1, int(round(
                     best_before * VTX_CONFIRM_PAIR_FRACTION)))
-                moved = (rise >= need and fell > 0 and rise > biggest_other)
+                decisive = max(1, int(round(
+                    self._racecontext.calibration.eq_scale(target)
+                    * VTX_CONFIRM_RISE_FRACTION)))
+                moved = (rise > biggest_other
+                         and ((rise >= need and fell > 0) or rise >= decisive))
                 detail = 'rose {0}, {1} fell {2}'.format(
                     rise, channels[source], fell)
                 shortfall = 'rose {0} (needs {1}), {2} fell {3}'.format(
