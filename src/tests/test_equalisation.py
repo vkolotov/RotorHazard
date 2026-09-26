@@ -205,80 +205,81 @@ class EqualisationTest(unittest.TestCase):
         self.assertTrue(self.capture(cal, nodes, 'low', [150, 99]))
         self.assertIn('low:R1', cal._eq_captured)
 
-    def test_an_edited_level_replaces_the_captured_one(self):
-        """A single shadowed node is cheaper to correct than a whole pass."""
-        _, nodes, cal = self.context(count=2)
-        self.capture(cal, nodes, 'noise', [90, 95])
-        self.capture(cal, nodes, 'high', [187, 176])   # R1
-        self.capture(cal, nodes, 'high', [140, 176])   # R2
-        self.assertTrue(cal.eq_wizard_set_level(1, 'high', 181))
-        self.assertEqual(cal._eq_captured['high:R2'], [140, 181])
-        # the edit survives a state query, as a capture does
-        cal.eq_wizard_state()
-        self.assertEqual(cal._eq_captured['high:R2'][1], 181)
+    def applied(self, count=1, pivot=150, up=512, lo=300):
+        """A context with a fit already stored and on the nodes."""
+        ctx, nodes, cal = self.context(count=count)
+        prof = ctx.race.profile
+        prof.eq_pivots = json.dumps({'v': [pivot] * count})
+        prof.eq_slope_ups = json.dumps({'v': [up] * count})
+        prof.eq_slope_los = json.dumps({'v': [lo] * count})
+        prof.eq_offset_ups = json.dumps({'v': [50] * count})
+        prof.eq_offset_los = json.dumps({'v': [40] * count})
+        return ctx, nodes, cal
 
-    def test_captures_survive_apply_so_a_level_stays_editable(self):
-        """Correcting one reading must not mean sweeping the fleet again."""
-        values = [90, 150, 210]
-        with patch('calibration.gevent.sleep'):
-            ctx, _, cal = self.context()
-            cal._eq_captured = {'noise': [values[0]], 'high:R1': [values[2]],
-                                'low:R1': [values[1]]}
-            cal._eq_note_capture_session()
-            self.assertTrue(cal.eq_wizard_apply())
+    def test_the_scales_are_always_offered_even_with_no_fit(self):
+        """"No correction" is an editable state, not missing data."""
+        import calibration as cal_mod
+        _, _, cal = self.context(count=2)
+        for row in cal.eq_captured_table():
+            self.assertEqual(row['slope_up'], cal_mod.EQ_UNITY_SLOPE)
+            self.assertEqual(row['slope_lo'], cal_mod.EQ_UNITY_SLOPE)
 
-        # the fit is applied, and the readings behind it are still there
-        state = cal.eq_wizard_state()
-        self.assertEqual(state['state'], 'applied')
-        rows = cal.eq_captured_table()
-        self.assertEqual(rows[0]['mode'], 'applied-capture')
-        self.assertEqual((rows[0]['low'], rows[0]['high']), (150, 210))
+    def test_editing_a_scale_sends_it_to_the_node(self):
+        ctx, _, cal = self.applied()
+        self.assertTrue(cal.eq_wizard_set_slope(0, 'up', 320))
+        idx, pivot, _, slope_up, _, slope_lo = \
+            ctx.interface.set_equalisation.call_args.args
+        self.assertEqual((idx, pivot, slope_up, slope_lo), (0, 150, 320, 300))
+        self.assertEqual(cal.eq_captured_table()[0]['slope_up'], 320)
 
-        # editing one re-arms Apply rather than demanding a new sweep
-        self.assertTrue(cal.eq_wizard_set_level(0, 'high', 205))
-        self.assertEqual(cal.eq_wizard_state()['state'], 'ready')
-        self.assertEqual(cal._eq_captured['high:R1'], [205])
-        with patch('calibration.gevent.sleep'):
-            self.assertTrue(cal.eq_wizard_apply())
-        self.assertEqual(cal.eq_wizard_state()['state'], 'applied')
+    def test_a_scale_edit_tilts_the_segment_without_moving_it(self):
+        """The pivot must read the same before and after, or the number lies.
 
-    def test_a_new_capture_after_apply_starts_a_fresh_run(self):
-        """Kept captures are a record, not a run still in progress."""
-        values = [90, 150, 210]
-        ctx, nodes, cal = self.context()
-        with patch('calibration.gevent.sleep'):
-            cal._eq_captured = {'noise': [values[0]], 'high:R1': [values[2]],
-                                'low:R1': [values[1]]}
-            cal._eq_note_capture_session()
-            self.assertTrue(cal.eq_wizard_apply())
-        self.assertEqual(cal.eq_wizard_state()['state'], 'applied')
-        # Reset arms the wizard again and drops the kept set
-        cal.eq_wizard_reset()
-        self.assertEqual(cal._eq_captured, {})
-        state = cal.eq_wizard_state()
-        self.assertEqual((state['state'], state['level']), ('capturing', 'noise'))
+        A scale field that also slid the curve up or down would not be doing
+        what it looks like it does.
+        """
+        ctx, _, cal = self.applied()
 
-    def test_noise_is_not_editable_and_junk_is_ignored(self):
-        _, nodes, cal = self.context(count=1)
-        self.capture(cal, nodes, 'noise', [90])
-        self.capture(cal, nodes, 'high', [187])
-        self.assertFalse(cal.eq_wizard_set_level(0, 'noise', 50))
-        self.assertFalse(cal.eq_wizard_set_level(0, 'high', 'abc'))
-        self.assertFalse(cal.eq_wizard_set_level(9, 'high', 100))
-        # a level not captured yet can still be typed in
-        self.assertTrue(cal.eq_wizard_set_level(0, 'low', 100))
-        self.assertEqual(cal._eq_captured['low:R1'], [100])
-        self.assertEqual(cal._eq_captured['high:R1'], [187])
-        self.assertEqual(cal._eq_captured['noise'], [90])
+        def at_pivot():
+            p = cal._eq_stored('eq_pivots', 0)[0]
+            o = cal._eq_stored('eq_offset_ups', 0)[0]
+            s = cal._eq_stored('eq_slope_ups', 256)[0]
+            return ((p - o) * s) >> 8
 
-    def test_an_out_of_range_edit_is_refused(self):
-        ctx, nodes, cal = self.context(count=1)
-        self.capture(cal, nodes, 'noise', [90])
-        self.capture(cal, nodes, 'high', [187])
-        self.assertFalse(cal.eq_wizard_set_level(0, 'high', 999))
-        self.assertFalse(cal.eq_wizard_set_level(0, 'high', -1))
-        self.assertEqual(cal._eq_captured['high:R1'], [187])
+        before = at_pivot()
+        self.assertTrue(cal.eq_wizard_set_slope(0, 'up', 1024))
+        self.assertLessEqual(abs(at_pivot() - before), 1)
+
+    def test_unity_undoes_a_correction_by_hand(self):
+        import calibration as cal_mod
+        ctx, _, cal = self.applied(up=973)
+        self.assertTrue(
+            cal.eq_wizard_set_slope(0, 'up', cal_mod.EQ_UNITY_SLOPE))
+        self.assertEqual(cal.eq_captured_table()[0]['slope_up'], 256)
+
+    def test_a_scale_outside_the_range_is_refused(self):
+        import calibration as cal_mod
+        ctx, _, cal = self.applied()
+        for bad in (cal_mod.EQ_SLOPE_MIN - 1, cal_mod.EQ_SLOPE_MAX + 1):
+            self.assertFalse(cal.eq_wizard_set_slope(0, 'up', bad))
+        ctx.interface.set_equalisation.assert_not_called()
         self.assertTrue(ctx.rhui.emit_priority_message.called)
+
+    def test_junk_and_an_unfitted_node_are_refused(self):
+        ctx, _, cal = self.applied()
+        self.assertFalse(cal.eq_wizard_set_slope(0, 'sideways', 300))
+        self.assertFalse(cal.eq_wizard_set_slope(0, 'up', 'abc'))
+        self.assertFalse(cal.eq_wizard_set_slope(9, 'up', 300))
+        ctx.interface.set_equalisation.assert_not_called()
+
+        _, _, fresh = self.context(count=1)   # pivot 0: nothing to scale
+        self.assertFalse(fresh.eq_wizard_set_slope(0, 'up', 300))
+
+    def test_a_scale_the_node_refuses_is_not_stored(self):
+        ctx, _, cal = self.applied()
+        ctx.interface.set_equalisation.return_value = False
+        self.assertFalse(cal.eq_wizard_set_slope(0, 'up', 320))
+        self.assertEqual(cal.eq_captured_table()[0]['slope_up'], 512)
 
     def test_unconfirmed_write_is_not_recorded(self):
         """A coefficient write the node never acknowledged is not success."""

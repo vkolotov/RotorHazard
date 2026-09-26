@@ -44,6 +44,18 @@ EQ_FULL_SCALE = 255
 #  and 4.75x.
 EQ_MIN_LEVEL_FRACTION = 15.0 / 255
 
+# The Q8 scale that changes nothing: the node computes (raw - offset) * slope
+#  >> 8, so a slope of 256 multiplies by exactly one. Both the default for a
+#  node that has never been fitted and the value an operator types to undo a
+#  correction by hand.
+EQ_UNITY_SLOPE = 256
+
+# What an operator may type into a scale field. A gain far outside this is a
+#  bad capture rather than a real receiver difference, and amplifies the node's
+#  own noise with the signal.
+EQ_SLOPE_MIN = 32       # x0.125
+EQ_SLOPE_MAX = 2048     # x8.00
+
 # How long to watch a node after clearing its extremes, before reading them.
 #  The clear has to happen after the operator has set the condition up, not
 #  before: a peak only ever rises, so extremes cleared at the end of the
@@ -287,35 +299,42 @@ class Calibration:
                 'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
 
     def eq_captured_table(self):
-        """Per-node view for the UI: what has been captured, or what is applied."""
+        """Per-node view for the UI.
+
+        Carries the captured levels for the readout, and always the two scale
+        factors, which are what the operator edits. They are the Q8 gains the
+        node actually multiplies by, so 256 means x1.00 and changes nothing;
+        a node with no fit reads 256 rather than blank, since "no correction"
+        is a real, editable state rather than missing data.
+        """
         captured = getattr(self, '_eq_captured', None) or {}
         num = self._racecontext.race.num_nodes
         labels = self._eq_node_channels()
+        pivots = self._eq_stored('eq_pivots', 0)
+        ups = self._eq_stored('eq_slope_ups', EQ_UNITY_SLOPE)
+        los = self._eq_stored('eq_slope_los', EQ_UNITY_SLOPE)
 
         if captured:
-            # The captures stay after a fit is applied, so say which it is:
-            #  the page shows the same editable levels either way, but only an
-            #  applied fit has constants on the nodes behind them.
             mode = 'applied-capture' \
                 if getattr(self, '_eq_applied_captures', False) else 'capture'
             noise = captured.get('noise', [None] * num)
-            return [{
+            rows = [{
                 'channel': labels[i], 'mode': mode,
                 'noise': noise[i],
                 'low': captured.get('low:{0}'.format(labels[i]), [None] * num)[i],
                 'high': captured.get('high:{0}'.format(labels[i]), [None] * num)[i],
             } for i in range(num)]
+        else:
+            rows = [{
+                'channel': labels[i],
+                'mode': 'applied' if pivots[i] else 'empty',
+                'noise': None, 'low': None, 'high': None,
+            } for i in range(num)]
 
-        pivots = self._eq_stored('eq_pivots', 0)
-        ups = self._eq_stored('eq_slope_ups', 256)
-        los = self._eq_stored('eq_slope_los', 256)
-        return [{
-            'channel': labels[i],
-            'mode': 'applied' if pivots[i] else 'empty',
-            'noise': None, 'low': pivots[i] or None,
-            'high': None if not pivots[i] else ups[i],
-            'slope_lo': None if not pivots[i] else los[i],
-        } for i in range(num)]
+        for i in range(num):
+            rows[i]['slope_up'] = ups[i]
+            rows[i]['slope_lo'] = los[i]
+        return rows
 
     @catchLogExceptionsWrapper
     def _eq_session(self):
@@ -413,66 +432,78 @@ class Calibration:
             self._racecontext.rhui.emit_eq_wizard_state()
 
     @catchLogExceptionsWrapper
-    def eq_wizard_set_level(self, node_index, level, value):
-        """Override one node's captured low or high by hand.
+    def eq_wizard_set_slope(self, node_index, which, value):
+        """Set one node's scale factor by hand and send it to the node.
 
-        A capture reads every node at once, so a single node that was shadowed
-        or sat too near the quad spoils a step that was right for the rest.
-        Editing the one value is cheaper than recapturing the pass, and the
-        operator watching the live RSSI knows what it should have read.
-
-        Noise is not editable: it is the one level measured with no quad in
-        the air, so there is nothing for a judgement call to improve on.
+        The scale is the Q8 gain the node multiplies by, so 256 is x1.00 and
+        undoes the correction for that segment. Editing it re-derives the
+        matching offset so the curve still passes through the pivot at the same
+        corrected value: the number then does what it looks like it does -
+        tilts the segment - rather than also sliding it up or down.
 
         :param node_index: Zero-based node
-        :param level: 'low' or 'high'
-        :param value: The reading to store, or None to clear it
-        :return: True when the value was stored
+        :param which: 'up' for the segment above the pivot, 'lo' for below
+        :param value: The Q8 scale to store
+        :return: True when the node took it
         """
-        if level not in ('low', 'high'):
+        if which not in ('up', 'lo'):
             return False
         try:
             node_index = int(node_index)
-            value = None if value is None or value == '' else int(value)
+            value = int(value)
         except (TypeError, ValueError):
             return False  # came from the page, so treat junk as a no-op
-        captured = getattr(self, '_eq_captured', None) or {}
         num = self._racecontext.race.num_nodes
         if not 0 <= node_index < num:
             return False
+        if not EQ_SLOPE_MIN <= value <= EQ_SLOPE_MAX:
+            self._racecontext.rhui.emit_priority_message(
+                'Node {0}: scale must be between {1} (x{2:.2f}) and {3} (x{4:.2f})'
+                .format(node_index + 1, EQ_SLOPE_MIN,
+                        EQ_SLOPE_MIN / float(EQ_UNITY_SLOPE), EQ_SLOPE_MAX,
+                        EQ_SLOPE_MAX / float(EQ_UNITY_SLOPE)))
+            return False
+        if getattr(self, '_eq_busy', False):
+            return False
 
-        labels = self._eq_node_channels()
-        channel = labels[node_index]
-        if channel is None:
-            return False  # node is not taking part
-        key = '{0}:{1}'.format(level, channel)
-        if key not in captured:
-            # Typing into a level that was never captured, or whose captures
-            #  the fit discarded. Start the row from whatever is known so the
-            #  edit has somewhere to land.
-            captured[key] = [None] * num
+        pivots = self._eq_stored('eq_pivots', 0)
+        ups = self._eq_stored('eq_slope_ups', EQ_UNITY_SLOPE)
+        los = self._eq_stored('eq_slope_los', EQ_UNITY_SLOPE)
+        offset_ups = self._eq_stored('eq_offset_ups', 0)
+        offset_los = self._eq_stored('eq_offset_los', 0)
 
-        if value is not None:
-            if value < 0 or value >= self._eq_scale(node_index):
-                self._racecontext.rhui.emit_priority_message(
-                    'Node {0}: {1} must be between 0 and {2}'.format(
-                        node_index + 1, level, self._eq_scale(node_index) - 1))
-                return False
+        pivot = pivots[node_index]
+        if not pivot:
+            self._racecontext.rhui.emit_priority_message(
+                'Node {0} has no calibration to scale yet'.format(node_index + 1))
+            return False
 
-        previous = captured[key][node_index]
-        if previous == value:
-            return True  # nothing to do; do not disturb an applied fit
-        captured[key][node_index] = value
-        self._eq_captured = captured
-        # The applied constants were fitted from the old value, so the fit is
-        #  now stale. Keep it on the nodes - it is better than nothing while
-        #  the operator finishes editing - but let the wizard offer Apply again.
-        self._eq_applied_captures = False
-        # The edit belongs to this configuration like a capture does, so it is
-        #  stamped the same way and survives a state query.
-        self._eq_note_capture_session()
-        logger.info('Equalisation %s for node %d edited: %s -> %s',
-                    key, node_index + 1, previous, value)
+        # Where the pivot lands now. Both segments meet there, so holding it
+        #  fixed is what keeps a scale edit from moving the whole curve.
+        at_pivot = ((pivot - offset_ups[node_index]) * ups[node_index]) / 256.0
+        if which == 'up':
+            ups[node_index] = value
+            offset_ups[node_index] = int(round(pivot - at_pivot * 256.0 / value))
+        else:
+            los[node_index] = value
+            offset_los[node_index] = int(round(pivot - at_pivot * 256.0 / value))
+
+        self._eq_busy = True
+        try:
+            ok = self._racecontext.interface.set_equalisation(
+                node_index, pivot, offset_ups[node_index], ups[node_index],
+                offset_los[node_index], los[node_index])
+        finally:
+            self._eq_busy = False
+        if not ok:
+            self._racecontext.rhui.emit_priority_message(
+                'Node {0} did not take the scale'.format(node_index + 1))
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return False
+
+        self._eq_store(pivots, offset_ups, ups, offset_los, los)
+        logger.info('Node %d scale_%s set to %d (x%.2f) by hand',
+                    node_index + 1, which, value, value / float(EQ_UNITY_SLOPE))
         self._racecontext.rhui.emit_eq_wizard_state()
         return True
 

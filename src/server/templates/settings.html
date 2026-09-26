@@ -487,28 +487,28 @@
 			if (msg.captured) {
 				for (var i = 0; i < msg.captured.length; i++) {
 					var r = msg.captured[i];
-					var lbl, a, b, d;
-					/* EqLow/EqHigh always show the captured levels, so the
-					   fields hold what they edit. Empty is a level not captured
-					   yet, which the operator can simply type in. */
-					lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Eq') }}";
-					a = r.noise; b = r.low; d = r.high;
+					/* The readout keeps the three measured levels; the two
+					   scale fields are what the operator edits. */
+					var lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Eq') }}";
 					$('#eq_lbl_' + i).text(lbl);
-					/* Noise stays a readout: it is the one level measured with
-					   no quad in the air, so there is nothing to hand-correct. */
-					var noiseEl = $('#eq_a_' + i);
-					noiseEl.text(a === null || a === undefined ? '\u2013' : a);
-					noiseEl.toggleClass('eq-set', a !== null && a !== undefined);
-
-					$.each({'b': b, 'c': d}, function (k, v) {
+					$.each({'a': r.noise, 'b': r.low, 'c': r.high}, function (k, v) {
 						var el = $('#eq_' + k + '_' + i);
 						var set = v !== null && v !== undefined;
-						/* Leave a field the operator is typing in alone, or the
-						   next state push overwrites it mid-edit. */
-						if (!el.is(':focus')) {
-							el.val(set ? v : '');
-						}
+						el.text(set ? v : '\u2013');
 						el.toggleClass('eq-set', set);
+					});
+
+					$.each({'up': r.slope_up, 'lo': r.slope_lo}, function (k, v) {
+						var el = $('#eq_' + k + '_' + i);
+						/* Leave a field being typed in alone, or the next
+						   state push overwrites it mid-edit. */
+						if (!el.is(':focus')) {
+							el.val(v === null || v === undefined ? '' : v);
+						}
+						/* Say what the number means, since 256 = x1.00 is not
+						   obvious from the digits alone. */
+						$('#eq_' + k + '_x_' + i).text(
+							v ? '\u00d7' + (v / 256).toFixed(2) : '');
 					});
 				}
 			}
@@ -517,10 +517,11 @@
 		$('.eq-edit').change(function (event) {
 			var el = $(this);
 			var raw = el.val();
-			socket.emit('eq_wizard_set_level', {
+			if (raw === '') { return; }
+			socket.emit('eq_wizard_set_slope', {
 				node: parseInt(el.data('node')),
-				level: el.data('level'),
-				value: raw === '' ? null : parseInt(raw)
+				which: el.data('which'),
+				value: parseInt(raw)
 			});
 		});
 
@@ -2725,6 +2726,8 @@
 /* EqLow/EqHigh sit in .enter-exit-control rows beside EnterAt/ExitAt and take
    that styling; they only need the empty-vs-set cue the readout spans have. */
 input.eq-edit:disabled { opacity: 0.5; }
+.eq-gain { opacity: 0.6; font-size: 0.85em; margin-left: 0.3em;
+           font-variant-numeric: tabular-nums; }
 </style>
 {% endblock %} {% block content %}
 <main class="page-settings">
@@ -2833,18 +2836,22 @@ input.eq-edit:disabled { opacity: 0.5; }
 					</div>
 
 					<div class="enter-exit-control">
-						<label for="eq_c_{{ node }}">{{ __('EqHigh') }}</label>
-						<input type="number" id="eq_c_{{ node }}" class="eq-edit" data-node="{{ node }}" data-level="high" min="0" max="9999">
+						<label for="eq_up_{{ node }}">{{ __('EqScale') }}</label>
+						<input type="number" id="eq_up_{{ node }}" class="eq-edit" data-node="{{ node }}" data-which="up" min="32" max="2048" step="8" title="{{ __('Scale above the pivot. 256 = no change') }}">
+						<span class="eq-gain" id="eq_up_x_{{ node }}"></span>
 					</div>
 
 					<div class="enter-exit-control">
-						<label for="eq_b_{{ node }}">{{ __('EqLow') }}</label>
-						<input type="number" id="eq_b_{{ node }}" class="eq-edit" data-node="{{ node }}" data-level="low" min="0" max="9999">
+						<label for="eq_lo_{{ node }}">{{ __('EqScaleLo') }}</label>
+						<input type="number" id="eq_lo_{{ node }}" class="eq-edit" data-node="{{ node }}" data-which="lo" min="32" max="2048" step="8" title="{{ __('Scale below the pivot. 256 = no change') }}">
+						<span class="eq-gain" id="eq_lo_x_{{ node }}"></span>
 					</div>
 
 					<div class="eq-readout" data-node="{{ node }}">
 						<span class="eq-lbl" id="eq_lbl_{{ node }}">{{ __('Cal') }}</span>
 						<span class="eq-cap" id="eq_a_{{ node }}">&ndash;</span>
+						<span class="eq-cap" id="eq_b_{{ node }}">&ndash;</span>
+						<span class="eq-cap" id="eq_c_{{ node }}">&ndash;</span>
 					</div>
 				</div>
 				<table>
