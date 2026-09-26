@@ -288,6 +288,31 @@ class SweepTest(unittest.TestCase):
     # The sweep itself
     #
 
+    def test_each_capture_is_of_its_own_channel(self):
+        """The peaks are cleared between channels.
+
+        A peak only ever rises, so without clearing, every capture carries the
+        highest reading from every channel before it - a measured run recorded
+        the same 191 on node 1 for all three channels, which was what it saw
+        while the quad was on the first of them.
+        """
+        ctx, nodes, cal = self.context(count=2)
+        self.controller(ctx)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+
+        vtx = cal._vtx()
+        with patch.object(vtx, 'confirm_channel', return_value=(True, 'on air')), \
+                patch.object(vtx, 'channel_state', return_value=[(0, False)] * 2), \
+                patch('calibration.gevent.sleep'):
+            nodes[0].node_peak_rssi = 180
+            nodes[1].node_peak_rssi = 175
+            cal.eq_sweep_level('high')
+
+        # Once per channel, so neither capture inherits the other's peak.
+        self.assertEqual(ctx.interface.reset_node_extremums.call_count, 4)
+
     def test_sweep_captures_every_confirmed_channel(self):
         ctx, nodes, cal = self.context(count=2)
         sent = self.controller(ctx)

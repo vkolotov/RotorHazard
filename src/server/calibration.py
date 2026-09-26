@@ -79,6 +79,11 @@ EQ_SCOPE_BANDS = {
     'rl': ('R', 'L'),
 }
 
+# How long to watch after clearing the peaks before reading them. Only has to
+#  cover a few passes of the node's own filtering, since the channel is already
+#  confirmed and steady by this point.
+EQ_PEAK_SETTLE_SECONDS = 2.0
+
 # Channels a scope is cut down to while testing. None means all of them.
 EQ_SCOPE_LIMIT = None
 EQ_DEFAULT_SCOPE = 'current'
@@ -1067,9 +1072,23 @@ class Calibration:
                     skipped.append('{0} ({1})'.format(label, detail))
                     break
 
-                # Confirmation already watched the nodes settle on this channel,
-                #  so read the extremes it was tracking rather than clearing
-                #  them and waiting again.
+                # Clear the peaks and take this channel's own. A peak only
+                #  ever rises, so without this every capture carries the
+                #  highest reading from every channel before it - one measured
+                #  run recorded the same 191 on node 1 for all three channels,
+                #  because that is what it saw while the quad was on the first
+                #  of them.
+                #
+                #  This is the one place the clearing belongs. Doing it to take
+                #  a reading during confirmation would wipe the tracking the
+                #  rest of the system displays, several times a second; doing
+                #  it once per capture costs one settle and is what makes the
+                #  capture mean this channel.
+                self.eq_reset_extremums()
+                gevent.sleep(EQ_PEAK_SETTLE_SECONDS)
+                if stop():
+                    return False
+
                 nodes = self._racecontext.interface.nodes
                 vals = []
                 for idx in range(self._racecontext.race.num_nodes):
