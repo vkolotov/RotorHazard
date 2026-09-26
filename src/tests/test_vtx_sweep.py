@@ -76,15 +76,39 @@ class SweepTest(unittest.TestCase):
     # Which channels get swept
     #
 
-    def test_sweep_visits_only_the_bands_it_will_command(self):
+    def test_the_default_scope_is_what_the_nodes_are_tuned_to(self):
         ctx, _, cal = self.context(count=3, bands=['R', 'F', 'L'])
-        self.assertEqual(cal.eq_sweep_channels(), ['R1', 'L3'])
+        self.assertEqual(cal.eq_sweep_channels(), ['R1', 'F2', 'L3'])
 
     def test_sweep_skips_duplicate_channels(self):
         ctx, _, cal = self.context(count=2)
         ctx.race.profile.frequencies = json.dumps(
             {'b': ['R', 'R'], 'c': [4, 4], 'f': [5769, 5769]})
         self.assertEqual(cal.eq_sweep_channels(), ['R4'])
+
+    def test_a_band_scope_covers_every_channel_of_that_band(self):
+        ctx, _, cal = self.context(count=2)
+        cal.eq_sweep_set_scope('r')
+        self.assertEqual(cal.eq_sweep_channels(),
+                         ['R' + str(n) for n in range(1, 9)])
+        cal._eq_scope = 'rl'
+        self.assertEqual(len(cal.eq_sweep_channels()), 16)
+
+    def test_the_scope_cannot_change_part_way_through_a_run(self):
+        ctx, _, cal = self.context(count=2)
+        cal.eq_sweep_set_scope('r')
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+        self.assertFalse(cal.eq_sweep_set_scope('rl'))
+        self.assertEqual(cal.eq_sweep_scope(), 'r')
+
+    def test_the_manual_steps_follow_the_scope_too(self):
+        """Both ways cover the same channels, so both read the same scope."""
+        ctx, _, cal = self.context(count=2)
+        cal.eq_wizard_set_mode('manual')
+        cal.eq_sweep_set_scope('r')
+        # one noise step, then a low and a high for each of eight channels
+        self.assertEqual(cal.eq_wizard_state()['total'], 17)
 
     #
     # Confirmation
@@ -159,8 +183,8 @@ class SweepTest(unittest.TestCase):
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
-    def test_sweep_skips_a_channel_it_cannot_confirm(self):
-        """The whole point: an unconfirmed channel is not captured.
+    def test_an_unconfirmed_channel_is_never_captured(self):
+        """The whole point: a reading is only kept where the channel was proven.
 
         A reading taken while the VTX sat elsewhere would fit a plausible
         correction to the wrong channel, which is worse than none at all.
@@ -173,7 +197,7 @@ class SweepTest(unittest.TestCase):
 
         answers = iter([(True, 'margin 90'), (False, 'reading R1, not R2')])
         vtx = cal._vtx()
-        with patch.object(vtx, 'confirm_channel', side_effect=lambda *a: next(answers)), \
+        with patch.object(vtx, 'confirm_channel', side_effect=lambda *a, **k: next(answers)), \
                 patch('calibration.gevent.sleep'):
             nodes[0].node_peak_rssi = 180
             nodes[1].node_peak_rssi = 175
@@ -182,6 +206,63 @@ class SweepTest(unittest.TestCase):
         self.assertIn('high:R1', cal._eq_captured)
         self.assertNotIn('high:R2', cal._eq_captured)
         self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
+
+    def test_sweep_stops_at_the_first_channel_it_cannot_confirm(self):
+        """A VTX that is not listening fails every channel the same way.
+
+        Working through the rest makes the operator wait out a timeout per
+        channel to be told what the first one already said.
+        """
+        ctx, nodes, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+
+        vtx = cal._vtx()
+        with patch.object(vtx, 'confirm_channel',
+                          return_value=(False, 'no channel stands out')), \
+                patch('calibration.gevent.sleep'):
+            self.assertFalse(cal.eq_sweep_level('high'))
+
+        self.assertEqual(sent, ['R1'])
+        self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
+
+    def test_cancel_stops_a_sweep_between_channels(self):
+        ctx, nodes, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+
+        vtx = cal._vtx()
+
+        def confirm(*args, **kwargs):
+            cal._eq_cancelled = True
+            return (True, 'margin 90')
+
+        with patch.object(vtx, 'confirm_channel', side_effect=confirm), \
+                patch('calibration.gevent.sleep'):
+            nodes[0].node_peak_rssi = 180
+            nodes[1].node_peak_rssi = 175
+            self.assertFalse(cal.eq_sweep_level('high'))
+
+        self.assertEqual(sent, ['R1'])
+
+    def test_cancel_drops_the_run_but_not_the_applied_calibration(self):
+        ctx, _, cal = self.context(count=2)
+        self.controller(ctx)
+        cal.eq_wizard_set_mode('auto')
+        cal.eq_sweep_set_scope('r')
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+
+        self.assertTrue(cal.eq_wizard_cancel())
+        self.assertEqual(cal._eq_captured, {})
+        self.assertIsNone(cal.eq_wizard_mode())
+        self.assertIsNone(cal.eq_sweep_scope())
+        # Cancelling a run must not push identity constants to the nodes.
+        ctx.interface.set_equalisation.assert_not_called()
 
     def test_sweep_refuses_without_a_noise_floor(self):
         """Excess is measured against the floor, so the floor comes first."""

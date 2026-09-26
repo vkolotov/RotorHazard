@@ -193,7 +193,7 @@ class VtxController:
         return (label, margin, separation)
 
     def confirm_channel(self, label, floors, channels,
-                        timeout=VTX_CONFIRM_TIMEOUT_SECONDS):
+                        timeout=VTX_CONFIRM_TIMEOUT_SECONDS, cancelled=None):
         """Wait until the nodes agree the quad is on `label`.
 
         Polls rather than sleeping out a fixed settle: a change that has taken
@@ -204,13 +204,18 @@ class VtxController:
         :param floors: Per-node noise floor
         :param channels: Per-node channel label
         :param timeout: How long to keep looking
-        :return: (True, detail) once confirmed, or (False, detail) on timeout
+        :param cancelled: Called each pass; truthy gives up without waiting out
+            the timeout, so cancelling a sweep does not cost a full timeout for
+            every channel left in it
+        :return: (True, detail) once confirmed, or (False, detail) otherwise
         """
         deadline = time.monotonic() + timeout
         agreed = 0
         last = 'no reading above the noise floor'
 
         while time.monotonic() < deadline:
+            if cancelled is not None and cancelled():
+                return (False, 'cancelled')
             seen, margin, separation = self.observed_channel(floors, channels)
             if seen == label:
                 agreed += 1

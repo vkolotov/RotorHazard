@@ -442,85 +442,86 @@
 		socket.on('eq_wizard_state', function (msg) {
 			var btn = $('#eq_wizard_action');
 			var prog = $('#eq_wizard_progress');
+			var sweep = msg.sweep || {};
+			var choosingMode = (msg.state == 'choosing');
+			/* Settled states speak for themselves; the scope only has to be
+			   picked on the way into a run that has captured nothing yet. */
+			var settled = (msg.state == 'applied' || msg.state == 'incompatible');
+			var choosingScope = (!choosingMode && !settled
+				&& msg.index === 0 && !sweep.scope);
+			var running = !!msg.busy;
 			if (window.eqTick) { clearInterval(window.eqTick); window.eqTick = null; }
 
-			if (msg.busy) {
-				var left = msg.settle || 5;
-				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset').prop('disabled', true);
-				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
+			/* While a step is running the panel is a status line and Cancel: a
+			   disabled button says less than the text it would be covering. */
+			btn.toggle(!running && !choosingMode && !choosingScope);
+			$('#eq_wizard_manual, #eq_wizard_auto').toggle(choosingMode && !running);
+			$('#eq_wizard_auto').prop('disabled', !sweep.available);
+			$('#eq_scope_current, #eq_scope_r, #eq_scope_rl')
+				.toggle(choosingScope && !running);
+			$('#eq_wizard_cancel').toggle((!choosingMode && !settled) || running);
+			$('#eq_wizard_reset').prop('disabled', running);
+			$('#eq_sweep_pilot_row').toggle(!!sweep.available
+				&& (choosingMode || msg.mode == 'auto') && !running);
+
+			if (running) {
+				var p = sweep.progress;
+				var left = p ? p.remaining : (msg.settle || 3);
+				var where = p
+					? "{{ __('Capturing') }} " + p.channel
+						+ ' (' + p.index + '/' + p.total + ')'
+					: "{{ __('Measuring') }}";
+				var tick = function () {
+					prog.text(where + ' \u2026 ' + Math.max(0, left).toFixed(0) + 's');
+				};
+				tick();
 				window.eqTick = setInterval(function () {
 					left -= 1;
-					if (left > 0) {
-						btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
-					} else {
-						clearInterval(window.eqTick); window.eqTick = null;
-					}
+					if (left > 0) { tick(); }
+					else { clearInterval(window.eqTick); window.eqTick = null; }
 				}, 1000);
-			} else {
-				$('#eq_wizard_reset').prop('disabled', false);
-				if (msg.state == 'incompatible') {
-					btn.text("{{ __('Reset calibration for this resolution') }}").data('act', '').prop('disabled', true);
-					prog.text('');
-					$('#eq_wizard_back').prop('disabled', true);
-				} else if (msg.state == 'applied') {
-					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
-					prog.text('');
-					$('#eq_wizard_back').prop('disabled', true);
-				} else if (msg.state == 'choosing') {
-					/* Neither way is armed until one is chosen: they capture the
-					   same things but ask different things of the operator. */
-					btn.data('act', '').prop('disabled', true).hide();
-					prog.text("{{ __('choose how to calibrate') }}");
-					$('#eq_wizard_back').prop('disabled', true);
-				} else if (msg.state == 'ready') {
-					btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
-					prog.text("{{ __('all steps captured') }}");
-					$('#eq_wizard_back').prop('disabled', false);
-				} else if (msg.mode == 'auto') {
-					var sweep = msg.sweep || {};
-					var total = (sweep.channels || []).length;
-					var act = sweep.stage;
-					var text;
-					if (act == 'noise') {
-						text = "{{ __('Capture noise: power the VTX off') }}";
-					} else if (act == 'high') {
-						text = "{{ __('Sweep near: quad at the gate') }}";
-					} else if (act == 'low') {
-						text = "{{ __('Sweep far: move the quad away') }}";
-					} else {
-						text = "{{ __('Swept') }}";
-						act = '';
-					}
-					btn.text(text).data('act', act ? 'sweep:' + act : '')
-						.prop('disabled', !act);
-					if (act == 'noise' || !act) {
-						prog.text(total + " {{ __('channels to sweep') }}");
-					} else {
-						prog.text((sweep.captured[act] || []).length + ' / ' + total);
-					}
-					$('#eq_wizard_back').prop('disabled', false);
+			} else if (msg.state == 'incompatible') {
+				btn.text("{{ __('Reset calibration for this resolution') }}")
+					.data('act', '').prop('disabled', true).show();
+				prog.text('');
+			} else if (msg.state == 'applied') {
+				btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true).show();
+				prog.text('');
+			} else if (choosingMode) {
+				prog.text('');
+			} else if (choosingScope) {
+				prog.text('');
+			} else if (msg.state == 'ready') {
+				btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
+				prog.text('');
+			} else if (msg.mode == 'auto') {
+				var total = (sweep.channels || []).length;
+				var act = sweep.stage;
+				var text;
+				if (act == 'noise') {
+					text = "{{ __('Capture noise: power the VTX off') }}";
+				} else if (act == 'high') {
+					text = "{{ __('Sweep near: quad at the gate') }}";
+				} else if (act == 'low') {
+					text = "{{ __('Sweep far: move the quad away') }}";
 				} else {
-					var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
-					btn.text("{{ __('Capture') }}: " + label).data('act', 'capture').prop('disabled', false);
-					prog.text(msg.index + ' / ' + msg.total);
-					$('#eq_wizard_back').prop('disabled', false);
+					text = "{{ __('Swept') }}";
+					act = '';
 				}
-				if (msg.state != 'choosing') { btn.show(); }
+				btn.text(text).data('act', act ? 'sweep:' + act : '')
+					.prop('disabled', !act);
+				prog.text(act && act != 'noise'
+					? (sweep.captured[act] || []).length + ' / ' + total
+					: total + " {{ __('channels') }}");
+			} else {
+				var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
+				btn.text("{{ __('Capture') }}: " + label).data('act', 'capture')
+					.prop('disabled', false);
+				prog.text(msg.index + ' / ' + msg.total);
 			}
 
-			/* The mode buttons only exist before a run starts, and Auto only
-			   where a VRx controller can actually command a channel. */
-			var choosing = (msg.state == 'choosing');
-			var sweepAvailable = msg.sweep && msg.sweep.available;
-			$('#eq_wizard_manual').toggle(choosing).prop('disabled', !!msg.busy);
-			$('#eq_wizard_auto').toggle(choosing && !!sweepAvailable)
-				.prop('disabled', !!msg.busy);
-			$('#eq_sweep_pilot_row').toggle(!!sweepAvailable
-				&& (choosing || msg.mode == 'auto'));
 			$('#eq_sweep_notice').text(
-				msg.sweep && msg.sweep.skipped && msg.sweep.skipped.length
-					? "{{ __('Not captured') }}: " + msg.sweep.skipped.join(', ')
-					: '');
+				sweep.skipped && sweep.skipped.length ? sweep.skipped[0] : '');
 
 			if (msg.captured) {
 				for (var i = 0; i < msg.captured.length; i++) {
@@ -539,6 +540,22 @@
 					});
 				}
 			}
+		});
+
+		$('#eq_wizard_cancel').click(function (event) {
+			socket.emit('eq_wizard_cancel');
+		});
+
+		$('#eq_scope_current').click(function (event) {
+			socket.emit('eq_sweep_scope', {scope: 'current'});
+		});
+
+		$('#eq_scope_r').click(function (event) {
+			socket.emit('eq_sweep_scope', {scope: 'r'});
+		});
+
+		$('#eq_scope_rl').click(function (event) {
+			socket.emit('eq_sweep_scope', {scope: 'rl'});
 		});
 
 		$('#eq_wizard_manual').click(function (event) {
@@ -562,10 +579,6 @@
 			}
 		});
 
-		$('#eq_wizard_back').click(function (event) {
-			socket.emit('eq_wizard_back');
-		});
-
 		$('#eq_wizard_reset').click(function (event) {
 			if (confirm("{{ __('Clear the calibration on every node and start again?') }}")) {
 				socket.emit('eq_wizard_reset');
@@ -573,35 +586,6 @@
 		});
 
 		socket.emit('eq_wizard_query');
-
-		socket.on('rssi_resolution_state', function (msg) {
-			var sel = $('#set_full_rssi_resolution');
-			sel.val(msg.full ? 'true' : 'false');
-			sel.data('applied', msg.full ? 'true' : 'false');
-			sel.prop('disabled', !msg.supported);
-		});
-
-		$('#set_full_rssi_resolution').change(function (event) {
-			var sel = $(this);
-			var wanted = sel.val();
-			var going_high = (wanted == 'true');
-			var warning = going_high
-				? "{{ __('Switch to High (12 bit)?') }}"
-				: "{{ __('Switch to Low (8 bit)?') }}";
-			warning += "\n\n";
-			warning += "{{ __('Every RSSI reading changes by a factor of eight. EnterAt/ExitAt will be rescaled to match, so lap detection keeps working.') }}";
-			warning += "\n\n";
-			warning += "{{ __('Node equalisation cannot be converted and will be cleared - run the Equalise wizard again to get the most out of the new scale. Saved races are left untouched, and adaptive calibration will ignore races recorded on the old scale.') }}";
-			if (confirm(warning)) {
-				socket.emit('set_config', {
-					section: 'GENERAL',
-					key: 'FULL_RSSI_RESOLUTION',
-					value: going_high
-				});
-			} else {
-				sel.val(sel.data('applied'));
-			}
-		});
 
 		socket.on('node_tuning', function (msg) {
 			$('#set_profile').empty();
@@ -2946,33 +2930,26 @@
 				</div>
 				<div class="eq-wizard">
 					<button id="eq_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
-					<button id="eq_wizard_back" class="alt-button">{{ __('Back') }}</button>
+					<button id="eq_wizard_cancel" class="alt-button">{{ __('Cancel') }}</button>
 					<button id="eq_wizard_manual" class="alt-button">{{ __('Manual') }}</button>
 					<button id="eq_wizard_auto" class="alt-button">{{ __('Auto') }}</button>
+					<button id="eq_scope_current" class="alt-button">{{ __('Current channels') }}</button>
+					<button id="eq_scope_r" class="alt-button">{{ __('R band') }}</button>
+					<button id="eq_scope_rl" class="alt-button">{{ __('R + L band') }}</button>
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>
 				</div>
-				<div id="eq_sweep_notice"></div>
+				<div id="eq_sweep_notice" class="eq-notice"></div>
 			</li>
 			<li id="eq_sweep_pilot_row" style="display: none;">
 				<div class="label-block">
 					<label for="set_eq_sweep_pilot">{{ __('Calibration pilot') }}</label>
-					<p class="desc">{{ __('The pilot whose bind phrase addresses the calibration quad. Automatic calibration commands that quad through every channel, so it only has to be placed twice.') }}</p>
 				</div>
 				<select id="set_eq_sweep_pilot" class="set-option" data-option="eq_sweep_pilot">
 					<option value="0">{{ __('None') }}</option>
 					{% for pilot in pilots %}
 					<option value="{{ pilot.id }}">{{ pilot.callsign }}</option>
 					{% endfor %}
-				</select>
-			</li>
-			<li>
-				<div class="label-block">
-					<label for="set_full_rssi_resolution">{{ __('RSSI Resolution') }}</label>
-				</div>
-				<select id="set_full_rssi_resolution">
-					<option value="false">{{ __('Low (8 bit)') }}</option>
-					<option value="true">{{ __('High (12 bit)') }}</option>
 				</select>
 			</li>
 			<li>

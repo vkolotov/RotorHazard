@@ -1,12 +1,14 @@
 '''Seat calibration adjustment'''
 
 import logging
+import time
 import gevent
 import json
 import RHUtils
 from eventmanager import Evt
 from RHUtils import catchLogExceptionsWrapper
 from filtermanager import Flt
+from vtx_control import VTX_CONFIRM_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +51,18 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  nodes instead of by waiting out a worst case.
 EQ_SETTLE_SECONDS = 3.0
 
-# Bands the automatic sweep is willing to command. Kept to the two in use:
-#  every extra band costs the operator nothing but costs a full pass of captures,
-#  and constants fitted on one channel do not transfer to another.
-EQ_SWEEP_BANDS = ('R', 'L')
+# What a calibration run covers. "current" measures each node only on the
+#  channel it is already tuned to, which is the whole job for a fixed
+#  assignment; the band scopes measure every channel of a band, so nodes can be
+#  reassigned afterwards without recalibrating. Each extra band costs a full
+#  pass of captures, and constants fitted on one channel do not transfer to
+#  another, so the scopes stop at the two bands in use.
+EQ_SCOPE_BANDS = {
+    'current': None,
+    'r': ('R',),
+    'rl': ('R', 'L'),
+}
+EQ_DEFAULT_SCOPE = 'current'
 
 def node_full_resolution(node):
     return bool(getattr(node, 'has_wide_rssi', lambda: False)()) and node.adc_resolution == 12
@@ -227,14 +237,9 @@ class Calibration:
         Every distinct channel then needs the quad on it at two power levels.
         """
         steps = [('noise', None)]
-        seen = []
-        for label in self._eq_node_channels():
-            if label is None:
-                continue  # node is not taking part
-            if label not in seen:
-                seen.append(label)
-                steps.append(('low', label))
-                steps.append(('high', label))
+        for label in self.eq_sweep_channels():
+            steps.append(('low', label))
+            steps.append(('high', label))
         return steps
 
     def _eq_scale(self, node_index):
@@ -466,6 +471,33 @@ class Calibration:
             self._racecontext.rhui.emit_eq_wizard_state()
 
     @catchLogExceptionsWrapper
+    def eq_wizard_cancel(self):
+        """Abandon the run in progress and return to the choice of method.
+
+        A sweep can be part way through a channel when this arrives, so it sets
+        a flag the sweep checks between channels rather than stopping it where
+        it stands: a half-commanded channel would leave the VTX somewhere the
+        operator did not put it. The captures go either way - they were taken
+        for a run that is being abandoned.
+
+        Unlike Reset this leaves any applied calibration alone. Cancelling a run
+        that should not have been started must not throw away the correction the
+        nodes are already using.
+        """
+        if getattr(self, '_eq_busy', False):
+            self._eq_cancelled = True
+            logger.info('Equalisation cancel requested; stopping after this channel')
+
+        self._eq_captured = {}
+        self._eq_invalidate_session()
+        self._eq_mode = None
+        self._eq_scope = None
+        self._eq_sweep_skipped = []
+        logger.info('Equalisation run cancelled')
+        self._racecontext.rhui.emit_eq_wizard_state()
+        return True
+
+    @catchLogExceptionsWrapper
     def eq_wizard_back(self):
         """Drop the most recent capture and return to that step.
 
@@ -478,6 +510,7 @@ class Calibration:
             if self.eq_wizard_mode() is None:
                 return False
             self._eq_mode = None
+            self._eq_scope = None
             self._eq_sweep_skipped = []
             logger.info('Equalisation returned to the choice of method')
             self._racecontext.rhui.emit_eq_wizard_state()
@@ -507,6 +540,7 @@ class Calibration:
         self._eq_invalidate_session()
         # Back to offering the choice: the next run picks its own method.
         self._eq_mode = None
+        self._eq_scope = None
         self._eq_sweep_skipped = []
         previous_axis = self._stored_scale_id(self._racecontext.race.profile)
         num = self._racecontext.race.num_nodes
@@ -718,21 +752,46 @@ class Calibration:
     #  channel - and the channel changes happen here.
     #
 
+    def eq_sweep_scope(self):
+        """How much of the band a run covers; "current" until one is chosen."""
+        return getattr(self, '_eq_scope', None)
+
+    @catchLogExceptionsWrapper
+    def eq_sweep_set_scope(self, scope):
+        """Choose what a calibration run covers.
+
+        Refused once captures exist: widening the scope part way through would
+        leave the channels added after the change without the levels the ones
+        before it already have.
+
+        :param scope: A key of EQ_SCOPE_BANDS
+        """
+        if scope not in EQ_SCOPE_BANDS:
+            return False
+        if getattr(self, '_eq_captured', None):
+            return False
+        self._eq_scope = scope
+        logger.info('Equalisation scope set to %s', scope)
+        self._racecontext.rhui.emit_eq_wizard_state()
+        return True
+
     def eq_sweep_channels(self):
         """Channels the sweep visits, in the order it visits them.
 
-        Only the channels nodes are actually tuned to, and only in the bands the
-        sweep is willing to command: a capture on a channel no node is watching
-        has nothing to fit.
+        Under the "current" scope, only what each node is already tuned to: a
+        capture on a channel no node is watching has nothing to fit. Under a
+        band scope, every channel of that band, so nodes can be reassigned
+        afterwards without recalibrating.
         """
-        out = []
-        for label in self._eq_node_channels():
-            if not label or label in out:
-                continue
-            if label[0].upper() not in EQ_SWEEP_BANDS:
-                continue
-            out.append(label)
-        return out
+        bands = EQ_SCOPE_BANDS.get(self.eq_sweep_scope() or EQ_DEFAULT_SCOPE)
+        if bands is None:
+            out = []
+            for label in self._eq_node_channels():
+                if label and label not in out:
+                    out.append(label)
+            return out
+        return ['{0}{1}'.format(band, channel)
+                for band in bands for channel in range(1, 9)]
 
     def eq_sweep_state(self):
         """What the sweep needs from the operator next, and what it has done."""
@@ -761,7 +820,22 @@ class Calibration:
             'busy': bool(getattr(self, '_eq_busy', False)),
             'available': self._vtx().available(),
             'skipped': list(getattr(self, '_eq_sweep_skipped', []) or []),
+            'scope': self.eq_sweep_scope(),
+            'progress': self._eq_progress_now(),
         }
+
+    def _eq_progress_now(self):
+        """What the sweep is doing right now, for the page to describe.
+
+        Carries the seconds left rather than the deadline, so a page counting
+        down does not have to share a clock with the server.
+        """
+        progress = getattr(self, '_eq_progress', None)
+        if not progress:
+            return None
+        out = dict(progress)
+        out['remaining'] = max(0.0, round(out.pop('until') - time.monotonic(), 1))
+        return out
 
     def _vtx(self):
         """The VTX controller, made on first use so import order cannot matter."""
@@ -785,11 +859,15 @@ class Calibration:
             return False
 
         self._eq_busy = True
+        self._eq_cancelled = False
         session = self._eq_session()
         try:
             self._racecontext.rhui.emit_eq_wizard_state()
             self.eq_reset_extremums()
             gevent.sleep(EQ_SETTLE_SECONDS)
+            if getattr(self, '_eq_cancelled', False):
+                logger.info('Noise capture discarded: cancelled by the operator')
+                return False
             if self._eq_session() != session:
                 logger.info('Noise capture discarded: state changed while settling')
                 return False
@@ -858,6 +936,7 @@ class Calibration:
             return False
 
         self._eq_busy = True
+        self._eq_cancelled = False
         session = self._eq_session()
         channels = self.eq_sweep_channels()
         node_channels = self._eq_node_channels()
@@ -865,24 +944,39 @@ class Calibration:
         try:
             self._racecontext.rhui.emit_eq_wizard_state()
             for label in channels:
+                if getattr(self, '_eq_cancelled', False):
+                    logger.info('Sweep stopped: cancelled by the operator')
+                    return False
                 if self._eq_session() != session:
                     logger.info('Sweep abandoned: state changed part way through')
                     return False
+
+                self._eq_progress = {
+                    'level': level, 'channel': label,
+                    'index': channels.index(label) + 1, 'total': len(channels),
+                    'until': time.monotonic() + VTX_CONFIRM_TIMEOUT_SECONDS,
+                }
+                self._racecontext.rhui.emit_eq_wizard_state()
 
                 try:
                     vtx.command_channel(pilot_id, label)
                 except Exception as exc:  # noqa: BLE001 - reported, not raised
                     logger.warning('Could not command %s: %s', label, exc)
                     skipped.append('{0} ({1})'.format(label, exc))
-                    continue
+                    break
 
                 confirmed, detail = vtx.confirm_channel(
-                    label, floors, node_channels)
+                    label, floors, node_channels,
+                    cancelled=lambda: getattr(self, '_eq_cancelled', False))
                 if not confirmed:
+                    # Stop at the first channel that will not confirm rather
+                    #  than working through the rest. If the VTX is not
+                    #  listening - wrong bind phrase, quad away or powered down,
+                    #  no control wire - every remaining channel fails the same
+                    #  way, and the operator waits out a timeout for each one to
+                    #  be told what the first already said.
                     skipped.append('{0} ({1})'.format(label, detail))
-                    self._racecontext.rhui.emit_priority_message(
-                        'Skipped {0}: {1}'.format(label, detail))
-                    continue
+                    break
 
                 # Confirmation already watched the nodes settle on this channel,
                 #  so read the extremes it was tracking rather than clearing
@@ -902,10 +996,12 @@ class Calibration:
 
             self._eq_sweep_skipped = skipped
             if skipped:
+                done = sum(
+                    1 for c in channels
+                    if '{0}:{1}'.format(level, c) in (self._eq_captured or {}))
                 self._racecontext.rhui.emit_priority_message(
-                    '{0} of {1} channels captured; skipped: {2}'.format(
-                        len(channels) - len(skipped), len(channels),
-                        ', '.join(skipped)))
+                    'Stopped at {0} of {1}: {2}'.format(
+                        done + 1, len(channels), skipped[0]))
                 return False
 
             self._racecontext.rhui.emit_priority_message(
@@ -913,6 +1009,7 @@ class Calibration:
             return True
         finally:
             self._eq_busy = False
+            self._eq_progress = None
             self._racecontext.rhui.emit_eq_wizard_state()
 
     def hardware_set_all_equalisation(self):
