@@ -45,9 +45,9 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  previous step would already hold whatever the VTX did while its channel was
 #  being changed.
 #
-# Give the receiver five seconds to settle before capturing or confirming a
+# Give the receiver seven seconds to settle before capturing or confirming a
 #  commanded channel during an automatic sweep.
-EQ_SETTLE_SECONDS = 5.0
+EQ_SETTLE_SECONDS = 7.0
 
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed

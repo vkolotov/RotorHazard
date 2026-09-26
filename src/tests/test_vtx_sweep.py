@@ -179,7 +179,7 @@ class SweepTest(unittest.TestCase):
             nodes[1].node_peak_rssi = 175
             self.assertTrue(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1', 'R2'])
+        self.assertEqual(sent, ['R1', 'R1', 'R2', 'R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
 
@@ -225,7 +225,7 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1'])
+        self.assertEqual(sent, ['R1', 'R1'])
         self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
 
     def test_cancel_stops_a_sweep_between_channels(self):
@@ -247,7 +247,7 @@ class SweepTest(unittest.TestCase):
             nodes[1].node_peak_rssi = 175
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1'])
+        self.assertEqual(sent, ['R1', 'R1'])
 
     def test_cancel_drops_the_run_but_not_the_applied_calibration(self):
         ctx, _, cal = self.context(count=2)
@@ -358,7 +358,7 @@ class SweepTest(unittest.TestCase):
         with patch('vtx_control.gevent.sleep'):
             for _ in range(3):
                 cal.eq_vtx_test()
-        self.assertEqual(sent, ['R1', 'R2', 'R3'])
+        self.assertEqual(sent, ['R1', 'R1', 'R2', 'R2', 'R3', 'R3'])
 
     def test_stepping_wraps_at_the_end_of_the_band(self):
         ctx, _, cal = self.context(count=2)
@@ -367,14 +367,14 @@ class SweepTest(unittest.TestCase):
             for _ in range(3):
                 cal.eq_vtx_test()
         # The default scope is the two channels the nodes are tuned to.
-        self.assertEqual(sent, ['R1', 'R2', 'R1'])
+        self.assertEqual(sent, ['R1', 'R1', 'R2', 'R2', 'R1', 'R1'])
 
     def test_stepping_takes_an_explicit_channel(self):
         ctx, _, cal = self.context(count=2)
         sent = self.controller(ctx)
         with patch('vtx_control.gevent.sleep'):
             cal.eq_vtx_test('R7')
-        self.assertEqual(sent, ['R7'])
+        self.assertEqual(sent, ['R7', 'R7'])
 
     def test_stepping_refuses_without_a_calibration_pilot(self):
         ctx, _, cal = self.context(count=2)

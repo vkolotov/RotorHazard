@@ -56,6 +56,9 @@ VTX_CONFIRM_TIMEOUT_SECONDS = 15.0
 #  and to let a packet leave before the address is put back.
 VTX_ADDRESS_SETTLE_SECONDS = 0.5
 
+# Repeat the channel command in case it is lost on the way to the quad.
+VTX_COMMAND_REPEAT_SECONDS = 1.0
+
 # How long each read of the nodes watches for, and the gap between reads.
 VTX_CONFIRM_READ_SECONDS = 0.5
 VTX_CONFIRM_POLL_SECONDS = 0.3
@@ -137,7 +140,9 @@ class VtxController:
             gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
         try:
             controller.send_set_vtx_config(band, channel)
-            logger.info('Commanded VTX channel %s for pilot %s', label, pilot_id)
+            gevent.sleep(VTX_COMMAND_REPEAT_SECONDS)
+            controller.send_set_vtx_config(band, channel)
+            logger.info('Commanded VTX channel %s twice for pilot %s', label, pilot_id)
             # Hold the address until the packet has been written, for the same
             #  reason: resetting it underneath a queued send re-points it.
             gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
