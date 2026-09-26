@@ -251,22 +251,24 @@ class Calibration:
             captured = {}
             self._eq_captured = {}
 
+        vtx = self.eq_vtx_available()
+
         if not captured and any(self._eq_stored('eq_pivots', 0)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
-                    'settle': EQ_SETTLE_SECONDS}
+                    'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
 
         for level, chan in steps:
             key = level if chan is None else '{0}:{1}'.format(level, chan)
             if key not in captured:
                 return {'state': 'capturing', 'level': level, 'channel': chan,
                         'index': len(captured), 'total': len(steps),
-                        'busy': busy, 'settle': EQ_SETTLE_SECONDS}
+                        'busy': busy, 'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
-                'settle': EQ_SETTLE_SECONDS}
+                'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
 
     def eq_captured_table(self):
         """Per-node view for the UI: what has been captured, or what is applied."""
@@ -372,6 +374,47 @@ class Calibration:
         finally:
             self._eq_busy = False
             self._racecontext.rhui.emit_eq_wizard_state()
+
+    def _vtx(self):
+        """The VTX controller, made on first use so import order cannot matter."""
+        vtx = getattr(self, '_vtx_controller', None)
+        if vtx is None:
+            from vtx_control import VtxController
+            vtx = self._vtx_controller = VtxController(self._racecontext)
+        return vtx
+
+    def eq_vtx_available(self):
+        """True when the wizard can command the quad's channel."""
+        try:
+            return self._vtx().available()
+        except Exception:  # noqa: BLE001 - a missing plugin is not an error here
+            logger.debug('No VTX controller available', exc_info=True)
+            return False
+
+    @catchLogExceptionsWrapper
+    def eq_vtx_switch(self):
+        """Command the quad onto the channel the next capture needs.
+
+        Sends and says so; nothing here waits or checks. The operator can see
+        the quad's OSD, which is a better witness than anything the timer can
+        infer from its own receivers, so they decide when to capture.
+        """
+        state = self.eq_wizard_state()
+        label = state.get('channel')
+        if not label:
+            # noise, applied and ready steps have no channel to command
+            return False
+
+        try:
+            self._vtx().command_channel(label)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            logger.warning('VTX channel command failed: %s', exc)
+            self._racecontext.rhui.emit_priority_message(str(exc))
+            return False
+
+        self._racecontext.rhui.emit_priority_message(
+            'Sent channel {0} to the quad'.format(label))
+        return True
 
     @catchLogExceptionsWrapper
     def eq_wizard_back(self):

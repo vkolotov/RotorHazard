@@ -1251,6 +1251,17 @@ def on_eq_wizard_apply(_data=None):
     if eq_wizard_mutation_allowed():
         RaceContext.calibration.eq_wizard_apply()
 
+@SOCKET_IO.on('eq_vtx_switch')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_vtx_switch(_data=None):
+    '''Command the quad onto the channel the next capture needs.
+
+    Touches no node state, so unlike the capture steps this is allowed while a
+    race is loaded: it only sends a channel out over the backpack.
+    '''
+    RaceContext.calibration.eq_vtx_switch()
+
 @SOCKET_IO.on('eq_wizard_query')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper

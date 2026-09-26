@@ -442,11 +442,20 @@
 		socket.on('eq_wizard_state', function (msg) {
 			var btn = $('#eq_wizard_action');
 			var prog = $('#eq_wizard_progress');
+			var vtx = $('#eq_vtx_switch');
 			if (window.eqTick) { clearInterval(window.eqTick); window.eqTick = null; }
+
+			/* Only offer the channel command where there is a channel to send
+			   and a backpack able to carry it. */
+			if (msg.vtx && msg.channel) {
+				vtx.text("{{ __('Switch to') }} " + msg.channel).show();
+			} else {
+				vtx.hide();
+			}
 
 			if (msg.busy) {
 				var left = msg.settle || 5;
-				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset').prop('disabled', true);
+				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset, #eq_vtx_switch').prop('disabled', true);
 				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
 				window.eqTick = setInterval(function () {
 					left -= 1;
@@ -458,6 +467,7 @@
 				}, 1000);
 			} else {
 				$('#eq_wizard_reset').prop('disabled', false);
+				vtx.prop('disabled', false);
 				if (msg.state == 'applied') {
 					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
 					prog.text('');
@@ -491,6 +501,10 @@
 					});
 				}
 			}
+		});
+
+		$('#eq_vtx_switch').click(function (event) {
+			socket.emit('eq_vtx_switch');
 		});
 
 		$('#eq_wizard_action').click(function (event) {
@@ -2853,6 +2867,7 @@
 				<div class="eq-wizard">
 					<button id="eq_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
 					<button id="eq_wizard_back" class="alt-button">{{ __('Back') }}</button>
+					<button id="eq_vtx_switch" class="alt-button" style="display: none;"></button>
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>
 				</div>
