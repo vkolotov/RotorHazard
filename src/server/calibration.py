@@ -49,6 +49,9 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  commanded channel during an automatic sweep.
 EQ_SETTLE_SECONDS = 7.0
 
+# Additional attempts after the first channel command fails confirmation.
+EQ_CHANNEL_RETRIES = 3
+
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed
 #  assignment; the band scopes measure every channel of a band, so nodes can be
@@ -995,34 +998,43 @@ class Calibration:
                     logger.info('Sweep abandoned: state changed part way through')
                     return False
 
-                self._eq_progress = {
-                    'level': level, 'channel': label,
-                    'index': channels.index(label) + 1, 'total': len(channels),
-                    'until': time.monotonic() + EQ_SETTLE_SECONDS + VTX_CONFIRM_TIMEOUT_SECONDS,
-                }
-                self._racecontext.rhui.emit_eq_wizard_state()
+                confirmed = False
+                for attempt in range(EQ_CHANNEL_RETRIES + 1):
+                    if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
+                        return False
+                    self._eq_progress = {
+                        'level': level, 'channel': label,
+                        'index': channels.index(label) + 1, 'total': len(channels),
+                        'until': time.monotonic() + EQ_SETTLE_SECONDS + VTX_CONFIRM_TIMEOUT_SECONDS,
+                    }
+                    self._racecontext.rhui.emit_eq_wizard_state()
 
-                try:
-                    vtx.command_channel(pilot_id, label)
-                except Exception as exc:  # noqa: BLE001 - reported, not raised
-                    logger.warning('Could not command %s: %s', label, exc)
-                    skipped.append('{0} ({1})'.format(label, exc))
-                    break
+                    try:
+                        vtx.command_channel(pilot_id, label)
+                    except Exception as exc:  # noqa: BLE001 - reported, not raised
+                        logger.warning('Could not command %s: %s', label, exc)
+                        detail = str(exc)
+                        break
 
-                gevent.sleep(EQ_SETTLE_SECONDS)
-                if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
-                    return False
+                    gevent.sleep(EQ_SETTLE_SECONDS)
+                    if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
+                        return False
 
-                confirmed, detail = vtx.confirm_channel(
-                    label, floors, node_channels,
-                    cancelled=lambda: getattr(self, '_eq_cancelled', False))
+                    confirmed, detail = vtx.confirm_channel(
+                        label, floors, node_channels,
+                        cancelled=lambda: getattr(self, '_eq_cancelled', False)
+                        or self._eq_session() != session)
+                    if getattr(self, '_eq_cancelled', False) or self._eq_session() != session:
+                        return False
+                    if confirmed:
+                        break
+                    if attempt < EQ_CHANNEL_RETRIES:
+                        logger.warning('VTX channel %s not confirmed (%s); retry %d/%d',
+                                       label, detail, attempt + 1, EQ_CHANNEL_RETRIES)
+
                 if not confirmed:
-                    # Stop at the first channel that will not confirm rather
-                    #  than working through the rest. If the VTX is not
-                    #  listening - wrong bind phrase, quad away or powered down,
-                    #  no control wire - every remaining channel fails the same
-                    #  way, and the operator waits out a timeout for each one to
-                    #  be told what the first already said.
+                    # Do not capture the wrong channel or advance after retries
+                    #  are exhausted.
                     skipped.append('{0} ({1})'.format(label, detail))
                     break
 

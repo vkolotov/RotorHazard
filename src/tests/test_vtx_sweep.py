@@ -179,9 +179,40 @@ class SweepTest(unittest.TestCase):
             nodes[1].node_peak_rssi = 175
             self.assertTrue(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1', 'R1', 'R2', 'R2'])
+        self.assertEqual(sent, ['R1', 'R2'])
         self.assertIn('high:R1', cal._eq_captured)
         self.assertIn('high:R2', cal._eq_captured)
+
+    def test_sweep_retries_until_confirmed(self):
+        ctx, nodes, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+        answers = [(False, 'still on old channel')] * 3 + [(True, 'confirmed')] * 2
+        with patch.object(cal._vtx(), 'confirm_channel', side_effect=answers), \
+                patch('calibration.gevent.sleep'):
+            nodes[0].node_peak_rssi = 180
+            nodes[1].node_peak_rssi = 175
+            self.assertTrue(cal.eq_sweep_level('high'))
+        self.assertEqual(sent, ['R1'] * 4 + ['R2'])
+        self.assertIn('high:R1', cal._eq_captured)
+        self.assertIn('high:R2', cal._eq_captured)
+
+    def test_cancel_during_failed_confirmation_does_not_retry(self):
+        ctx, nodes, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        cal._eq_mode = 'auto'
+        cal._eq_captured = {'noise': [90, 90]}
+        cal._eq_note_capture_session()
+        def cancel(*args, **kwargs):
+            cal._eq_cancelled = True
+            return False, 'cancelled'
+        with patch.object(cal._vtx(), 'confirm_channel', side_effect=cancel), \
+                patch('calibration.gevent.sleep'):
+            self.assertFalse(cal.eq_sweep_level('high'))
+        self.assertEqual(sent, ['R1'])
+        self.assertNotIn('high:R1', cal._eq_captured)
 
     def test_an_unconfirmed_channel_is_never_captured(self):
         """The whole point: a reading is only kept where the channel was proven.
@@ -195,7 +226,7 @@ class SweepTest(unittest.TestCase):
         cal._eq_captured = {'noise': [90, 90]}
         cal._eq_note_capture_session()
 
-        answers = iter([(True, 'margin 90'), (False, 'reading R1, not R2')])
+        answers = iter([(True, 'margin 90')] + [(False, 'reading R1, not R2')] * 4)
         vtx = cal._vtx()
         with patch.object(vtx, 'confirm_channel', side_effect=lambda *a, **k: next(answers)), \
                 patch('calibration.gevent.sleep'):
@@ -225,7 +256,8 @@ class SweepTest(unittest.TestCase):
                 patch('calibration.gevent.sleep'):
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1', 'R1'])
+        self.assertEqual(sent, ['R1'] * 4)
+        self.assertNotIn('high:R1', cal._eq_captured)
         self.assertEqual(len(cal.eq_sweep_state()['skipped']), 1)
 
     def test_cancel_stops_a_sweep_between_channels(self):
@@ -247,7 +279,7 @@ class SweepTest(unittest.TestCase):
             nodes[1].node_peak_rssi = 175
             self.assertFalse(cal.eq_sweep_level('high'))
 
-        self.assertEqual(sent, ['R1', 'R1'])
+        self.assertEqual(sent, ['R1'])
 
     def test_cancel_drops_the_run_but_not_the_applied_calibration(self):
         ctx, _, cal = self.context(count=2)
@@ -358,7 +390,7 @@ class SweepTest(unittest.TestCase):
         with patch('vtx_control.gevent.sleep'):
             for _ in range(3):
                 cal.eq_vtx_test()
-        self.assertEqual(sent, ['R1', 'R1', 'R2', 'R2', 'R3', 'R3'])
+        self.assertEqual(sent, ['R1', 'R2', 'R3'])
 
     def test_stepping_wraps_at_the_end_of_the_band(self):
         ctx, _, cal = self.context(count=2)
@@ -367,14 +399,14 @@ class SweepTest(unittest.TestCase):
             for _ in range(3):
                 cal.eq_vtx_test()
         # The default scope is the two channels the nodes are tuned to.
-        self.assertEqual(sent, ['R1', 'R1', 'R2', 'R2', 'R1', 'R1'])
+        self.assertEqual(sent, ['R1', 'R2', 'R1'])
 
     def test_stepping_takes_an_explicit_channel(self):
         ctx, _, cal = self.context(count=2)
         sent = self.controller(ctx)
         with patch('vtx_control.gevent.sleep'):
             cal.eq_vtx_test('R7')
-        self.assertEqual(sent, ['R7', 'R7'])
+        self.assertEqual(sent, ['R7'])
 
     def test_stepping_refuses_without_a_calibration_pilot(self):
         ctx, _, cal = self.context(count=2)
