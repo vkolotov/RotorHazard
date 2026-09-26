@@ -49,15 +49,23 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  commanded channel during an automatic sweep.
 EQ_SETTLE_SECONDS = 3.0
 
-# How long to let the previous channel finish arriving before reading the level
-#  the next change is measured against. A commanded channel lands about three
-#  seconds after the command, and a reading taken sooner is already rising, so
-#  the rise that follows would be counted from part way up.
+# How long to leave the quad alone after one channel before commanding the next.
 #
-# Only the reading needs this. A second command sent one second after the first
-#  was honoured in testing, so the quad is not deaf while it switches and there
-#  is no window here to wait out.
-EQ_CHANNEL_SETTLE_SECONDS = 4.0
+# Two things need this wait. The reading the next change is measured against
+#  must not itself still be rising, which takes about three seconds. And the
+#  quad has to be ready to receive: a configuration write restarts the flight
+#  controller, the link drops, and the handset then discards queued packets and
+#  refuses to send VTX configuration for ten seconds
+#  (VTX_DISCONNECT_DEBOUNCE_MS in the ELRS firmware). A command sent inside that
+#  window is dropped rather than delayed, and the channel simply never switches.
+#
+# Past the debounce, therefore. Attempts to measure the window from here could
+#  not reproduce it - a second command two seconds after the first still
+#  arrived - but the operator sees the quad still booting when commands go out
+#  this fast, and the firmware plainly has the window, so the measurement is
+#  more likely wrong than they are. Waiting costs a few seconds per channel on
+#  a run that happens rarely; not waiting costs a silently wrong calibration.
+EQ_CHANNEL_SETTLE_SECONDS = 12.0
 
 # What a calibration run covers. "current" measures each node only on the
 #  channel it is already tuned to, which is the whole job for a fixed
