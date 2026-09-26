@@ -286,17 +286,26 @@ class Calibration:
             #  the fit are kept so a level can still be corrected and re-applied.
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
-                    'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
+                    'settle': EQ_SETTLE_SECONDS, 'vtx': vtx,
+                    'noise_ready': False}
+
+        # Noise alone is enough to level the floors: with no quad there is no
+        #  second point and so no slope, but the offsets can still line every
+        #  node's floor up on one value. Offer that as soon as noise is in,
+        #  since it needs nothing else and the rest of the sweep is long.
+        noise_ready = bool(captured.get('noise'))
 
         for level, chan in steps:
             key = level if chan is None else '{0}:{1}'.format(level, chan)
             if key not in captured:
                 return {'state': 'capturing', 'level': level, 'channel': chan,
                         'index': len(captured), 'total': len(steps),
-                        'busy': busy, 'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
+                        'busy': busy, 'settle': EQ_SETTLE_SECONDS, 'vtx': vtx,
+                        'noise_ready': noise_ready}
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
-                'settle': EQ_SETTLE_SECONDS, 'vtx': vtx}
+                'settle': EQ_SETTLE_SECONDS, 'vtx': vtx,
+                'noise_ready': noise_ready}
 
     def eq_captured_table(self):
         """Per-node view for the UI.
@@ -430,6 +439,91 @@ class Calibration:
         finally:
             self._eq_busy = False
             self._racecontext.rhui.emit_eq_wizard_state()
+
+    @catchLogExceptionsWrapper
+    def eq_wizard_apply_noise(self):
+        """Level every node's noise floor, using only the noise capture.
+
+        With no quad in the air there is one measured point per node, which is
+        not enough for a slope - so the scales stay at unity and the offsets do
+        the work: the correction becomes plain subtraction that puts every
+        floor on the same value. Nodes then sit at a common idle level without
+        anyone having to fly the calibration pass.
+
+        A later full sweep overwrites this; it is a starting point, not a
+        substitute for a two-point fit.
+        """
+        captured = getattr(self, '_eq_captured', None) or {}
+        noise = captured.get('noise')
+        if not noise or getattr(self, '_eq_busy', False):
+            return False
+
+        num = self._racecontext.race.num_nodes
+        taking_part = [i for i in self._eq_participants()
+                       if i < len(noise) and noise[i] is not None]
+        if not taking_part:
+            self._racecontext.rhui.emit_priority_message(
+                'No node has a noise reading to level')
+            return False
+
+        # Land every floor on the quietest node's own floor, so the correction
+        #  only ever subtracts. Lifting a node instead would push its whole
+        #  range towards the ceiling for no gain in resolution.
+        target = min(noise[i] for i in taking_part)
+
+        pivots = self._eq_stored('eq_pivots', 0)
+        ups = self._eq_stored('eq_slope_ups', EQ_UNITY_SLOPE)
+        los = self._eq_stored('eq_slope_los', EQ_UNITY_SLOPE)
+        offset_ups = self._eq_stored('eq_offset_ups', 0)
+        offset_los = self._eq_stored('eq_offset_los', 0)
+
+        for idx in range(num):
+            if idx not in taking_part:
+                continue
+            offset = noise[idx] - target
+            # Pivot 1 rather than 0: zero disables the correction outright, and
+            #  every reading is at or above 1, so the upper segment is the one
+            #  in use and the lower one never fires.
+            pivots[idx] = 1
+            ups[idx] = EQ_UNITY_SLOPE
+            los[idx] = EQ_UNITY_SLOPE
+            offset_ups[idx] = offset
+            offset_los[idx] = offset
+
+        self._eq_busy = True
+        failed = []
+        try:
+            self._racecontext.rhui.emit_eq_wizard_state()
+            for idx in taking_part:
+                if not self._racecontext.interface.set_equalisation(
+                        idx, pivots[idx], offset_ups[idx], ups[idx],
+                        offset_los[idx], los[idx]):
+                    failed.append(idx + 1)
+            if not failed:
+                self.eq_reset_extremums()
+        finally:
+            self._eq_busy = False
+
+        if failed:
+            self._eq_unresolved = list(failed)
+            msg = ('Noise levelling was not accepted by node(s) {0}; '
+                   'their correction is unknown - retry before racing').format(
+                       ', '.join(str(n) for n in failed))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
+            self._racecontext.rhui.emit_eq_wizard_state()
+            return False
+
+        self._eq_unresolved = []
+        self._eq_store(pivots, offset_ups, ups, offset_los, los)
+        # Deliberately not _eq_applied_captures: the sweep is not finished, and
+        #  marking it applied would park the wizard and refuse the real fit.
+        self._racecontext.rhui.emit_eq_wizard_state()
+        logger.info('Noise floors levelled to %d: offsets=%s',
+                    target, [noise[i] - target for i in taking_part])
+        self._racecontext.rhui.emit_priority_message(
+            'Noise floors levelled on {0} nodes'.format(len(taking_part)))
+        return True
 
     @catchLogExceptionsWrapper
     def eq_wizard_set_slope(self, node_index, which, value):

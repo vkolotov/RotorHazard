@@ -281,6 +281,56 @@ class EqualisationTest(unittest.TestCase):
         self.assertFalse(cal.eq_wizard_set_slope(0, 'up', 320))
         self.assertEqual(cal.eq_captured_table()[0]['slope_up'], 512)
 
+    def test_noise_alone_levels_the_floors(self):
+        """No quad in the air, so no slope - the offsets do all the work."""
+        import calibration as cal_mod
+        ctx, nodes, cal = self.context(count=3)
+        self.capture(cal, nodes, 'noise', [90, 95, 68])
+        self.assertTrue(cal.eq_wizard_state()['noise_ready'])
+        self.assertTrue(cal.eq_wizard_apply_noise())
+
+        sent = {c.args[0]: c.args for c in ctx.interface.set_equalisation.call_args_list}
+        self.assertEqual(sorted(sent), [0, 1, 2])
+        for idx, floor in enumerate((90, 95, 68)):
+            _, pivot, offset_up, slope_up, offset_lo, slope_lo = sent[idx]
+            # unity scale both sides: this is subtraction, not gain
+            self.assertEqual((slope_up, slope_lo),
+                             (cal_mod.EQ_UNITY_SLOPE, cal_mod.EQ_UNITY_SLOPE))
+            self.assertEqual(offset_up, offset_lo)
+            # every floor lands on the quietest node's floor
+            self.assertEqual(floor - offset_up, 68)
+            self.assertTrue(pivot, 'pivot 0 would disable the correction')
+
+    def test_the_noise_button_is_offered_only_once_noise_is_in(self):
+        _, nodes, cal = self.context(count=2)
+        self.assertFalse(cal.eq_wizard_state()['noise_ready'])
+        self.assertFalse(cal.eq_wizard_apply_noise())
+        ctx_calls = cal._racecontext.interface.set_equalisation.call_count
+        self.assertEqual(ctx_calls, 0)
+        self.capture(cal, nodes, 'noise', [90, 95])
+        self.assertTrue(cal.eq_wizard_state()['noise_ready'])
+
+    def test_noise_levelling_is_not_stored_when_a_node_refuses(self):
+        ctx, nodes, cal = self.context(count=2)
+        self.capture(cal, nodes, 'noise', [90, 95])
+        ctx.interface.set_equalisation.return_value = False
+        self.assertFalse(cal.eq_wizard_apply_noise())
+        self.assertTrue(cal.eq_state_is_unresolved())
+        # nothing written to the profile
+        self.assertFalse(any(cal._eq_stored('eq_pivots', 0)))
+
+    def test_a_full_sweep_still_overrides_levelled_floors(self):
+        """Levelling is a starting point, not a substitute for the fit."""
+        ctx, nodes, cal = self.context(count=1)
+        self.capture(cal, nodes, 'noise', [90])
+        self.assertTrue(cal.eq_wizard_apply_noise())
+        self.capture(cal, nodes, 'high', [210])
+        self.capture(cal, nodes, 'low', [150])
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.eq_wizard_apply())
+        _, pivot, _, slope_up, _, _ = ctx.interface.set_equalisation.call_args.args
+        self.assertEqual(pivot, 150)   # the captured low, not the levelling pivot
+
     def test_unconfirmed_write_is_not_recorded(self):
         """A coefficient write the node never acknowledged is not success."""
         import RHInterface

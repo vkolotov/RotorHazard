@@ -453,9 +453,13 @@
 				vtx.hide();
 			}
 
+			/* Noise alone levels the floors, so offer that the moment it is
+			   captured rather than only at the end of the sweep. */
+			$('#eq_apply_noise').toggle(!!msg.noise_ready);
+
 			if (msg.busy) {
 				var left = msg.settle || 5;
-				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset, #eq_vtx_switch').prop('disabled', true);
+				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset, #eq_vtx_switch, #eq_apply_noise').prop('disabled', true);
 				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
 				window.eqTick = setInterval(function () {
 					left -= 1;
@@ -468,6 +472,7 @@
 			} else {
 				$('#eq_wizard_reset').prop('disabled', false);
 				vtx.prop('disabled', false);
+				$('#eq_apply_noise').prop('disabled', false);
 				if (msg.state == 'applied') {
 					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
 					prog.text('');
@@ -523,6 +528,10 @@
 				which: el.data('which'),
 				value: parseInt(raw)
 			});
+		});
+
+		$('#eq_apply_noise').click(function (event) {
+			socket.emit('eq_wizard_apply_noise');
 		});
 
 		$('#eq_vtx_switch').click(function (event) {
@@ -2906,6 +2915,7 @@ input.eq-edit:disabled { opacity: 0.5; }
 				<div class="eq-wizard">
 					<button id="eq_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
 					<button id="eq_wizard_back" class="alt-button">{{ __('Back') }}</button>
+					<button id="eq_apply_noise" class="alt-button" style="display: none;">{{ __('Level Floors') }}</button>
 					<button id="eq_vtx_switch" class="alt-button" style="display: none;"></button>
 					<button id="eq_wizard_action"></button>
 					<span class="eq-progress" id="eq_wizard_progress"></span>

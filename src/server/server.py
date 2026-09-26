@@ -1251,6 +1251,14 @@ def on_eq_wizard_apply(_data=None):
     if eq_wizard_mutation_allowed():
         RaceContext.calibration.eq_wizard_apply()
 
+@SOCKET_IO.on('eq_wizard_apply_noise')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_apply_noise(_data=None):
+    '''Level the noise floors from the noise capture alone.'''
+    if eq_wizard_mutation_allowed():
+        RaceContext.calibration.eq_wizard_apply_noise()
+
 @SOCKET_IO.on('eq_wizard_set_slope')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
