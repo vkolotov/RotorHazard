@@ -43,6 +43,12 @@ VTX_CONFIRM_MARGIN_FRACTION = 0.15
 #  neighbour. A fraction of full scale, so it follows the pipeline's width.
 VTX_CONFIRM_RISE_FRACTION = 0.18
 
+# How much of the signal has to move, as a fraction of what the channel being
+#  left was carrying. A real change moves nearly all of it - measured, the node
+#  being left fell 98 counts of its 99 while the target rose 88 - so half is a
+#  wide margin that still rejects the partial wobbles bleed produces.
+VTX_CONFIRM_PAIR_FRACTION = 0.5
+
 # How far clear of the runner-up the winning node has to be. Adjacent channels
 #  bleed: a quad on R1 lifted the R6 node 35 counts over its floor while R1
 #  itself rose 94. Separation rather than absolute level, because bleed scales
@@ -281,6 +287,17 @@ class VtxController:
             return self._confirm_by_ranking(label, floors, channels, timeout,
                                             cancelled)
 
+        # The node the quad is leaving, so the change can be read as the pair it
+        #  is: that one falls as the target rises. Whichever node was carrying
+        #  the signal before the command, unless that is the target itself.
+        source = None
+        best_before = 0
+        for idx, value in enumerate(before):
+            if value is None or idx == target:
+                continue
+            if value > best_before:
+                best_before, source = value, idx
+
         deadline = time.monotonic() + timeout
         agreed = 0
         last = 'no change on the node for {0}'.format(label)
@@ -299,33 +316,45 @@ class VtxController:
                 continue
 
             rise = now - was
-            need = max(1, int(round(
-                self._racecontext.calibration.eq_scale(target)
-                * VTX_CONFIRM_RISE_FRACTION)))
 
-            # Bleed lifts the neighbours too, and close to the gate it can lift
-            #  them past the threshold on its own - so the commanded node also
-            #  has to have risen the most. Whatever the quad actually moved to
-            #  always gains more than what is merely leaking into it.
-            others = [excess[i] - before[i]
-                      for i in range(min(len(excess), len(before)))
-                      if i != target and excess[i] is not None
-                      and before[i] is not None]
-            biggest_other = max(others) if others else 0
+            # A channel change is a pair: the channel being left falls as the
+            #  one being joined rises. Reading both is what makes this robust
+            #  where a single level is not - bleed lifts the neighbours, and
+            #  receivers differ enough that a fixed bar on the rise alone calls
+            #  an insensitive node a failure when it switched perfectly well.
+            fell = None
+            if source is not None and source < len(excess) \
+                    and excess[source] is not None:
+                fell = before[source] - excess[source]
 
-            if rise >= need and rise > biggest_other:
+            if fell is None:
+                # Nothing was carrying the signal beforehand, so there is no
+                #  fall to look for and the rise has to stand on its own.
+                need = max(1, int(round(
+                    self._racecontext.calibration.eq_scale(target)
+                    * VTX_CONFIRM_RISE_FRACTION)))
+                moved = rise >= need
+                detail = 'rose {0} to {1}'.format(rise, now)
+                shortfall = 'rose only {0}, needs {1}'.format(rise, need)
+            else:
+                # Both ends have to move, and the target has to end up above
+                #  where the source ended: a partial change is not a change.
+                moved = (rise > 0 and fell > 0
+                         and rise >= best_before * VTX_CONFIRM_PAIR_FRACTION
+                         and fell >= best_before * VTX_CONFIRM_PAIR_FRACTION)
+                detail = 'rose {0}, {1} fell {2}'.format(
+                    rise, channels[source], fell)
+                shortfall = 'rose {0} while {1} fell {2}'.format(
+                    rise, channels[source], fell)
+
+            if moved:
                 agreed += 1
                 if agreed >= VTX_CONFIRM_CONSECUTIVE:
-                    detail = 'rose {0} to {1}'.format(rise, now)
                     logger.info('Confirmed VTX on %s: %s', label, detail)
                     return (True, detail)
             else:
                 agreed = 0
-                if rise < need:
-                    last = 'rose {0}, needs {1}'.format(rise, need)
-                else:
-                    last = 'rose {0}, but another node rose {1}'.format(
-                        rise, biggest_other)
+                last = shortfall
 
             gevent.sleep(VTX_CONFIRM_POLL_SECONDS)
 

@@ -178,59 +178,62 @@ class SweepTest(unittest.TestCase):
             label, _, _ = vtx.observed_channel([90, 90], ['R1', 'R2'])
         self.assertIsNone(label)
 
-    def test_a_rise_on_the_target_node_confirms_through_bleed(self):
-        """The case ranking gets wrong: a neighbour reading nearly as high.
+    def _confirm(self, cal, ctx, nodes, floors, before, after, label, labels):
+        for idx, node in enumerate(nodes):
+            node.current_rssi = floors[idx] + after[idx]
+        vtx = vtx_control.VtxController(ctx)
+        with patch('vtx_control.gevent.sleep'), \
+                patch('vtx_control.time.monotonic',
+                      side_effect=[0] + list(range(1, 400))):
+            return vtx.confirm_channel(label, floors, labels, before=before)
 
-        Measured with the quad close to the gate on R2, the R1 and R7 nodes sat
-        at +58 and +67 against R2's +84 - a separation of 26, right on the edge.
-        The rise on the commanded node is unambiguous where the ranking is not.
+    def test_a_change_is_the_source_falling_and_the_target_rising(self):
+        """Measured: the node being left fell 98 as the target rose 88."""
+        ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
+        floors = [91, 95, 70, 116, 95, 109, 88, 89]
+        labels = ['R{0}'.format(n + 1) for n in range(8)]
+        before = [-4, 0, -1, -3, 4, 9, 57, 99]
+        after = [2, 16, 45, 86, 42, 16, 9, 1]
+        confirmed, detail = self._confirm(
+            cal, ctx, nodes, floors, before, after, 'R4', labels)
+        self.assertTrue(confirmed, detail)
+
+    def test_an_insensitive_node_still_confirms(self):
+        """The threshold follows what the channel was carrying, not a fixed bar.
+
+        Node 4 has the highest floor and the narrowest span in the measured
+        fleet, and rose only thirty counts where the best node rose a hundred.
+        It switched perfectly well, so it has to be confirmed.
         """
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
         floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        before = [58, 84, 35, 16, 5, 4, 67, 31]
-        after = [0, 0, 5, 9, 46, 99, 64, 3]
-        for idx, node in enumerate(nodes):
-            node.current_rssi = floors[idx] + after[idx]
         labels = ['R{0}'.format(n + 1) for n in range(8)]
-
-        vtx = vtx_control.VtxController(ctx)
-        with patch('vtx_control.gevent.sleep'):
-            confirmed, detail = vtx.confirm_channel(
-                'R6', floors, labels, before=before)
+        before = [0, 0, 0, 30, 0, 0, 0, 0]
+        after = [0, 0, 0, 2, 0, 0, 30, 0]
+        confirmed, detail = self._confirm(
+            cal, ctx, nodes, floors, before, after, 'R7', labels)
         self.assertTrue(confirmed, detail)
 
-    def test_no_rise_on_the_target_node_is_not_confirmed(self):
-        """A quad that never moved leaves its node where it was."""
+    def test_bleed_without_the_source_falling_is_not_a_change(self):
+        """A neighbour lifted while the quad stays put has not been switched to."""
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
         floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        before = [58, 84, 35, 16, 5, 4, 67, 31]
-        for idx, node in enumerate(nodes):
-            node.current_rssi = floors[idx] + before[idx]
         labels = ['R{0}'.format(n + 1) for n in range(8)]
-
-        vtx = vtx_control.VtxController(ctx)
-        with patch('vtx_control.gevent.sleep'), \
-                patch('vtx_control.time.monotonic', side_effect=[0] + [i for i in range(1, 400)]):
-            confirmed, _ = vtx.confirm_channel(
-                'R6', floors, labels, before=before)
+        before = [0, 99, 0, 0, 0, 0, 0, 0]
+        after = [0, 95, 0, 0, 0, 0, 25, 0]
+        confirmed, _ = self._confirm(
+            cal, ctx, nodes, floors, before, after, 'R7', labels)
         self.assertFalse(confirmed)
 
-    def test_bleed_onto_a_neighbour_does_not_confirm_it(self):
-        """A neighbour lifted by bleed has not been switched to."""
+    def test_the_transmitter_going_quiet_is_not_a_change(self):
+        """The source falling alone is a VTX that went off, not one that moved."""
         ctx, nodes, cal = self.context(count=8, bands=['R'] * 8)
         floors = [91, 95, 70, 116, 95, 109, 88, 89]
-        before = [0, 0, 0, 0, 0, 0, 0, 0]
-        # The quad lands on R6; R7 is lifted, but only by bleed.
-        after = [0, 0, 0, 0, 40, 99, 64, 0]
-        for idx, node in enumerate(nodes):
-            node.current_rssi = floors[idx] + after[idx]
         labels = ['R{0}'.format(n + 1) for n in range(8)]
-
-        vtx = vtx_control.VtxController(ctx)
-        with patch('vtx_control.gevent.sleep'), \
-                patch('vtx_control.time.monotonic', side_effect=[0] + [i for i in range(1, 400)]):
-            confirmed, _ = vtx.confirm_channel(
-                'R7', floors, labels, before=before)
+        before = [0, 99, 0, 0, 0, 0, 0, 0]
+        after = [0, 2, 0, 0, 0, 0, 3, 0]
+        confirmed, _ = self._confirm(
+            cal, ctx, nodes, floors, before, after, 'R7', labels)
         self.assertFalse(confirmed)
 
     def test_confirmation_needs_consecutive_agreement(self):

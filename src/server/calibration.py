@@ -49,6 +49,12 @@ EQ_MIN_LEVEL_FRACTION = 0.015
 #  commanded channel during an automatic sweep.
 EQ_SETTLE_SECONDS = 3.0
 
+# How long to let the previous channel finish arriving before reading the level
+#  the next command will be measured against. A commanded channel lands about
+#  three seconds after the command, so a reading taken sooner catches the change
+#  still in progress and understates the rise that follows.
+EQ_CHANNEL_SETTLE_SECONDS = 3.0
+
 # Additional attempts after the first channel command fails confirmation. One:
 #  a command that arrives is confirmed within a few seconds, so a second go
 #  covers a packet that was genuinely lost, while more only multiply the wait
@@ -1013,7 +1019,12 @@ class Calibration:
                     self._racecontext.rhui.emit_eq_wizard_state()
 
                     # What the nodes read before the command, so confirmation
-                    #  can look for the change rather than for a winner.
+                    #  can look for the change rather than for a winner. Let
+                    #  the previous channel finish arriving first: a reading
+                    #  taken while the last change is still settling is already
+                    #  rising, and the rise this one is measured against would
+                    #  be counted from part way up.
+                    gevent.sleep(EQ_CHANNEL_SETTLE_SECONDS)
                     before = vtx.read_excess(floors)
 
                     try:
