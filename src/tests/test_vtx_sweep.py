@@ -347,6 +347,42 @@ class SweepTest(unittest.TestCase):
         self.assertIsNone(cal.eq_wizard_mode())
         self.assertEqual(cal.eq_wizard_state()['state'], 'choosing')
 
+    #
+    # Stepping the VTX by hand
+    #
+
+    def test_stepping_walks_the_band_one_channel_per_call(self):
+        ctx, _, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        cal.eq_sweep_set_scope('r')
+        with patch('vtx_control.gevent.sleep'):
+            for _ in range(3):
+                cal.eq_vtx_test()
+        self.assertEqual(sent, ['R1', 'R2', 'R3'])
+
+    def test_stepping_wraps_at_the_end_of_the_band(self):
+        ctx, _, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        with patch('vtx_control.gevent.sleep'):
+            for _ in range(3):
+                cal.eq_vtx_test()
+        # The default scope is the two channels the nodes are tuned to.
+        self.assertEqual(sent, ['R1', 'R2', 'R1'])
+
+    def test_stepping_takes_an_explicit_channel(self):
+        ctx, _, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        with patch('vtx_control.gevent.sleep'):
+            cal.eq_vtx_test('R7')
+        self.assertEqual(sent, ['R7'])
+
+    def test_stepping_refuses_without_a_calibration_pilot(self):
+        ctx, _, cal = self.context(count=2)
+        sent = self.controller(ctx)
+        ctx.rhdata.get_optionInt.return_value = 0
+        self.assertFalse(cal.eq_vtx_test())
+        self.assertEqual(sent, [])
+
     def test_sweep_stage_advances_with_what_has_been_captured(self):
         ctx, _, cal = self.context(count=2)
         self.controller(ctx)

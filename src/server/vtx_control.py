@@ -42,11 +42,19 @@ VTX_CONFIRM_MARGIN_FRACTION = 0.15
 #  with the signal that causes it.
 VTX_CONFIRM_SEPARATION_FRACTION = 0.10
 
-# How long to keep looking for the commanded channel to appear. The handset
-#  sends the VTX configuration three times at roughly one second intervals, so
-#  a change can legitimately take a few seconds to take effect; polling returns
-#  as soon as it has, rather than always waiting out the worst case.
-VTX_CONFIRM_TIMEOUT_SECONDS = 10.0
+# How long to keep looking for the commanded channel to appear. Measured on a
+#  quad at the gate, a commanded channel lands three seconds after the command:
+#  the handset waits a second before its first send, then repeats twice more at
+#  half-second intervals, and the receiver has to pass the change to the VTX.
+#  Polling returns as soon as the change is visible, so a generous limit costs
+#  nothing when things are working, and the sweep now abandons the whole run on
+#  a timeout - so the limit has to be well clear of a merely slow change rather
+#  than merely above the typical one.
+VTX_CONFIRM_TIMEOUT_SECONDS = 15.0
+
+# How long to let the backpack change the address it sends to before using it,
+#  and to let a packet leave before the address is put back.
+VTX_ADDRESS_SETTLE_SECONDS = 0.5
 
 # How long each read of the nodes watches for, and the gap between reads.
 VTX_CONFIRM_READ_SECONDS = 0.5
@@ -120,11 +128,19 @@ class VtxController:
         set_uid = getattr(controller, 'set_send_uid', None)
         reset_uid = getattr(controller, 'reset_send_uid', None)
 
+        # Addressing a pilot makes the backpack drop its peer, change its MAC
+        #  and register the new one. That is not instant, and a packet sent
+        #  before it completes leaves on the old address - so give it a moment,
+        #  as the controller's own addressed sends do.
         if callable(uid_getter) and callable(set_uid):
             set_uid(uid_getter(pilot_id))
+            gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
         try:
             controller.send_set_vtx_config(band, channel)
             logger.info('Commanded VTX channel %s for pilot %s', label, pilot_id)
+            # Hold the address until the packet has been written, for the same
+            #  reason: resetting it underneath a queued send re-points it.
+            gevent.sleep(VTX_ADDRESS_SETTLE_SECONDS)
         finally:
             if callable(reset_uid):
                 reset_uid()

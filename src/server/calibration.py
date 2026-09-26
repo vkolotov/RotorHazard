@@ -814,6 +814,52 @@ class Calibration:
         return vtx
 
     @catchLogExceptionsWrapper
+    def eq_vtx_test(self, label=None):
+        """Command one channel and report where the nodes say the quad went.
+
+        Without a channel this walks the band one step per call, which is the
+        quickest way to tell a chain that is not working from one that is merely
+        slow: click, look at the quad, click again. No capture and no waiting,
+        so what it reports is simply what the nodes see a moment later.
+
+        :param label: Channel to command, or None to step to the next one
+        :return: True when the command was sent
+        """
+        pilot_id = self._racecontext.rhdata.get_optionInt('eq_sweep_pilot', 0)
+        if not pilot_id:
+            self._racecontext.rhui.emit_priority_message(
+                'Set the calibration pilot first')
+            return False
+
+        channels = self.eq_sweep_channels() or [
+            'R{0}'.format(n) for n in range(1, 9)]
+        if label is None:
+            previous = getattr(self, '_eq_vtx_test_channel', None)
+            index = channels.index(previous) + 1 if previous in channels else 0
+            label = channels[index % len(channels)]
+        self._eq_vtx_test_channel = label
+
+        try:
+            self._vtx().command_channel(pilot_id, label)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            self._racecontext.rhui.emit_priority_message(str(exc))
+            return False
+
+        # Report where it actually went, so a quad that is not following is
+        #  obvious without reading the graphs.
+        floors = (getattr(self, '_eq_captured', None) or {}).get('noise')
+        if floors:
+            seen, margin, _ = self._vtx().observed_channel(
+                floors, self._eq_node_channels())
+            where = seen or 'nothing above the noise floor'
+            self._racecontext.rhui.emit_priority_message(
+                'Sent {0}; nodes see {1} (margin {2})'.format(
+                    label, where, margin))
+        else:
+            self._racecontext.rhui.emit_priority_message('Sent {0}'.format(label))
+        return True
+
+    @catchLogExceptionsWrapper
     def eq_sweep_noise(self):
         """Capture the noise floor. No quad, no channel changes.
 
