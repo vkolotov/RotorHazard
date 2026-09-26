@@ -152,6 +152,91 @@ class EqualisationTest(unittest.TestCase):
         self.assertEqual(cal.eq_wizard_state()['level'], 'low')
         self.assertEqual(cal.eq_wizard_state()['channel'], 'R1')
 
+    def capture(self, cal, nodes, level, peaks):
+        """Run one wizard capture with each node reading `peaks`."""
+        for node, value in zip(nodes, peaks):
+            if level == 'noise':
+                node.node_nadir_rssi = value
+            else:
+                node.node_peak_rssi = value
+        with patch('calibration.gevent.sleep'):
+            return cal.eq_wizard_capture()
+
+    def test_a_low_too_near_the_high_restarts_the_whole_low_pass(self):
+        """One placement of the quad serves the pass, so all of it is suspect.
+
+        The channels already captured at this level were measured from the
+        same wrong distance, so keeping them would bury the error until Apply.
+        """
+        _, nodes, cal = self.context(count=2)
+        self.assertTrue(self.capture(cal, nodes, 'noise', [90, 95]))
+        self.assertTrue(self.capture(cal, nodes, 'high', [187, 176]))   # R1
+        self.assertTrue(self.capture(cal, nodes, 'high', [140, 176]))   # R2
+        self.assertTrue(self.capture(cal, nodes, 'low', [150, 97]))     # R1 ok
+        self.assertIn('low:R1', cal._eq_captured)
+        # R2's low sits 6 counts under its high: the quad never moved
+        self.assertFalse(self.capture(cal, nodes, 'low', [94, 170]))
+        # the good R1 low goes too - it shared the bad placement
+        self.assertNotIn('low:R1', cal._eq_captured)
+        self.assertNotIn('low:R2', cal._eq_captured)
+        # highs and noise were measured elsewhere and survive
+        self.assertIn('high:R1', cal._eq_captured)
+        self.assertIn('high:R2', cal._eq_captured)
+        self.assertIn('noise', cal._eq_captured)
+        state = cal.eq_wizard_state()
+        self.assertEqual((state['level'], state['channel']), ('low', 'R1'))
+
+    def test_a_healthy_band_is_accepted(self):
+        """The guard must not fire on a pass that is merely close to the limit."""
+        _, nodes, cal = self.context(count=1)
+        self.assertTrue(self.capture(cal, nodes, 'noise', [90]))
+        self.assertTrue(self.capture(cal, nodes, 'high', [180]))
+        self.assertEqual(cal._eq_min_gap(), 15)
+        self.assertTrue(self.capture(cal, nodes, 'low', [165]))  # exactly 15
+        self.assertIn('low:R1', cal._eq_captured)
+
+    def test_only_the_node_on_that_channel_is_judged(self):
+        """Off-channel nodes read bleed, so their tiny band means nothing."""
+        _, nodes, cal = self.context(count=2)
+        self.assertTrue(self.capture(cal, nodes, 'noise', [90, 95]))
+        self.assertTrue(self.capture(cal, nodes, 'high', [187, 100]))  # R1
+        self.assertTrue(self.capture(cal, nodes, 'high', [100, 176]))  # R2
+        # on R1 only node 1 is judged; node 2 reads bleed and barely moves
+        self.assertTrue(self.capture(cal, nodes, 'low', [150, 99]))
+        self.assertIn('low:R1', cal._eq_captured)
+
+    def test_an_edited_level_replaces_the_captured_one(self):
+        """A single shadowed node is cheaper to correct than a whole pass."""
+        _, nodes, cal = self.context(count=2)
+        self.capture(cal, nodes, 'noise', [90, 95])
+        self.capture(cal, nodes, 'high', [187, 176])   # R1
+        self.capture(cal, nodes, 'high', [140, 176])   # R2
+        self.assertTrue(cal.eq_wizard_set_level(1, 'high', 181))
+        self.assertEqual(cal._eq_captured['high:R2'], [140, 181])
+        # the edit survives a state query, as a capture does
+        cal.eq_wizard_state()
+        self.assertEqual(cal._eq_captured['high:R2'][1], 181)
+
+    def test_noise_is_not_editable_and_junk_is_ignored(self):
+        _, nodes, cal = self.context(count=1)
+        self.capture(cal, nodes, 'noise', [90])
+        self.capture(cal, nodes, 'high', [187])
+        self.assertFalse(cal.eq_wizard_set_level(0, 'noise', 50))
+        self.assertFalse(cal.eq_wizard_set_level(0, 'high', 'abc'))
+        self.assertFalse(cal.eq_wizard_set_level(9, 'high', 100))
+        self.assertFalse(cal.eq_wizard_set_level(0, 'low', 100))  # not captured
+        self.assertEqual(cal._eq_captured['high:R1'], [187])
+        self.assertEqual(cal._eq_captured['noise'], [90])
+
+    def test_an_out_of_range_edit_is_refused(self):
+        ctx, nodes, cal = self.context(count=1)
+        self.capture(cal, nodes, 'noise', [90])
+        self.capture(cal, nodes, 'high', [187])
+        self.assertFalse(cal.eq_wizard_set_level(0, 'high', 999))
+        self.assertFalse(cal.eq_wizard_set_level(0, 'high', -1))
+        self.assertEqual(cal._eq_captured['high:R1'], [187])
+        self.assertTrue(ctx.rhui.emit_priority_message.called)
+
     def test_unconfirmed_write_is_not_recorded(self):
         """A coefficient write the node never acknowledged is not success."""
         import RHInterface

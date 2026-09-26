@@ -1251,6 +1251,16 @@ def on_eq_wizard_apply(_data=None):
     if eq_wizard_mutation_allowed():
         RaceContext.calibration.eq_wizard_apply()
 
+@SOCKET_IO.on('eq_wizard_set_level')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_eq_wizard_set_level(data=None):
+    '''Override one node's captured low or high level by hand.'''
+    if eq_wizard_mutation_allowed():
+        data = data or {}
+        RaceContext.calibration.eq_wizard_set_level(
+            data.get('node'), data.get('level'), data.get('value'))
+
 @SOCKET_IO.on('eq_vtx_switch')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper

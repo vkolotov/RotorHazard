@@ -496,11 +496,33 @@
 					$('#eq_lbl_' + i).text(lbl);
 					$.each({'a': a, 'b': b, 'c': d}, function (k, v) {
 						var el = $('#eq_' + k + '_' + i);
-						el.text(v === null || v === undefined ? '\u2013' : v);
-						el.toggleClass('eq-set', v !== null && v !== undefined);
+						var set = v !== null && v !== undefined;
+						if (el.is('input')) {
+							/* Leave a field the operator is typing in alone,
+							   or the next state push overwrites it mid-edit. */
+							if (!el.is(':focus')) {
+								el.val(set ? v : '');
+							}
+							/* The captured levels are editable; the applied
+							   constants are not the operator's to retype. */
+							el.prop('disabled', r.mode == 'applied');
+						} else {
+							el.text(set ? v : '\u2013');
+						}
+						el.toggleClass('eq-set', set);
 					});
 				}
 			}
+		});
+
+		$('.eq-edit').change(function (event) {
+			var el = $(this);
+			var raw = el.val();
+			socket.emit('eq_wizard_set_level', {
+				node: parseInt(el.data('node')),
+				level: el.data('level'),
+				value: raw === '' ? null : parseInt(raw)
+			});
 		});
 
 		$('#eq_vtx_switch').click(function (event) {
@@ -2701,6 +2723,14 @@
 .eq-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
           font-variant-numeric: tabular-nums; }
 .eq-cap.eq-set { opacity: 1; }
+/* The captured levels are editable in place, so they stay the size of the
+   readout rather than taking the full-width styling of a form input. */
+input.eq-edit { width: 3.6em; min-width: 0; padding: 0 0.25em; margin: 0;
+                font-size: inherit; font-family: inherit; height: 1.6em;
+                -moz-appearance: textfield; }
+input.eq-edit::-webkit-outer-spin-button,
+input.eq-edit::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input.eq-edit:disabled { background: transparent; border-color: transparent; }
 </style>
 {% endblock %} {% block content %}
 <main class="page-settings">
@@ -2811,8 +2841,8 @@
 					<div class="eq-readout" data-node="{{ node }}">
 						<span class="eq-lbl" id="eq_lbl_{{ node }}">{{ __('Cal') }}</span>
 						<span class="eq-cap" id="eq_a_{{ node }}">&ndash;</span>
-						<span class="eq-cap" id="eq_b_{{ node }}">&ndash;</span>
-						<span class="eq-cap" id="eq_c_{{ node }}">&ndash;</span>
+						<input type="number" class="eq-cap eq-edit" id="eq_b_{{ node }}" data-node="{{ node }}" data-level="low" min="0" max="9999" title="{{ __('Captured low level') }}">
+						<input type="number" class="eq-cap eq-edit" id="eq_c_{{ node }}" data-node="{{ node }}" data-level="high" min="0" max="9999" title="{{ __('Captured high level') }}">
 					</div>
 				</div>
 				<table>

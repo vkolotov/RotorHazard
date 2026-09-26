@@ -31,11 +31,18 @@ EQ_FULL_SCALE = 255
 
 # Minimum gap between adjacent captured levels, as a fraction of full scale.
 #  A node that never saw the quad reads only noise and would otherwise get an
-#  absurd slope. Deliberately loose: a node high on its detector curve
-#  compresses legitimately - one measured fleet spanned 4.6% to 7.1% of scale
-#  between its low and high levels, so anything above a few percent is real.
-#  A fraction rather than a count, so it follows the width of the pipeline.
-EQ_MIN_LEVEL_FRACTION = 0.015
+#  absurd slope. A fraction rather than a count, so it follows the width of
+#  the pipeline.
+#
+# Set from what the gap is used for. The band a node reports gets stretched to
+#  the destination band, so the gain it receives is destination/band; a
+#  measured fleet put that destination near 30 counts, and gain much past 2x
+#  amplifies the node's own noise faster than it buys resolution. 15 counts of
+#  255 is that 2x limit, and it sits clear of real measurements: the same
+#  fleet's sound channels spanned 22 to 38 counts, while two channels captured
+#  with the quad left too close spanned 8 and 10 and produced gains of 3.8x
+#  and 4.75x.
+EQ_MIN_LEVEL_FRACTION = 15.0 / 255
 
 # How long to watch a node after clearing its extremes, before reading them.
 #  The clear has to happen after the operator has set the condition up, not
@@ -372,6 +379,19 @@ class Calibration:
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
 
+            rejected = self._eq_reject_reason(level, state['channel'], vals)
+            if rejected:
+                # One placement of the quad serves the whole pass, so a gap
+                #  this small condemns the placement rather than the step: the
+                #  channels already captured at this level were measured from
+                #  the same wrong distance. Drop them all and restart the pass
+                #  from its first channel.
+                discarded = self._eq_discard_level(level)
+                logger.warning('Equalisation %s pass restarted (%d discarded): %s',
+                               level, discarded, rejected)
+                self._racecontext.rhui.emit_priority_message(rejected)
+                return False
+
             self._eq_captured = getattr(self, '_eq_captured', {})
             self._eq_captured[key] = vals
             self._eq_note_capture_session()
@@ -380,6 +400,133 @@ class Calibration:
         finally:
             self._eq_busy = False
             self._racecontext.rhui.emit_eq_wizard_state()
+
+    @catchLogExceptionsWrapper
+    def eq_wizard_set_level(self, node_index, level, value):
+        """Override one node's captured low or high by hand.
+
+        A capture reads every node at once, so a single node that was shadowed
+        or sat too near the quad spoils a step that was right for the rest.
+        Editing the one value is cheaper than recapturing the pass, and the
+        operator watching the live RSSI knows what it should have read.
+
+        Noise is not editable: it is the one level measured with no quad in
+        the air, so there is nothing for a judgement call to improve on.
+
+        :param node_index: Zero-based node
+        :param level: 'low' or 'high'
+        :param value: The reading to store, or None to clear it
+        :return: True when the value was stored
+        """
+        if level not in ('low', 'high'):
+            return False
+        try:
+            node_index = int(node_index)
+            value = None if value is None or value == '' else int(value)
+        except (TypeError, ValueError):
+            return False  # came from the page, so treat junk as a no-op
+        captured = getattr(self, '_eq_captured', None) or {}
+        num = self._racecontext.race.num_nodes
+        if not 0 <= node_index < num:
+            return False
+
+        labels = self._eq_node_channels()
+        channel = labels[node_index]
+        if channel is None:
+            return False  # node is not taking part
+        key = '{0}:{1}'.format(level, channel)
+        if key not in captured:
+            return False  # that step has not been captured yet
+
+        if value is not None:
+            if value < 0 or value >= self._eq_scale(node_index):
+                self._racecontext.rhui.emit_priority_message(
+                    'Node {0}: {1} must be between 0 and {2}'.format(
+                        node_index + 1, level, self._eq_scale(node_index) - 1))
+                return False
+
+        previous = captured[key][node_index]
+        captured[key][node_index] = value
+        self._eq_captured = captured
+        # The edit belongs to this configuration like a capture does, so it is
+        #  stamped the same way and survives a state query.
+        self._eq_note_capture_session()
+        logger.info('Equalisation %s for node %d edited: %s -> %s',
+                    key, node_index + 1, previous, value)
+        self._racecontext.rhui.emit_eq_wizard_state()
+        return True
+
+    def _eq_discard_level(self, level):
+        """Drop every capture taken at one level, keeping the other levels.
+
+        The captures at a level all share one placement of the quad, so they
+        stand or fall together. Noise and the opposite level were measured
+        somewhere else and are untouched.
+
+        :param level: 'high' or 'low'
+        :return: How many captures were discarded
+        """
+        captured = getattr(self, '_eq_captured', None) or {}
+        prefix = '{0}:'.format(level)
+        doomed = [k for k in captured if k.startswith(prefix)]
+        for key in doomed:
+            del captured[key]
+        if doomed:
+            # Cancel a capture still settling, then re-stamp what survives, as
+            #  stepping back does: the other levels remain valid for this
+            #  configuration and must not be thrown away with these.
+            self._eq_invalidate_session()
+            self._eq_note_capture_session()
+        return len(doomed)
+
+    def _eq_min_gap(self, node_index=0):
+        """The smallest high-to-low gap a node may report and still be fitted."""
+        return max(1, int(round(EQ_MIN_LEVEL_FRACTION * self._eq_scale(node_index))))
+
+    def _eq_reject_reason(self, level, channel, vals):
+        """Why this capture cannot be filed, or None when it can.
+
+        A level is only checked against its counterpart, so the first of the
+        pair is always accepted and the second is what fails. High is captured
+        before low, so in practice this rejects a low taken with the quad still
+        too near the gate - the case that otherwise fits a huge slope to a
+        handful of counts and is not noticed until Apply.
+
+        :param level: 'noise', 'high' or 'low'
+        :param channel: The channel being captured, or None for noise
+        :param vals: This capture's reading per node
+        :return: A message naming the node and what to do, or None
+        """
+        if level == 'noise' or channel is None:
+            return None  # noise stands alone; nothing to compare it against
+
+        other = 'low' if level == 'high' else 'high'
+        stored = (getattr(self, '_eq_captured', None) or {}).get(
+            '{0}:{1}'.format(other, channel))
+        if not stored:
+            return None  # first of the pair
+
+        # Only nodes tuned to this channel measure it; the rest are bystanders
+        #  reading bleed from an adjacent channel and say nothing useful here.
+        labels = self._eq_node_channels()
+        gap = self._eq_min_gap()
+        for idx in self._eq_participants():
+            if labels[idx] != channel:
+                continue
+            new, old = vals[idx], stored[idx]
+            if new is None or old is None:
+                continue
+            hi, lo = (new, old) if level == 'high' else (old, new)
+            if (hi - lo) < gap:
+                return ('Node {0} ({1}): high {2} and low {3} are only {4} '
+                        'apart, need {5}. The quad is too {6} - move it '
+                        'further {7} and capture the whole {8} pass again '
+                        'from the first channel.').format(
+                            idx + 1, channel, hi, lo, hi - lo, gap,
+                            'close' if level == 'low' else 'far',
+                            'away' if level == 'low' else 'closer',
+                            level)
+        return None
 
     def _vtx(self):
         """The VTX controller, made on first use so import order cannot matter."""
@@ -536,7 +683,7 @@ class Calibration:
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
-            min_gap = max(1, EQ_MIN_LEVEL_FRACTION * self._eq_scale(idx))
+            min_gap = self._eq_min_gap(idx)
             if (hi - lo) < min_gap or (lo - fl) < min_gap:
                 msg = ('Node {0} levels are too close together '
                        '(noise={1}, low={2}, high={3})').format(idx + 1, fl, lo, hi)
