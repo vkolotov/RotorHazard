@@ -491,8 +491,7 @@
 					/* EqLow/EqHigh always show the captured levels, so the
 					   fields hold what they edit. Empty is a level not captured
 					   yet, which the operator can simply type in. */
-					lbl = (r.mode == 'capture' || r.mode == 'identity')
-					      ? "{{ __('Cal') }}" : "{{ __('Eq') }}";
+					lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Eq') }}";
 					a = r.noise; b = r.low; d = r.high;
 					$('#eq_lbl_' + i).text(lbl);
 					/* Noise stays a readout: it is the one level measured with
