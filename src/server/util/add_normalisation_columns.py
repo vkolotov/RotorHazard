@@ -17,6 +17,7 @@ COLUMNS = (
     ("norm_pivots", "VARCHAR(256)"),
     ("norm_offsets", "VARCHAR(256)"),
     ("norm_scales", "VARCHAR(256)"),
+    ("norm_per_freq", "VARCHAR(4096)"),
 )
 
 

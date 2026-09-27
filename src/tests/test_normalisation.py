@@ -31,7 +31,11 @@ def cal_mod_full_scale():
 
 
 class NormalisationTest(unittest.TestCase):
-    def context(self, count=1):
+    # The R band frequencies, so a fixture's channels resolve the way the sweep
+    #  resolves them.
+    R_FREQS = (5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917)
+
+    def context(self, count=1, scope='current'):
         nodes = []
         for _ in range(count):
             node = Node()
@@ -39,8 +43,10 @@ class NormalisationTest(unittest.TestCase):
             node.init()
             nodes.append(node)
         profile = SimpleNamespace(
-            id=1, frequencies=json.dumps({'b': ['R'] * count,
-                                          'c': list(range(1, count + 1))}))
+            id=1, norm_per_freq=None,
+            frequencies=json.dumps({'b': ['R'] * count,
+                                    'c': list(range(1, count + 1)),
+                                    'f': list(self.R_FREQS[:count])}))
         ctx = SimpleNamespace(race=SimpleNamespace(profile=profile, num_nodes=count),
                               interface=Mock(nodes=nodes), rhui=Mock(), rhdata=Mock(),
                               events=Mock())
@@ -52,7 +58,28 @@ class NormalisationTest(unittest.TestCase):
         ctx.rhdata.alter_profile.side_effect = save
         ctx.rhdata.get_profile.return_value = profile
         ctx.interface.set_normalisation.return_value = True
-        return ctx, nodes, Calibration(ctx)
+        cal = Calibration(ctx)
+        # A run is not armed until a scope is chosen; the tests that care about
+        #  the choice itself pass scope=None and make it explicitly.
+        if scope:
+            cal._norm_scope_sel = scope
+            cal._norm_saved_freqs = cal._norm_profile_freqs()
+        return ctx, nodes, cal
+
+    @classmethod
+    def sweep_captures(cls, fleet):
+        """Captures as the sweep files them: every node read on every channel.
+
+        Each step tunes the whole fleet to one channel, so a channel's row holds
+        a reading for every node. A node reads its own `gate` on its own channel
+        and a little less elsewhere, which is what a real receiver does.
+        """
+        out = {'noise': [f for f, _ in fleet]}
+        for ch in range(len(fleet)):
+            out['high:R{0}'.format(ch + 1)] = [
+                gate if node == ch else max(floor + 31, gate - 6)
+                for node, (floor, gate) in enumerate(fleet)]
+        return out
 
     @staticmethod
     def corrected(raw, pivot, offset, scale):
@@ -69,10 +96,7 @@ class NormalisationTest(unittest.TestCase):
                  (25, 95), (19, 90), (17, 70), (21, 80)]
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(count=len(fleet))
-            cal._norm_captured = {'noise': [f for f, _ in fleet]}
-            for i, (_, h) in enumerate(fleet):
-                cal._norm_captured['high:R{0}'.format(i + 1)] = [
-                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_captured = self.sweep_captures(fleet)
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())
 
@@ -93,10 +117,7 @@ class NormalisationTest(unittest.TestCase):
         fleet = [(18, 52), (22, 61), (15, 88), (25, 95)]
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(count=len(fleet))
-            cal._norm_captured = {'noise': [f for f, _ in fleet]}
-            for i, (_, h) in enumerate(fleet):
-                cal._norm_captured['high:R{0}'.format(i + 1)] = [
-                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_captured = self.sweep_captures(fleet)
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())
 
@@ -123,10 +144,7 @@ class NormalisationTest(unittest.TestCase):
                  (25, 95), (19, 90), (17, 70), (21, 80)]
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(count=len(fleet))
-            cal._norm_captured = {'noise': [f for f, _ in fleet]}
-            for i, (_, h) in enumerate(fleet):
-                cal._norm_captured['high:R{0}'.format(i + 1)] = [
-                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_captured = self.sweep_captures(fleet)
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())
 
@@ -151,10 +169,7 @@ class NormalisationTest(unittest.TestCase):
                  (91, 169), (106, 186), (83, 183), (87, 140)]
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(count=len(fleet))
-            cal._norm_captured = {'noise': [f for f, _ in fleet]}
-            for i, (_, h) in enumerate(fleet):
-                cal._norm_captured['high:R{0}'.format(i + 1)] = [
-                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_captured = self.sweep_captures(fleet)
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())
 
@@ -173,10 +188,7 @@ class NormalisationTest(unittest.TestCase):
         fleet = [(89, 187), (94, 149), (67, 159), (109, 191)]
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(count=len(fleet))
-            cal._norm_captured = {'noise': [f for f, _ in fleet]}
-            for i, (_, h) in enumerate(fleet):
-                cal._norm_captured['high:R{0}'.format(i + 1)] = [
-                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_captured = self.sweep_captures(fleet)
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())
 
@@ -190,10 +202,7 @@ class NormalisationTest(unittest.TestCase):
     def fitted(self, fleet):
         """Apply a real fit for `fleet` and return the context."""
         ctx, _, cal = self.context(count=len(fleet))
-        cal._norm_captured = {'noise': [f for f, _ in fleet]}
-        for i, (_, h) in enumerate(fleet):
-            cal._norm_captured['high:R{0}'.format(i + 1)] = [
-                h if j == i else None for j in range(len(fleet))]
+        cal._norm_captured = self.sweep_captures(fleet)
         cal._norm_note_capture_session()
         with patch('calibration.gevent.sleep'):
             self.assertTrue(cal.norm_wizard_apply())
@@ -274,6 +283,99 @@ class NormalisationTest(unittest.TestCase):
         self.assertFalse(cal.norm_apply_thresholds('abc', 100))
         ctx.interface.set_enter_at_level.assert_not_called()
 
+    def test_a_scope_must_be_chosen_before_anything_is_armed(self):
+        """The sweep retunes the whole fleet, so which channels it visits first."""
+        _, _, cal = self.context(count=2, scope=None)
+        self.assertEqual(cal.norm_wizard_state()['state'], 'choosing')
+        self.assertFalse(cal.norm_start('sideways'))
+        self.assertEqual(cal.norm_wizard_state()['state'], 'choosing')
+        self.assertTrue(cal.norm_start('R'))
+        self.assertEqual(cal.norm_wizard_state()['state'], 'capturing')
+
+    def test_the_band_scopes_sweep_the_whole_band(self):
+        import calibration as cal_mod
+        _, _, cal = self.context(count=2, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        # noise plus every channel in R
+        self.assertEqual(len(cal._norm_steps()), 1 + 8)
+        self.assertEqual([c for _, c in cal._norm_steps()[1:]],
+                         ['R{0}'.format(i) for i in range(1, 9)])
+
+        _, _, cal = self.context(count=2, scope=None)
+        self.assertTrue(cal.norm_start('RL'))
+        self.assertEqual(len(cal._norm_steps()), 1 + 16)
+        labels = [c for _, c in cal._norm_steps()[1:]]
+        self.assertEqual(labels[:8], ['R{0}'.format(i) for i in range(1, 9)])
+        self.assertEqual(labels[8:], ['L{0}'.format(i) for i in range(1, 9)])
+        # and the frequencies come from the band table, not the profile
+        freqs = [f for _, _, f in cal._norm_sweep_channels()]
+        self.assertIn(cal_mod.NORM_BANDS['L'][0][1], freqs)
+
+    def test_the_current_scope_sweeps_only_the_channels_in_use(self):
+        _, _, cal = self.context(count=3, scope=None)
+        self.assertTrue(cal.norm_start('current'))
+        self.assertEqual([c for _, c in cal._norm_steps()[1:]],
+                         ['R1', 'R2', 'R3'])
+
+    def test_a_capture_tunes_every_node_to_the_step_channel(self):
+        """One channel per step, all nodes on it - that is what makes the fit
+        per [node, frequency] instead of per node."""
+        ctx, nodes, cal = self.context(count=3)
+        for node in nodes:
+            node.node_nadir_rssi = 90
+            node.node_peak_rssi = 150
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_wizard_capture())   # noise
+            ctx.interface.set_frequency.reset_mock()
+            self.assertTrue(cal.norm_wizard_capture())   # first gate channel
+        tuned = [c.args for c in ctx.interface.set_frequency.call_args_list]
+        self.assertEqual(len(tuned), 3)
+        # every node on the same frequency
+        self.assertEqual(len({a[1] for a in tuned}), 1)
+        self.assertEqual(sorted(a[0] for a in tuned), [0, 1, 2])
+
+    def test_a_fit_is_stored_for_every_channel_swept(self):
+        fleet = [(89, 187), (94, 149), (67, 159)]
+        ctx, cal = self.fitted(fleet)
+        table = json.loads(ctx.race.profile.norm_per_freq)
+        # one row per channel in scope, each carrying a fit for every node
+        self.assertEqual(len(table), len(fleet))
+        for freq, row in table.items():
+            self.assertEqual(len(row), len(fleet))
+            for fit in row:
+                self.assertEqual(len(fit), 3)
+                self.assertTrue(fit[0], 'pivot 0 would disable the correction')
+
+    def test_a_retune_sends_that_channels_own_fit(self):
+        fleet = [(89, 187), (94, 149), (67, 159)]
+        ctx, cal = self.fitted(fleet)
+        table = json.loads(ctx.race.profile.norm_per_freq)
+        other = sorted(table)[1]                 # a channel node 0 is not on
+        ctx.interface.set_normalisation.reset_mock()
+
+        self.assertTrue(cal.norm_apply_for_frequency(0, int(other)))
+        idx, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
+        self.assertEqual([idx, pivot, offset, scale],
+                         [0] + list(table[other][0]))
+
+    def test_an_uncalibrated_channel_leaves_the_node_uncorrected(self):
+        """A wrong fit is worse than none: pivot 0 turns the correction off."""
+        fleet = [(89, 187), (94, 149)]
+        ctx, cal = self.fitted(fleet)
+        ctx.interface.set_normalisation.reset_mock()
+
+        self.assertFalse(cal.norm_apply_for_frequency(0, 5362))   # L1, never swept
+        idx, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
+        self.assertEqual((idx, pivot, offset, scale), (0, 0, 0, 256))
+
+    def test_the_channel_assignment_comes_back_after_a_run(self):
+        """The sweep parks the fleet on capture channels; that is not a race."""
+        fleet = [(89, 187), (94, 149), (67, 159)]
+        ctx, cal = self.fitted(fleet)
+        restored = [c.args for c in ctx.interface.set_frequency.call_args_list[-3:]]
+        self.assertEqual(sorted(a[0] for a in restored), [0, 1, 2])
+        self.assertEqual([a[1] for a in restored], list(self.R_FREQS[:3]))
+
     def test_the_pivot_sits_at_the_ratio_of_the_captured_range(self):
         import calibration as cal_mod
         _, _, cal = self.context()
@@ -336,18 +438,21 @@ class NormalisationTest(unittest.TestCase):
         """The captures are keyed by level and channel, not by capture order."""
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(count=2)
-            cal._norm_captured = {'high:R2': [None, 140],
+            # filed out of order: the second channel, then noise, then the first
+            cal._norm_captured = {'high:R2': [114, 140],
                                   'noise': [20, 22],
-                                  'high:R1': [120, None]}
+                                  'high:R1': [120, 134]}
             cal._norm_note_capture_session()
             self.assertEqual(cal.norm_wizard_state()['state'], 'ready')
             self.assertTrue(cal.norm_wizard_apply())
+
+            # node 1 sits on R1 and node 2 on R2, so each is sent its own
+            #  channel's fit and both gates land on the sweep's highest, 140.
             sent = {c.args[0]: c.args for c in
                     ctx.interface.set_normalisation.call_args_list}
-            target = 140
             for idx, gate in ((0, 120), (1, 140)):
                 _, pivot, offset, scale = sent[idx]
-                self.assertEqual(self.corrected(gate, pivot, offset, scale), target)
+                self.assertEqual(self.corrected(gate, pivot, offset, scale), 140)
 
     def test_back_discards_the_step_most_recently_captured(self):
         """Back drops the last gate captured and re-arms that step."""

@@ -457,6 +457,18 @@
 			   captured rather than only at the end of the sweep. */
 			$('#norm_apply_noise').toggle(!!msg.noise_ready);
 
+			/* The sweep retunes the whole fleet, so which channels it visits is
+			   settled before anything is armed. */
+			var choosing = msg.state == 'choosing';
+			$('#norm_scope_current, #norm_scope_r, #norm_scope_rl')
+				.toggle(choosing).prop('disabled', false);
+			$('#norm_wizard_action, #norm_wizard_back').toggle(!choosing);
+			if (choosing) {
+				prog.text("{{ __('choose what to calibrate') }}");
+				$('#norm_wizard_reset').prop('disabled', true);
+				return;
+			}
+
 			if (msg.busy) {
 				var left = msg.settle || 5;
 				$('#norm_wizard_action, #norm_wizard_back, #norm_wizard_reset, #norm_vtx_switch, #norm_apply_noise').prop('disabled', true);
@@ -525,6 +537,13 @@
 			var ex = parseInt($('#norm_suggest_exit_at').val());
 			if (isNaN(en) || isNaN(ex)) { return; }
 			socket.emit('norm_apply_thresholds', {enter_at: en, exit_at: ex});
+		});
+
+		$.each({'norm_scope_current': 'current', 'norm_scope_r': 'R',
+		        'norm_scope_rl': 'RL'}, function (id, scope) {
+			$('#' + id).click(function (event) {
+				socket.emit('norm_start', {scope: scope});
+			});
 		});
 
 		$('#norm_apply_noise').click(function (event) {
@@ -2914,6 +2933,9 @@
 					<label>{{ __('Normalise Nodes') }}</label>
 				</div>
 				<div class="norm-wizard">
+					<button id="norm_scope_current" class="alt-button" style="display: none;">{{ __('Current channels') }}</button>
+					<button id="norm_scope_r" class="alt-button" style="display: none;">{{ __('R Band') }}</button>
+					<button id="norm_scope_rl" class="alt-button" style="display: none;">{{ __('R + L Band') }}</button>
 					<button id="norm_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
 					<button id="norm_wizard_back" class="alt-button">{{ __('Back') }}</button>
 					<button id="norm_apply_noise" class="alt-button" style="display: none;">{{ __('Level Floors') }}</button>

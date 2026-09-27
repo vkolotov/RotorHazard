@@ -29,15 +29,22 @@ def context(count=2, controller=None):
         node.api_level = 37
         node.init()
         nodes.append(node)
+    R_FREQS = (5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917)
     profile = SimpleNamespace(
-        id=1, frequencies=json.dumps({'b': ['R'] * count,
-                                      'c': list(range(1, count + 1))}))
+        id=1, norm_per_freq=None,
+        frequencies=json.dumps({'b': ['R'] * count,
+                                'c': list(range(1, count + 1)),
+                                'f': list(R_FREQS[:count])}))
     vrx = SimpleNamespace(controllers={'elrs': controller}) if controller else None
     ctx = SimpleNamespace(race=SimpleNamespace(profile=profile, num_nodes=count),
                           interface=Mock(nodes=nodes), rhui=Mock(), rhdata=Mock(),
                           events=Mock(), vrx_manager=vrx)
     ctx.rhdata.get_profile.return_value = profile
-    return ctx, Calibration(ctx)
+    cal = Calibration(ctx)
+    # A run is armed only once a scope is chosen.
+    cal._norm_scope_sel = 'current'
+    cal._norm_saved_freqs = cal._norm_profile_freqs()
+    return ctx, cal
 
 
 def backpack():

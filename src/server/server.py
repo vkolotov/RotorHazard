@@ -1066,6 +1066,9 @@ def on_set_frequency(data):
     RaceContext.race.profile = profile
 
     RaceContext.interface.set_frequency(node_index, frequency, band, channel)
+    # A normalisation fit belongs to a [node, frequency] pair, so the node is
+    #  running the wrong correction until the fit for its new channel is sent.
+    RaceContext.calibration.norm_apply_for_frequency(node_index, frequency)
 
     RaceContext.race.clear_results()
 
@@ -1159,6 +1162,7 @@ def restore_node_frequency(node_index):
     band = profile_freqs["b"][node_index]
     channel = profile_freqs["c"][node_index]
     RaceContext.interface.set_frequency(node_index, freq, band, channel)
+    RaceContext.calibration.norm_apply_for_frequency(node_index, freq)
     logger.info('Frequency restored: Node {0} Frequency {1}'.format(node_index+1, freq))
 
 @SOCKET_IO.on('set_enter_at_level')
@@ -1218,6 +1222,14 @@ def norm_wizard_mutation_allowed():
         RaceContext.rhui.emit_norm_wizard_state()
         return False
     return True
+
+@SOCKET_IO.on('norm_start')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_start(data=None):
+    '''Begin a calibration run at the chosen scope.'''
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_start((data or {}).get('scope'))
 
 @SOCKET_IO.on('norm_wizard_capture')
 @requires_socketio_auth
@@ -3370,6 +3382,7 @@ def assign_frequencies():
 
     for idx in range(RaceContext.race.num_nodes):
         RaceContext.interface.set_frequency(idx, freqs["f"][idx], freqs["b"][idx], freqs["c"][idx])
+        RaceContext.calibration.norm_apply_for_frequency(idx, freqs["f"][idx])
         RaceContext.race.clear_results()
         Events.trigger(Evt.FREQUENCY_SET, {
             'nodeIndex': idx,

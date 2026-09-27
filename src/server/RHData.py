@@ -2534,6 +2534,7 @@ class RHData():
             norm_pivots = source_profile.norm_pivots,
             norm_offsets = source_profile.norm_offsets,
             norm_scales = source_profile.norm_scales,
+            norm_per_freq = source_profile.norm_per_freq,
             f_ratio = 100)
         Database.DB_session.add(new_profile)
 
@@ -2562,7 +2563,8 @@ class RHData():
             profile.enter_ats = data['enter_ats'] if isinstance(data['enter_ats'], str) else json.dumps(data['enter_ats'])
         if 'exit_ats' in data:
             profile.exit_ats = data['exit_ats'] if isinstance(data['exit_ats'], str) else json.dumps(data['exit_ats'])
-        for field in ('norm_pivots', 'norm_offsets', 'norm_scales'):
+        for field in ('norm_pivots', 'norm_offsets', 'norm_scales',
+                      'norm_per_freq'):
             if field in data:
                 value = data[field]
                 setattr(profile, field,

@@ -402,6 +402,7 @@ class Profiles(Base):
     norm_pivots = DB.Column(DB.String(256), nullable=True)
     norm_offsets = DB.Column(DB.String(256), nullable=True)
     norm_scales = DB.Column(DB.String(256), nullable=True)
+    norm_per_freq = DB.Column(DB.String(4096), nullable=True)
     f_ratio = DB.Column(DB.Integer, nullable=True)
 
 class RaceFormat(Base):
