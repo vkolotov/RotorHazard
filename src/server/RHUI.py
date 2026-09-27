@@ -768,6 +768,9 @@ class RHUI():
         """Emits the normalisation wizard position and what it has captured."""
         emit_payload = self._racecontext.calibration.norm_wizard_state()
         emit_payload['captured'] = self._racecontext.calibration.norm_captured_table()
+        suggested = self._racecontext.calibration.norm_suggested_thresholds()
+        emit_payload['suggested_enter_at'] = suggested[0] if suggested else None
+        emit_payload['suggested_exit_at'] = suggested[1] if suggested else None
         if ('nobroadcast' in params):
             emit('norm_wizard_state', emit_payload)
         else:

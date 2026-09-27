@@ -492,26 +492,13 @@
 			if (msg.captured) {
 				for (var i = 0; i < msg.captured.length; i++) {
 					var r = msg.captured[i];
-					/* The readout keeps the two measured levels and the
-					   derived pivot; offset and scale are what the operator
-					   edits. */
-					var lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Norm') }}";
-					$('#norm_lbl_' + i).text(lbl);
-					$.each({'a': r.noise, 'b': r.high}, function (k, v) {
-						var el = $('#norm_' + k + '_' + i);
-						var set = v !== null && v !== undefined && v !== 0;
-						el.text(set ? v : '\u2013');
-						el.toggleClass('norm-set', set);
-					});
-
+					/* The three fitted values are shown, not edited: they are
+					   derived from the captures together, so changing one alone
+					   describes no real receiver. */
 					$.each({'pivot': r.pivot, 'offset': r.offset,
 					        'scale': r.scale}, function (k, v) {
-						var el = $('#norm_' + k + '_' + i);
-						/* Leave a field being typed in alone, or the next
-						   state push overwrites it mid-edit. */
-						if (!el.is(':focus')) {
-							el.val(v === null || v === undefined ? '' : v);
-						}
+						var set = v !== null && v !== undefined && v !== 0;
+						$('#norm_' + k + '_' + i).text(set ? v : '\u2013');
 					});
 					/* Say what the scale means, since 256 = x1.00 is not
 					   obvious from the digits alone. */
@@ -519,17 +506,25 @@
 						r.scale ? '\u00d7' + (r.scale / 256).toFixed(2) : '');
 				}
 			}
+
+			/* The suggestion only exists once a fit does. Leave a field being
+			   typed in alone, or the next state push overwrites it mid-edit. */
+			var haveFit = msg.suggested_enter_at !== null
+			           && msg.suggested_enter_at !== undefined;
+			$.each({'enter_at': msg.suggested_enter_at,
+			        'exit_at': msg.suggested_exit_at}, function (k, v) {
+				var el = $('#norm_suggest_' + k);
+				if (!el.is(':focus')) { el.val(haveFit ? v : ''); }
+				el.prop('disabled', !haveFit);
+			});
+			$('#norm_apply_thresholds').prop('disabled', !haveFit);
 		});
 
-		$('.norm-edit').change(function (event) {
-			var el = $(this);
-			var raw = el.val();
-			if (raw === '') { return; }
-			socket.emit('norm_wizard_set_coefficient', {
-				node: parseInt(el.data('node')),
-				which: el.data('which'),
-				value: parseInt(raw)
-			});
+		$('#norm_apply_thresholds').click(function (event) {
+			var en = parseInt($('#norm_suggest_enter_at').val());
+			var ex = parseInt($('#norm_suggest_exit_at').val());
+			if (isNaN(en) || isNaN(ex)) { return; }
+			socket.emit('norm_apply_thresholds', {enter_at: en, exit_at: ex});
 		});
 
 		$('#norm_apply_noise').click(function (event) {
@@ -2722,8 +2717,12 @@
 <style>
 /* match the flex sizing ol.form gives its inputs, so the wizard row lines up
    with the controls below it */
-.norm-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
-             flex: 1 1 0; margin-left: 0.5em; }
+/* One row, never wrapped: the wizard's buttons and the threshold fields have to
+   stay on a single line, so nothing here is allowed to grow or wrap. */
+.norm-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: nowrap;
+             flex: 1 1 0; margin-left: 0.5em; min-width: 0; }
+.norm-thresholds input { width: 4.5em; flex: 0 0 auto; min-width: 0; margin: 0; }
+.norm-thresholds button { flex: 0 0 auto; }
 .norm-wizard button { margin: 0; }
 .norm-wizard #norm_wizard_action { flex: 1 1 auto; }
 .norm-wizard .norm-progress { opacity: 0.7; white-space: nowrap; font-style: italic;
@@ -2734,10 +2733,8 @@
 .norm-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
           font-variant-numeric: tabular-nums; }
 .norm-cap.norm-set { opacity: 1; }
-/* NormOffset/NormScale sit in .enter-exit-control rows beside EnterAt/ExitAt
-   and take that styling; they only need the empty-vs-set cue the readout spans
-   have. */
-input.norm-edit:disabled { opacity: 0.5; }
+/* The three fitted values are read-only rows in the per-node table, so they
+   take the .datarow styling; only the gain annotation needs its own. */
 .norm-gain { opacity: 0.6; font-size: 0.85em; margin-left: 0.3em;
            font-variant-numeric: tabular-nums; }
 </style>
@@ -2847,26 +2844,6 @@ input.norm-edit:disabled { opacity: 0.5; }
 						<button class="cap_exit_at_btn" data-node_index="{{ node }}" title="{{ __('Capture current RSSI') }}"><svg height="1em" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M0 14h16v2H0zM10 6V0H6v6H3l5 7 5-7z"/></svg></button>
 					</div>
 
-					<div class="enter-exit-control">
-						<label for="norm_pivot_{{ node }}">{{ __('NormPivot') }}</label>
-						<input type="number" id="norm_pivot_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="pivot" min="1" max="255" step="1" title="{{ __('Where the offset-only region starts. Raise it to keep more of the curve at unity gain') }}">
-					</div>
-					<div class="enter-exit-control">
-						<label for="norm_offset_{{ node }}">{{ __('NormOffset') }}</label>
-						<input type="number" id="norm_offset_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="offset" min="-255" max="255" step="1" title="{{ __('Offset in counts. Moves the whole curve; above the pivot this is the only correction') }}">
-					</div>
-
-					<div class="enter-exit-control">
-						<label for="norm_scale_{{ node }}">{{ __('NormScale') }}</label>
-						<input type="number" id="norm_scale_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="scale" min="32" max="2048" step="8" title="{{ __('Scale below the pivot. 256 = no change') }}">
-						<span class="norm-gain" id="norm_scale_x_{{ node }}"></span>
-					</div>
-
-					<div class="norm-readout" data-node="{{ node }}">
-						<span class="norm-lbl" id="norm_lbl_{{ node }}">{{ __('Cal') }}</span>
-						<span class="norm-cap" id="norm_a_{{ node }}" title="{{ __('Noise floor') }}">&ndash;</span>
-						<span class="norm-cap" id="norm_b_{{ node }}" title="{{ __('Gate') }}">&ndash;</span>
-					</div>
 				</div>
 				<table>
 					<tr class="datarow">
@@ -2905,6 +2882,25 @@ input.norm-edit:disabled { opacity: 0.5; }
 							<span class="debug_pass_count_{{ node }}"></span>
 						</td>
 					</tr>
+					<tr class="datarow">
+						<td>{{ __('NormPivot') }}</td>
+						<td>
+							<span id="norm_pivot_{{ node }}"></span>
+						</td>
+					</tr>
+					<tr class="datarow">
+						<td>{{ __('NormOffset') }}</td>
+						<td>
+							<span id="norm_offset_{{ node }}"></span>
+						</td>
+					</tr>
+					<tr class="datarow">
+						<td>{{ __('NormScale') }}</td>
+						<td>
+							<span id="norm_scale_{{ node }}"></span>
+							<span class="norm-gain" id="norm_scale_x_{{ node }}"></span>
+						</td>
+					</tr>
 				</table>
 				<div id="node_notice_{{ node }}"></div>
 			</div>
@@ -2924,6 +2920,16 @@ input.norm-edit:disabled { opacity: 0.5; }
 					<button id="norm_vtx_switch" class="alt-button" style="display: none;"></button>
 					<button id="norm_wizard_action"></button>
 					<span class="norm-progress" id="norm_wizard_progress"></span>
+				</div>
+			</li>
+			<li>
+				<div class="label-block">
+					<label for="norm_suggest_enter_at">{{ __('Suggested EnterAt/ExitAt') }}</label>
+				</div>
+				<div class="norm-wizard norm-thresholds">
+					<input type="number" id="norm_suggest_enter_at" min="1" max="255" step="1" title="{{ __('EnterAt: the highest pivot in the fleet, so every node triggers where it is at unity gain') }}">
+					<input type="number" id="norm_suggest_exit_at" min="1" max="255" step="1" title="{{ __('ExitAt: one tenth of the floor-to-gate span below EnterAt') }}">
+					<button id="norm_apply_thresholds" class="alt-button">{{ __('Apply') }}</button>
 				</div>
 			</li>
 			<li>

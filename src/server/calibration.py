@@ -306,6 +306,102 @@ class Calibration:
         scale = max(1, min(65535, scale))
         return pivot, offset, scale
 
+    def norm_suggested_thresholds(self):
+        """EnterAt/ExitAt suggested from the fit, or None when there is none.
+
+        One pair for the whole fleet. That is what normalisation buys: after it,
+        the same number means the same signal on every seat, so per-node
+        thresholds stop being necessary.
+
+        EnterAt is the **highest** corrected pivot in the fleet, not the mean.
+        Above its own pivot a node is at unity gain and agrees exactly with the
+        others; below it the nodes diverge. The mean would sit under the pivot of
+        every node above average - on a measured fleet that was three of eight -
+        putting their trigger in the scaled region where the agreement the fit
+        exists for does not hold.
+
+        ExitAt sits one tenth of the floor-to-gate span below it. Measured static
+        noise at the gate is under 2 counts peak to peak, so that is ample
+        hysteresis, and it leaves ExitAt well clear of the noise floor - a pass
+        whose exit threshold sat at or below the floor would start and never end.
+
+        :return: (enter_at, exit_at) or None
+        """
+        pivots = self._norm_stored('norm_pivots', 0)
+        offsets = self._norm_stored('norm_offsets', 0)
+        scales = self._norm_stored('norm_scales', NORM_UNITY_SLOPE)
+        corrected = [self._corrected(pivots[i], (pivots[i], offsets[i], scales[i]))
+                     for i in self._norm_participants() if pivots[i]]
+        if not corrected:
+            return None
+
+        enter_at = max(corrected)
+        # The corrected floor and gate bound the only range the nodes occupy
+        #  after a fit, so the span is measured between them rather than over
+        #  full scale: a tenth of full scale would put ExitAt under the floor.
+        coeffs = [(pivots[i], offsets[i], scales[i])
+                  for i in self._norm_participants() if pivots[i]]
+        # The floor is where the lower segment starts; taking raw 0 through the
+        #  fit gives it without needing the capture kept.
+        floor = min(self._corrected(0, c) for c in coeffs)
+        # The gate is where the fit put every node's gate capture, which is the
+        #  reference node's own gate - not what raw full scale maps to, which
+        #  overshoots it and would inflate the span.
+        captured = getattr(self, '_norm_captured', None) or {}
+        labels = self._norm_node_channels()
+        gates = [captured.get('high:{0}'.format(labels[i]), [None] * len(pivots))[i]
+                 for i in self._norm_participants() if pivots[i]]
+        gates = [g for g in gates if g is not None]
+        if gates:
+            gate = max(self._corrected(g, c) for g, c in zip(gates, coeffs))
+        else:
+            # Captures cleared, so fall back to the pivot's own share of the
+            #  range: the pivot sits at NORM_PIVOT_RATIO of floor-to-gate.
+            gate = floor + int(round((enter_at - floor) / NORM_PIVOT_RATIO))
+        span = max(1, gate - floor)
+        exit_at = max(floor + 1, enter_at - int(round(0.10 * span)))
+        return enter_at, exit_at
+
+    @catchLogExceptionsWrapper
+    def norm_apply_thresholds(self, enter_at, exit_at):
+        """Write one EnterAt/ExitAt pair to every participating node.
+
+        The operator may have edited what was suggested, so the values arrive as
+        arguments rather than being recomputed here.
+
+        :param enter_at: EnterAt on the corrected axis
+        :param exit_at: ExitAt on the corrected axis
+        :return: True when every node took both
+        """
+        try:
+            enter_at = int(enter_at)
+            exit_at = int(exit_at)
+        except (TypeError, ValueError):
+            return False  # came from the page, so treat junk as a no-op
+        if not 0 < exit_at < enter_at <= NORM_FULL_SCALE:
+            self._racecontext.rhui.emit_priority_message(
+                'EnterAt must be above ExitAt, and both within 1 to {0}'.format(
+                    NORM_FULL_SCALE))
+            return False
+        if getattr(self, '_norm_busy', False):
+            return False
+
+        taking_part = self._norm_participants()
+        if not taking_part:
+            return False
+        for idx in taking_part:
+            # Emit once at the end rather than per node and per level, so the
+            #  page is not redrawn eight times mid-write.
+            self.set_enter_at_level(idx, enter_at, emit_levels=False)
+            self.set_exit_at_level(idx, exit_at, emit_levels=False)
+        self._racecontext.rhui.emit_enter_and_exit_at_levels()
+        logger.info('Thresholds applied to %d nodes: EnterAt=%d ExitAt=%d',
+                    len(taking_part), enter_at, exit_at)
+        self._racecontext.rhui.emit_priority_message(
+            'EnterAt {0} and ExitAt {1} applied to {2} nodes'.format(
+                enter_at, exit_at, len(taking_part)))
+        return True
+
     def norm_wizard_state(self):
         """Where the wizard is: the next step, or done."""
         captured = getattr(self, '_norm_captured', None) or {}

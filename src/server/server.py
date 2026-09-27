@@ -1280,6 +1280,16 @@ def on_norm_vtx_switch(_data=None):
     '''
     RaceContext.calibration.norm_vtx_switch()
 
+@SOCKET_IO.on('norm_apply_thresholds')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_apply_thresholds(data=None):
+    '''Write one EnterAt/ExitAt pair to every node.'''
+    if norm_wizard_mutation_allowed():
+        data = data or {}
+        RaceContext.calibration.norm_apply_thresholds(
+            data.get('enter_at'), data.get('exit_at'))
+
 @SOCKET_IO.on('norm_wizard_query')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper

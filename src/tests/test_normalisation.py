@@ -187,6 +187,84 @@ class NormalisationTest(unittest.TestCase):
                 self.assertTrue(all(v > 0 for v in out),
                                 'raw {0} clamped somewhere: {1}'.format(raw, out))
 
+    def fitted(self, fleet):
+        """Apply a real fit for `fleet` and return the context."""
+        ctx, _, cal = self.context(count=len(fleet))
+        cal._norm_captured = {'noise': [f for f, _ in fleet]}
+        for i, (_, h) in enumerate(fleet):
+            cal._norm_captured['high:R{0}'.format(i + 1)] = [
+                h if j == i else None for j in range(len(fleet))]
+        cal._norm_note_capture_session()
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_wizard_apply())
+        return ctx, cal
+
+    def test_suggested_enter_at_is_the_highest_pivot_not_the_mean(self):
+        """Below its own pivot a node is scaled, so the mean is not safe.
+
+        The mean sits under the pivot of every node above average - on the
+        measured fleet that was three of eight - which would put their trigger in
+        the region where the nodes do not agree.
+        """
+        fleet = [(89, 187), (94, 149), (67, 159), (109, 191),
+                 (91, 169), (106, 186), (83, 183), (87, 140)]
+        ctx, cal = self.fitted(fleet)
+        enter_at, exit_at = cal.norm_suggested_thresholds()
+
+        sent = {c.args[0]: c.args for c in
+                ctx.interface.set_normalisation.call_args_list}
+        pivots = [self.corrected(sent[i][1], *sent[i][1:])
+                  for i in range(len(fleet))]
+        self.assertEqual(enter_at, max(pivots))
+        # every node triggers at or above its own pivot, so at unity gain
+        for p in pivots:
+            self.assertGreaterEqual(enter_at, p)
+        self.assertLess(sum(pivots) / len(pivots), enter_at,
+                        'the mean would be lower - that is the point')
+
+    def test_suggested_exit_at_stays_above_the_floor(self):
+        """An ExitAt at or below the floor means a pass that never ends."""
+        fleet = [(89, 187), (94, 149), (67, 159), (109, 191)]
+        ctx, cal = self.fitted(fleet)
+        enter_at, exit_at = cal.norm_suggested_thresholds()
+
+        sent = {c.args[0]: c.args for c in
+                ctx.interface.set_normalisation.call_args_list}
+        floors = [self.corrected(fleet[i][0], *sent[i][1:])
+                  for i in range(len(fleet))]
+        self.assertGreater(exit_at, max(floors))
+        self.assertLess(exit_at, enter_at)
+
+    def test_no_suggestion_without_a_fit(self):
+        _, _, cal = self.context(count=2)
+        self.assertIsNone(cal.norm_suggested_thresholds())
+
+    def test_applying_thresholds_writes_every_node(self):
+        fleet = [(89, 187), (94, 149), (67, 159), (109, 191)]
+        ctx, cal = self.fitted(fleet)
+        ctx.race.profile.enter_ats = json.dumps({'v': [0] * len(fleet)})
+        ctx.race.profile.exit_ats = json.dumps({'v': [0] * len(fleet)})
+        enter_at, exit_at = cal.norm_suggested_thresholds()
+        self.assertTrue(cal.norm_apply_thresholds(enter_at, exit_at))
+        for idx in range(len(fleet)):
+            self.assertEqual(
+                ctx.interface.set_enter_at_level.call_args_list[idx].args[:2],
+                (idx, enter_at))
+            self.assertEqual(
+                ctx.interface.set_exit_at_level.call_args_list[idx].args[:2],
+                (idx, exit_at))
+
+    def test_thresholds_out_of_order_are_refused(self):
+        fleet = [(89, 187), (109, 191)]
+        ctx, cal = self.fitted(fleet)
+        ctx.race.profile.enter_ats = json.dumps({'v': [0] * len(fleet)})
+        ctx.race.profile.exit_ats = json.dumps({'v': [0] * len(fleet)})
+        ctx.interface.set_enter_at_level.reset_mock()
+        for en, ex in ((120, 120), (120, 130), (0, 0), (300, 100)):
+            self.assertFalse(cal.norm_apply_thresholds(en, ex))
+        self.assertFalse(cal.norm_apply_thresholds('abc', 100))
+        ctx.interface.set_enter_at_level.assert_not_called()
+
     def test_the_pivot_sits_at_the_ratio_of_the_captured_range(self):
         import calibration as cal_mod
         _, _, cal = self.context()
