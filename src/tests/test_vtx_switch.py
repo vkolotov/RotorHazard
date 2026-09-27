@@ -177,12 +177,22 @@ class WizardSwitchTest(unittest.TestCase):
         with_bp._norm_note_capture_session()
         self.assertEqual(with_bp.norm_wizard_state()['channel'], 'R1')
 
+    def test_switching_still_moves_the_nodes_with_no_backpack(self):
+        """Half the button's job needs no plugin, so it still does that half."""
+        ctx, cal = context(count=1)
+        cal._norm_captured = {}
+        cal._norm_note_capture_session()
+        self.assertTrue(cal.norm_vtx_switch())
+        self.assertTrue(ctx.interface.set_frequency.called)
+        # and it says the quad was not commanded, so nobody assumes it moved
+        msg = str(ctx.rhui.emit_priority_message.call_args)
+        self.assertIn('by hand', msg)
+
     def test_capturing_still_works_with_no_backpack_at_all(self):
         """Manual normalisation must not start depending on a plugin being there."""
         ctx, cal = context(count=1)
         cal._norm_captured = {}
         cal._norm_note_capture_session()
-        self.assertFalse(cal.norm_vtx_switch())
         with patch('calibration.gevent.sleep'):
             ctx.interface.nodes[0].node_nadir_rssi = 12
             self.assertTrue(cal.norm_wizard_capture())

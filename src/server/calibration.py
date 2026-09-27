@@ -622,7 +622,7 @@ class Calibration:
             return {'state': 'choosing', 'level': None, 'channel': None,
                     'index': 0, 'total': 0, 'busy': busy,
                     'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                    'noise_ready': False, 'scope': None}
+                    'noise_ready': False, 'scope': None, 'sweeping': False}
 
         # Floor levelling stores a fit too, but it is a starting point with the
         #  sweep still ahead of it, so it must not park the wizard the way a
@@ -636,7 +636,8 @@ class Calibration:
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
                     'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                    'noise_ready': False, 'scope': self._norm_scope()}
+                    'noise_ready': False, 'scope': self._norm_scope(),
+                    'sweeping': False}
 
         # Noise alone is enough to level the floors: with no quad there is no
         #  second point and so no slope, but the offsets can still line every
@@ -659,7 +660,8 @@ class Calibration:
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
                 'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                'noise_ready': noise_ready, 'scope': self._norm_scope()}
+                'noise_ready': noise_ready, 'scope': self._norm_scope(),
+                'sweeping': bool(getattr(self, '_norm_pass_running', False))}
 
     def norm_captured_table(self):
         """Per-node view for the UI.
@@ -830,13 +832,16 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def norm_capture_pass(self):
-        """Capture one whole level across every channel, unattended.
+        """Capture the whole noise pass across every channel, unattended.
 
-        The operator sets the condition up once - quad off for the noise pass, at
-        the gate for the gate pass - and this walks the channels: tune the whole
-        fleet, settle, read, repeat. There is nothing for them to do between
-        channels, so there is no reason to make them click through sixteen
-        identical steps.
+        With the VTX off there is nothing for the operator to do between channels
+        - no quad to place, no channel to command - so the sweep walks them
+        itself: tune the whole fleet, settle, read, repeat.
+
+        The gate pass is deliberately not automated. Each channel there needs the
+        quad at the mark and the VTX moved onto that channel, which is the
+        operator's work, and a gate captured without them having confirmed the
+        quad is in place is a reading nobody checked.
 
         Stops at the first channel that will not capture, leaving the channels
         already taken in place, so a rejected reading names its channel instead of
@@ -848,6 +853,8 @@ class Calibration:
         if state['state'] != 'capturing' or getattr(self, '_norm_busy', False):
             return False
         level = state['level']
+        if level != 'noise':
+            return False
         remaining = [chan for lvl, chan in self._norm_steps()
                      if lvl == level
                      and '{0}:{1}'.format(lvl, chan) not in self._norm_captured]
@@ -1167,27 +1174,54 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def norm_vtx_switch(self):
-        """Command the quad onto the channel the next capture needs.
+        """Move the whole step onto its channel: the nodes and the quad.
 
-        Sends and says so; nothing here waits or checks. The operator can see
-        the quad's OSD, which is a better witness than anything the timer can
-        infer from its own receivers, so they decide when to capture.
+        One button, because they are one action. The nodes have to be on the
+        channel being measured or the capture reads the wrong frequency, and the
+        quad has to be on it or there is nothing to measure - doing one without
+        the other is never what the operator wants.
+
+        Nothing here waits or checks the quad. The operator can see its OSD, which
+        is a better witness than anything the timer can infer from its own
+        receivers, so they decide when to capture.
         """
         state = self.norm_wizard_state()
         label = state.get('channel')
         if not label:
-            # noise, applied and ready steps have no channel to command
+            # applied and ready steps have no channel to move to
+            return False
+        if getattr(self, '_norm_busy', False):
             return False
 
-        try:
-            self._vtx().command_channel(label)
-        except Exception as exc:  # noqa: BLE001 - reported, not raised
-            logger.warning('VTX channel command failed: %s', exc)
-            self._racecontext.rhui.emit_priority_message(str(exc))
-            return False
+        # The nodes first: this is also the retune the capture would otherwise do
+        #  for itself, so doing it here lets the receivers settle while the
+        #  operator is walking the quad out to the gate.
+        tuned = None
+        for band, chan, freq in self._norm_sweep_channels():
+            if '{0}{1}'.format(band, chan) == label:
+                self._norm_tune_all(band, chan, freq)
+                tuned = label
+                break
 
+        sent = False
+        if self.norm_vtx_available():
+            try:
+                self._vtx().command_channel(label)
+                sent = True
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                logger.warning('VTX channel command failed: %s', exc)
+                self._racecontext.rhui.emit_priority_message(
+                    'Nodes moved to {0}, but the quad was not told: {1}'.format(
+                        label, exc))
+                self._racecontext.rhui.emit_norm_wizard_state()
+                return False
+
+        if not tuned and not sent:
+            return False
         self._racecontext.rhui.emit_priority_message(
-            'Sent channel {0} to the quad'.format(label))
+            'Nodes and quad moved to {0}'.format(label) if sent
+            else 'Nodes moved to {0}; set the quad by hand'.format(label))
+        self._racecontext.rhui.emit_norm_wizard_state()
         return True
 
     @catchLogExceptionsWrapper

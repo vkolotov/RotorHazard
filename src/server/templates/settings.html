@@ -442,41 +442,38 @@
 		socket.on('norm_wizard_state', function (msg) {
 			var btn = $('#norm_wizard_action');
 			var prog = $('#norm_wizard_progress');
-			var vtx = $('#norm_vtx_switch');
 			if (window.eqTick) { clearInterval(window.eqTick); window.eqTick = null; }
 
-			/* Only offer the channel command where there is a channel to send
-			   and a backpack able to carry it. */
-			if (msg.vtx && msg.channel) {
-				vtx.text("{{ __('Switch to') }} " + msg.channel).show();
-			} else {
-				vtx.hide();
-			}
+			/* Each step shows only what it needs, because a button that does
+			   nothing useful here is a button that invites a wrong click.
+			   Everything is hidden first and then the step turns on its own. */
+			var all = ['#norm_scope_current', '#norm_scope_r', '#norm_scope_rl',
+			           '#norm_wizard_back', '#norm_vtx_switch', '#norm_wizard_action',
+			           '#norm_capture_pass', '#norm_cancel_pass',
+			           '#norm_apply_noise'];
+			$(all.join(', ')).hide().prop('disabled', false);
+			$('#norm_wizard_reset').show().prop('disabled', false);
+			prog.text('');
 
-			/* Noise alone levels the floors, so offer that the moment it is
-			   captured rather than only at the end of the sweep. */
-			$('#norm_apply_noise').toggle(!!msg.noise_ready);
-
-			/* The sweep retunes the whole fleet, so which channels it visits is
-			   settled before anything is armed. */
-			var choosing = msg.state == 'choosing';
-			$('#norm_scope_current, #norm_scope_r, #norm_scope_rl')
-				.toggle(choosing).prop('disabled', false);
-			$('#norm_wizard_action, #norm_wizard_back').toggle(!choosing);
-			if (choosing) { $('#norm_capture_pass').hide(); }
-			if (choosing) {
+			if (msg.state == 'choosing') {
+				$('#norm_scope_current, #norm_scope_r, #norm_scope_rl').show();
 				prog.text("{{ __('choose what to calibrate') }}");
 				$('#norm_wizard_reset').prop('disabled', true);
 				return;
 			}
 
-			/* Cancel is the one control that stays live during a sweep: a guard
-			   that disabled it would leave no way to stop. */
-			$('#norm_cancel_pass').toggle(!!msg.sweeping).prop('disabled', false);
+			if (msg.sweeping) {
+				/* Cancel is the only live control during a sweep: a guard that
+				   disabled it would leave no way to stop. */
+				$('#norm_cancel_pass').show();
+				$('#norm_wizard_reset').prop('disabled', true);
+				prog.text("{{ __('sweeping') }} " + msg.index + ' / ' + msg.total);
+				return;
+			}
 
 			if (msg.busy) {
 				var left = msg.settle || 5;
-				$('#norm_wizard_action, #norm_wizard_back, #norm_wizard_reset, #norm_vtx_switch, #norm_apply_noise, #norm_capture_pass').prop('disabled', true);
+				$('#norm_wizard_action').show().prop('disabled', true);
 				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
 				window.eqTick = setInterval(function () {
 					left -= 1;
@@ -486,33 +483,44 @@
 						clearInterval(window.eqTick); window.eqTick = null;
 					}
 				}, 1000);
+				return;
+			}
+
+			if (msg.state == 'applied') {
+				$('#norm_wizard_action').show()
+					.text("{{ __('Normalised') }}").data('act', '').prop('disabled', true);
+				return;
+			}
+
+			if (msg.state == 'ready') {
+				$('#norm_wizard_back').show();
+				$('#norm_wizard_action').show()
+					.text("{{ __('Apply') }}").data('act', 'apply');
+				prog.text("{{ __('all steps captured') }}");
+				return;
+			}
+
+			/* Capturing. The noise pass runs itself - the VTX is off, so there is
+			   no quad to place and no channel to command, and nothing for the
+			   operator to do between channels. The gate pass is one channel at a
+			   time: each needs the quad at the mark, which is their work. */
+			$('#norm_wizard_back').show().prop('disabled', msg.index === 0);
+			$('#norm_apply_noise').toggle(!!msg.noise_ready);
+			prog.text(msg.index + ' / ' + msg.total);
+
+			if (msg.level == 'noise') {
+				$('#norm_capture_pass').show()
+					.text("{{ __('Capture noise on every channel') }}");
+				prog.text("{{ __('VTX off') }} \u2014 " + msg.index + ' / ' + msg.total);
 			} else {
-				$('#norm_wizard_reset').prop('disabled', false);
-				vtx.prop('disabled', false);
-				$('#norm_apply_noise').prop('disabled', false);
-				if (msg.state == 'applied') {
-					btn.text("{{ __('Normalised') }}").data('act', '').prop('disabled', true);
-					prog.text('');
-					$('#norm_wizard_back').prop('disabled', true);
-					$('#norm_capture_pass').hide();
-				} else if (msg.state == 'ready') {
-					btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
-					prog.text("{{ __('all steps captured') }}");
-					$('#norm_wizard_back').prop('disabled', false);
-					$('#norm_capture_pass').hide();
-				} else {
-					/* The whole pass is the normal way through: the operator sets
-					   the quad up once and the sweep walks the channels. The
-					   single-channel button stays for repeating one reading. */
-					var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
-					btn.text("{{ __('Capture') }}: " + label).data('act', 'capture').prop('disabled', false);
-					var pass = msg.level == 'noise'
-						? "{{ __('Capture all: VTX off') }}"
-						: "{{ __('Capture all: quad at gate') }}";
-					$('#norm_capture_pass').text(pass).prop('disabled', false).show();
-					prog.text(msg.index + ' / ' + msg.total);
-					$('#norm_wizard_back').prop('disabled', msg.index === 0);
+				if (msg.vtx || msg.channel) {
+					$('#norm_vtx_switch').show()
+						.text("{{ __('Switch to') }} " + msg.channel);
 				}
+				$('#norm_wizard_action').show()
+					.text("{{ __('Capture') }}: " + msg.channel)
+					.data('act', 'capture');
+				prog.text("{{ __('quad at gate') }} \u2014 " + msg.index + ' / ' + msg.total);
 			}
 
 			if (msg.captured) {

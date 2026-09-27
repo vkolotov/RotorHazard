@@ -385,6 +385,41 @@ class NormalisationTest(unittest.TestCase):
         tuned = [c.args[1] for c in ctx.interface.set_frequency.call_args_list]
         self.assertEqual(sorted(set(tuned)), sorted(self.R_FREQS))
 
+    def test_the_gate_pass_is_not_automated(self):
+        """Each gate channel needs the quad at the mark, which is the operator's.
+
+        A gate captured without them having placed the quad is a reading nobody
+        checked, so there is no sweep-it-all button for that pass.
+        """
+        ctx, nodes, cal = self.context(count=3, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        for node in nodes:
+            node.node_nadir_rssi = 90
+            node.node_peak_rssi = 180
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_capture_pass())       # noise sweeps
+            self.assertEqual(cal.norm_wizard_state()['level'], 'high')
+            self.assertFalse(cal.norm_capture_pass())      # the gate does not
+        self.assertNotIn('high:R1', cal._norm_captured)
+
+    def test_switching_moves_the_nodes_as_well_as_the_quad(self):
+        """One button, because they are one action."""
+        ctx, nodes, cal = self.context(count=3, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        for node in nodes:
+            node.node_nadir_rssi = 90
+            node.node_peak_rssi = 180
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_capture_pass())   # through to the gate pass
+        state = cal.norm_wizard_state()
+        self.assertEqual((state['level'], state['channel']), ('high', 'R1'))
+
+        ctx.interface.set_frequency.reset_mock()
+        self.assertTrue(cal.norm_vtx_switch())
+        tuned = [c.args for c in ctx.interface.set_frequency.call_args_list]
+        self.assertEqual(sorted(a[0] for a in tuned), [0, 1, 2])
+        self.assertEqual(len({a[1] for a in tuned}), 1)
+
     def test_a_pass_can_be_cancelled_between_channels(self):
         """Stopping keeps what was captured, never a half-read channel."""
         ctx, nodes, cal = self.context(count=3, scope=None)
