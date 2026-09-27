@@ -114,6 +114,10 @@ class NormalisationTest(unittest.TestCase):
         Exactly equal is not reachable: the lower segment is a Q8 multiply, and
         the truncation differs per node. One count is well inside the noise the
         readings carry anyway.
+
+        They converge on the reference node's own floor, which leaves headroom
+        underneath: a signal below a node's floor still reads as a number rather
+        than clamping at zero.
         """
         fleet = [(18, 52), (22, 61), (15, 88), (20, 58),
                  (25, 95), (19, 90), (17, 70), (21, 80)]
@@ -131,13 +135,62 @@ class NormalisationTest(unittest.TestCase):
                 idx, pivot, offset, scale = call.args
                 floors.append(self.corrected(fleet[idx][0], pivot, offset, scale))
             self.assertLessEqual(max(floors) - min(floors), 1)
-            # and not on zero, which is the node's "no peak recorded" sentinel
-            self.assertGreater(min(floors), 0)
+            # on the reference node's floor: the one with the highest gate
+            ref_floor = max(fleet, key=lambda fg: fg[1])[0]
+            self.assertLessEqual(abs(min(floors) - ref_floor), 1)
+
+    def test_the_reference_node_keeps_its_own_curve(self):
+        """The node with the highest gate takes offset 0 and scale x1.00.
+
+        Its curve is then a pure translation end to end - in fact no change at
+        all - and every other node is bent onto it. Pinning the floors to a
+        small fixed value instead forced x2.5 to x5.2 across the fleet, which
+        amplified each node's own noise and clamped quiet signals to zero.
+        """
+        fleet = [(89, 187), (94, 149), (67, 159), (109, 191),
+                 (91, 169), (106, 186), (83, 183), (87, 140)]
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context(count=len(fleet))
+            cal._norm_captured = {'noise': [f for f, _ in fleet]}
+            for i, (_, h) in enumerate(fleet):
+                cal._norm_captured['high:R{0}'.format(i + 1)] = [
+                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_note_capture_session()
+            self.assertTrue(cal.norm_wizard_apply())
+
+            ref = max(range(len(fleet)), key=lambda i: fleet[i][1])
+            sent = {c.args[0]: c.args for c in
+                    ctx.interface.set_normalisation.call_args_list}
+            _, _, offset, scale = sent[ref]
+            self.assertEqual(offset, 0)
+            self.assertEqual(scale, 256)
+            # and no node is stretched anywhere near what a fixed floor forced
+            worst = max(sent[i][3] for i in range(len(fleet)))
+            self.assertLess(worst, 2 * 256)
+
+    def test_a_quiet_signal_does_not_clamp_to_zero(self):
+        """Below a node's floor there must still be headroom, not the clamp."""
+        fleet = [(89, 187), (94, 149), (67, 159), (109, 191)]
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.context(count=len(fleet))
+            cal._norm_captured = {'noise': [f for f, _ in fleet]}
+            for i, (_, h) in enumerate(fleet):
+                cal._norm_captured['high:R{0}'.format(i + 1)] = [
+                    h if j == i else None for j in range(len(fleet))]
+            cal._norm_note_capture_session()
+            self.assertTrue(cal.norm_wizard_apply())
+
+            sent = {c.args[0]: c.args for c in
+                    ctx.interface.set_normalisation.call_args_list}
+            for raw in (80, 100):
+                out = [self.corrected(raw, *sent[i][1:]) for i in range(len(fleet))]
+                self.assertTrue(all(v > 0 for v in out),
+                                'raw {0} clamped somewhere: {1}'.format(raw, out))
 
     def test_the_pivot_sits_at_the_ratio_of_the_captured_range(self):
         import calibration as cal_mod
         _, _, cal = self.context()
-        pivot, offset, scale = cal._norm_fit(20, 120, 120)
+        pivot, offset, scale = cal._norm_fit(20, 120, 120, 20)
         self.assertEqual(pivot, 20 + round((120 - 20) * cal_mod.NORM_PIVOT_RATIO))
         self.assertEqual(offset, 0)   # this node defines the target
         self.assertGreater(scale, 0)
@@ -147,7 +200,7 @@ class NormalisationTest(unittest.TestCase):
         import calibration as cal_mod
         _, _, cal = self.context()
         for floor, gate in ((18, 52), (15, 88), (25, 95), (22, 61)):
-            pivot, offset, scale = cal._norm_fit(floor, gate, 95)
+            pivot, offset, scale = cal._norm_fit(floor, gate, 95, 25)
             seq = [self.corrected(r, pivot, offset, scale)
                    for r in range(cal_mod.NORM_FULL_SCALE + 1)]
             self.assertEqual(seq, sorted(seq))

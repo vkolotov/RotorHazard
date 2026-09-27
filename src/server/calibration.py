@@ -38,11 +38,20 @@ logger = logging.getLogger(__name__)
 #  there reports where each node's PIT happens to fall, not fit quality.
 NORM_PIVOT_RATIO = 0.60
 
-# Where the levelled floors land, as a fraction of full scale. Small, but not
-#  zero: an idle node should still read alive, and rssi 0 is the node's own
-#  "no peak recorded" sentinel (`passPeak.rssi != 0`), so a floor there would
-#  make a genuine reading indistinguishable from a missing one.
-NORM_TARGET_FLOOR_FRACTION = 0.01
+# Where the levelled floors land: the reference node's own floor, carried
+#  through its own offset. The reference node is the one whose gate is highest,
+#  so it defines the gate target and takes offset 0 - and pinning the floors to
+#  it as well means it takes scale x1.00 too. Its curve is then a pure
+#  translation end to end, and every other node is bent onto it.
+#
+# The alternative - a small fixed target, near the bottom of the scale - was
+#  tried and rejected. The floor-to-pivot span is whatever the receiver reports,
+#  typically 40 to 60 counts, so dragging it down to 3 forces a gain of x2.5 to
+#  x5.2 across the fleet. That amplifies each node's own noise below the pivot,
+#  and it drives any signal below a node's floor to the clamp: at a low
+#  transmit power some nodes read a number while others read 0. Pinning to the
+#  reference node's floor keeps the worst gain under x2 and leaves headroom
+#  underneath, so a quiet signal still reads as a value.
 
 # What a node's reading can reach. The node pipeline is a byte wide, so this is
 #  a byte; a wider pipeline would raise it, and the fit follows the captures
@@ -253,19 +262,32 @@ class Calibration:
         """
         return NORM_FULL_SCALE
 
-    def _norm_target_floor(self):
-        """Where every node's levelled floor lands on the corrected scale."""
-        return max(1, int(round(self._norm_scale(0) * NORM_TARGET_FLOOR_FRACTION)))
+    def _norm_targets(self, levels):
+        """Where the fleet's gates and floors should land.
 
-    def _norm_fit(self, floor_raw, gate_raw, target_gate):
+        Both come from the reference node - the one reporting the highest gate.
+        It keeps its own readings, taking offset 0 and scale x1.00, and every
+        other node is translated and bent onto it. Offsetting the fleet down to
+        the weakest node instead would push its whole curve towards zero for no
+        gain in resolution.
+
+        :param levels: (floor_raw, gate_raw) per node, for participants only
+        :return: (target_gate, target_floor)
+        """
+        floor_raw, gate_raw = max(levels, key=lambda fg: fg[1])
+        # The reference node's own floor is already on target, since its offset
+        #  is zero by construction. Clamped above zero because rssi 0 is the
+        #  node's "no peak recorded" sentinel.
+        return gate_raw, max(1, floor_raw)
+
+    def _norm_fit(self, floor_raw, gate_raw, target_gate, target_floor):
         """One node's coefficients from its two captures.
 
-        `target_gate` is where the gate should land and is shared across the
-        fleet, so every node's gate reading comes out on the same value. Above
-        the pivot the offset alone applies, so that is a translation and nothing
-        more. Below it the scale carries floor-to-pivot onto
-        target_floor-to-pivot_target, which lands every node's floor on one
-        value too.
+        `target_gate` and `target_floor` are shared across the fleet, so every
+        node's gate comes out on one value and every node's floor on another.
+        Above the pivot the offset alone applies, so that is a translation and
+        nothing more. Below it the scale carries floor-to-pivot onto
+        target_floor-to-pivot_target.
 
         Returns (pivot, offset, scale) ready for the node: it computes
         `raw - offset` above the pivot and pivots the lower segment around the
@@ -280,7 +302,7 @@ class Calibration:
         pivot = max(pivot, floor_raw + 1)
         pivot_target = pivot - offset
         span = pivot - floor_raw
-        scale = int(round((pivot_target - self._norm_target_floor()) * 256.0 / span))
+        scale = int(round((pivot_target - target_floor) * 256.0 / span))
         scale = max(1, min(65535, scale))
         return pivot, offset, scale
 
@@ -892,12 +914,12 @@ class Calibration:
                 return False
             levels[idx] = (fl, hi)
 
-        # Every node's gate lands on the highest gate reading in the fleet, so
-        #  the strongest receiver keeps its own scale and the rest are
-        #  translated up to meet it. Offsetting down instead would push the
-        #  quietest node's whole curve towards zero for no gain in resolution.
-        target_gate = max(hi for _, hi in levels.values())
-        logger.info('Normalisation gate destination from captures: %d', target_gate)
+        # Both destinations come from the reference node - the one reporting the
+        #  highest gate - so it keeps its own curve untouched and every other
+        #  node is bent onto it.
+        target_gate, target_floor = self._norm_targets(list(levels.values()))
+        logger.info('Normalisation destinations from captures: gate=%d floor=%d',
+                    target_gate, target_floor)
 
         pivots, offsets, scales = [], [], []
         for idx in range(num):
@@ -908,7 +930,8 @@ class Calibration:
                 scales.append(NORM_UNITY_SLOPE)
                 continue
             fl, hi = levels[idx]
-            pivot, offset, scale = self._norm_fit(fl, hi, target_gate)
+            pivot, offset, scale = self._norm_fit(
+                fl, hi, target_gate, target_floor)
             pivots.append(pivot)
             offsets.append(offset)
             scales.append(scale)
