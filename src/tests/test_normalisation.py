@@ -25,6 +25,11 @@ migration = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(migration)
 
 
+def cal_mod_full_scale():
+    import calibration
+    return calibration.NORM_FULL_SCALE
+
+
 class NormalisationTest(unittest.TestCase):
     def context(self, count=1):
         nodes = []
@@ -292,6 +297,33 @@ class NormalisationTest(unittest.TestCase):
         idx, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
         self.assertEqual((idx, pivot, offset, scale), (0, 150, 50, 320))
         self.assertEqual(cal.norm_captured_table()[0]['scale'], 320)
+
+    def test_editing_the_pivot_sends_it_to_the_node(self):
+        ctx, _, cal = self.applied()
+        self.assertTrue(cal.norm_wizard_set_coefficient(0, 'pivot', 180))
+        idx, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
+        self.assertEqual((idx, pivot, offset, scale), (0, 180, 50, 300))
+        self.assertEqual(cal.norm_captured_table()[0]['pivot'], 180)
+
+    def test_raising_the_pivot_widens_the_unity_gain_region(self):
+        """The point of the field: more of the curve kept at gain 1."""
+        ctx, _, cal = self.applied(pivot=150, offset=50, scale=300)
+        # at 160 the old pivot already gave unity gain; at 140 it did not
+        self.assertTrue(cal.norm_wizard_set_coefficient(0, 'pivot', 120))
+        _, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
+        for raw in (130, 140, 149):
+            gain = (self.corrected(raw + 5, pivot, offset, scale)
+                    - self.corrected(raw - 5, pivot, offset, scale))
+            self.assertEqual(gain, 10)
+
+    def test_pivot_zero_is_refused(self):
+        """0 is the node's correction-off sentinel; Reset is how you get there."""
+        ctx, _, cal = self.applied()
+        self.assertFalse(cal.norm_wizard_set_coefficient(0, 'pivot', 0))
+        self.assertFalse(cal.norm_wizard_set_coefficient(
+            0, 'pivot', cal_mod_full_scale() + 1))
+        ctx.interface.set_normalisation.assert_not_called()
+        self.assertTrue(ctx.rhui.emit_priority_message.called)
 
     def test_an_offset_edit_moves_the_gate_by_what_was_typed(self):
         """The offset is in counts, so the curve must move by exactly that."""

@@ -559,26 +559,35 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def norm_wizard_set_coefficient(self, node_index, which, value):
-        """Set one node's offset or scale by hand and send it to the node.
+        """Set one node's pivot, offset or scale by hand and send it to the node.
 
-        The two an operator can usefully edit. The offset moves the whole curve
-        up or down - it is what decides where the gate lands, and it applies
-        alone above the pivot - while the scale is the Q8 gain below the pivot,
-        so 256 is x1.00 and leaves the lower segment straight through.
+        The offset moves the whole curve up or down - it is what decides where
+        the gate lands, and it applies alone above the pivot. The scale is the
+        Q8 gain below the pivot, so 256 is x1.00 and leaves the lower segment
+        straight through. The pivot is where the two meet: raise it and more of
+        the curve keeps unity gain, lower it and more of the curve is pulled
+        onto the common floor.
 
         Editing the offset keeps the scale as it is: the lower segment is
         anchored on the pivot, which the offset carries with it, so the shape
         below the pivot rides along instead of needing a second edit.
 
+        Editing the pivot leaves the scale alone too, which tilts the lower
+        segment rather than preserving where the floor lands - moving the pivot
+        changes the span the same gain has to cover. Re-deriving the scale here
+        would silently undo a scale the operator had just set by hand, so the
+        two stay independent and a pivot edit is followed by a scale edit when
+        the floor matters.
+
         There is deliberately no field for a gain above the pivot. That region
         is a pure translation by design, and the node has no coefficient for it.
 
         :param node_index: Zero-based node
-        :param which: 'offset' or 'scale'
-        :param value: The offset in counts, or the Q8 scale
+        :param which: 'pivot', 'offset' or 'scale'
+        :param value: The pivot or offset in counts, or the Q8 scale
         :return: True when the node took it
         """
-        if which not in ('offset', 'scale'):
+        if which not in ('pivot', 'offset', 'scale'):
             return False
         try:
             node_index = int(node_index)
@@ -602,6 +611,14 @@ class Calibration:
                 'Node {0}: offset must be between {1} and {2}'
                 .format(node_index + 1, -NORM_FULL_SCALE, NORM_FULL_SCALE))
             return False
+        # Pivot 0 is the node's "correction off" sentinel, so it is not a value
+        #  to type here - Reset is how a correction is removed. Above full scale
+        #  the pivot is unreachable and the lower segment would never fire.
+        if which == 'pivot' and not 1 <= value <= NORM_FULL_SCALE:
+            self._racecontext.rhui.emit_priority_message(
+                'Node {0}: pivot must be between 1 and {1}; use Reset to turn '
+                'the correction off'.format(node_index + 1, NORM_FULL_SCALE))
+            return False
         if getattr(self, '_norm_busy', False):
             return False
 
@@ -617,6 +634,8 @@ class Calibration:
 
         if which == 'offset':
             offsets[node_index] = value
+        elif which == 'pivot':
+            pivots[node_index] = pivot = value
         else:
             scales[node_index] = value
 

@@ -497,15 +497,15 @@
 					   edits. */
 					var lbl = r.mode == 'capture' ? "{{ __('Cal') }}" : "{{ __('Norm') }}";
 					$('#norm_lbl_' + i).text(lbl);
-					$.each({'a': r.noise, 'b': r.high, 'p': r.pivot},
-						function (k, v) {
-							var el = $('#norm_' + k + '_' + i);
-							var set = v !== null && v !== undefined && v !== 0;
-							el.text(set ? v : '\u2013');
-							el.toggleClass('norm-set', set);
-						});
+					$.each({'a': r.noise, 'b': r.high}, function (k, v) {
+						var el = $('#norm_' + k + '_' + i);
+						var set = v !== null && v !== undefined && v !== 0;
+						el.text(set ? v : '\u2013');
+						el.toggleClass('norm-set', set);
+					});
 
-					$.each({'offset': r.offset, 'scale': r.scale}, function (k, v) {
+					$.each({'pivot': r.pivot, 'offset': r.offset,
+					        'scale': r.scale}, function (k, v) {
 						var el = $('#norm_' + k + '_' + i);
 						/* Leave a field being typed in alone, or the next
 						   state push overwrites it mid-edit. */
@@ -2848,6 +2848,10 @@ input.norm-edit:disabled { opacity: 0.5; }
 					</div>
 
 					<div class="enter-exit-control">
+						<label for="norm_pivot_{{ node }}">{{ __('NormPivot') }}</label>
+						<input type="number" id="norm_pivot_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="pivot" min="1" max="255" step="1" title="{{ __('Where the offset-only region starts. Raise it to keep more of the curve at unity gain') }}">
+					</div>
+					<div class="enter-exit-control">
 						<label for="norm_offset_{{ node }}">{{ __('NormOffset') }}</label>
 						<input type="number" id="norm_offset_{{ node }}" class="norm-edit" data-node="{{ node }}" data-which="offset" min="-255" max="255" step="1" title="{{ __('Offset in counts. Moves the whole curve; above the pivot this is the only correction') }}">
 					</div>
@@ -2862,7 +2866,6 @@ input.norm-edit:disabled { opacity: 0.5; }
 						<span class="norm-lbl" id="norm_lbl_{{ node }}">{{ __('Cal') }}</span>
 						<span class="norm-cap" id="norm_a_{{ node }}" title="{{ __('Noise floor') }}">&ndash;</span>
 						<span class="norm-cap" id="norm_b_{{ node }}" title="{{ __('Gate') }}">&ndash;</span>
-						<span class="norm-cap" id="norm_p_{{ node }}" title="{{ __('Pivot (derived)') }}">&ndash;</span>
 					</div>
 				</div>
 				<table>
