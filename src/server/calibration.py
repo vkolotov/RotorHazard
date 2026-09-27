@@ -308,20 +308,27 @@ class Calibration:
         return out
 
     def _norm_steps(self):
-        """The capture sequence: noise, then every channel in scope at the gate.
+        """Two passes over every channel in scope: noise, then the gate.
 
-        Noise needs no quad and no channel change, so it is captured once. Each
-        channel then needs the quad at the gate with every node tuned to that
-        channel, and that is the whole sweep - the fit derives the pivot from the
-        floor and the gate, so the mid-power level the old three-point fit needed
-        is gone. It was also the least reproducible of the three, since it
-        depended on the operator judging a distance rather than using a mark.
+        A fit pairs a floor with a gate on the same channel, so the floor is
+        swept exactly as the gate is - a node's own noise floor moves by up to 11
+        counts across R band, which is the same order as the gate variation that
+        makes a per-channel fit necessary at all.
 
-        R band is 9 steps, R and L together 17.
+        Level is the outer loop so the quad is powered off once for the whole
+        noise pass and on once for the whole gate pass, rather than switched per
+        channel. The mid-power level the old three-point fit needed is gone: the
+        pivot is derived from the floor and the gate, and that level was the
+        least reproducible of the three anyway, depending on the operator judging
+        a distance rather than using a mark.
+
+        R band is 16 steps, R and L together 32.
         """
-        steps = [('noise', None)]
-        steps.extend(('high', '{0}{1}'.format(band, chan))
-                     for band, chan, _ in self._norm_sweep_channels())
+        channels = ['{0}{1}'.format(band, chan)
+                    for band, chan, _ in self._norm_sweep_channels()]
+        steps = []
+        for level in ('noise', 'high'):
+            steps.extend((level, label) for label in channels)
         return steps
 
     def _norm_scale(self, node_index):
@@ -478,13 +485,20 @@ class Calibration:
         self._norm_applied_captures = False
         self._norm_levelled_only = False
         self._norm_invalidate_session()
-        if not self._norm_sweep_channels():
+        channels = self._norm_sweep_channels()
+        if not channels:
             self._racecontext.rhui.emit_priority_message(
                 'No channel to calibrate: assign frequencies first')
             self._norm_scope_sel = None
             return False
+        # Park the whole fleet on the first channel straight away, so what the
+        #  operator sees on the nodes matches what the wizard is about to
+        #  measure. Waiting until the first gate capture would leave them on
+        #  their race channels through the noise step, and the noise floor has
+        #  to be read on the same channel as the gate it is paired with.
+        self._norm_tune_all(*channels[0])
         logger.info('Normalisation run started, scope=%s, %d channels',
-                    scope, len(self._norm_sweep_channels()))
+                    scope, len(channels))
         self._racecontext.rhui.emit_norm_wizard_state()
         return True
 
@@ -564,7 +578,11 @@ class Calibration:
         #  second point and so no slope, but the offsets can still line every
         #  node's floor up on one value. Offer that as soon as noise is in,
         #  since it needs nothing else and the rest of the sweep is long.
-        noise_ready = bool(captured.get('noise'))
+        # Floor levelling works off the noise pass, so offer it once that pass is
+        #  complete rather than after a single channel.
+        noise_ready = all('noise:{0}'.format(label) in captured
+                          for _, label in self._norm_steps()
+                          if label is not None) if captured else False
 
         for level, chan in steps:
             key = level if chan is None else '{0}:{1}'.format(level, chan)
@@ -602,24 +620,15 @@ class Calibration:
         if captured:
             mode = 'applied-capture' \
                 if getattr(self, '_norm_applied_captures', False) else 'capture'
-            noise = captured.get('noise', [None] * num)
-            rows = [{
-                'channel': labels[i], 'mode': mode,
-                'noise': noise[i],
-                'high': captured.get('high:{0}'.format(labels[i]), [None] * num)[i],
-            } for i in range(num)]
         else:
-            rows = [{
-                'channel': labels[i],
-                'mode': 'applied' if pivots[i] else 'empty',
-                'noise': None, 'high': None,
+            mode = None
+        return [{
+            'channel': labels[i],
+            'mode': mode or ('applied' if pivots[i] else 'empty'),
+            'pivot': pivots[i],
+            'offset': offsets[i],
+            'scale': scales[i],
             } for i in range(num)]
-
-        for i in range(num):
-            rows[i]['pivot'] = pivots[i]
-            rows[i]['offset'] = offsets[i]
-            rows[i]['scale'] = scales[i]
-        return rows
 
     @catchLogExceptionsWrapper
     def _norm_session(self):
@@ -682,6 +691,7 @@ class Calibration:
                 return False
 
             level = state['level']
+            # Both levels are swept per channel now, so every key carries one.
             key = level if state['channel'] is None \
                 else '{0}:{1}'.format(level, state['channel'])
             nodes = self._racecontext.interface.nodes
@@ -738,13 +748,23 @@ class Calibration:
         substitute for a two-point fit.
         """
         captured = getattr(self, '_norm_captured', None) or {}
-        noise = captured.get('noise')
-        if not noise or getattr(self, '_norm_busy', False):
+        if getattr(self, '_norm_busy', False):
             return False
 
         num = self._racecontext.race.num_nodes
+        # A floor belongs to a channel, so take each node's floor from the
+        #  channel it will be running on - the one it is about to be restored to.
+        saved = getattr(self, '_norm_saved_freqs', None) or self._norm_profile_freqs()
+        by_freq = {f: '{0}{1}'.format(b, c)
+                   for b, c, f in self._norm_sweep_channels()}
+        noise = [None] * num
+        for idx in range(num):
+            label = by_freq.get(saved['f'][idx])
+            row = captured.get('noise:{0}'.format(label)) if label else None
+            if row and idx < len(row):
+                noise[idx] = row[idx]
         taking_part = [i for i in self._norm_participants()
-                       if i < len(noise) and noise[i] is not None]
+                       if noise[i] is not None]
         if not taking_part:
             self._racecontext.rhui.emit_priority_message(
                 'No node has a noise reading to level')
@@ -955,9 +975,10 @@ class Calibration:
         :return: A message naming the node and what to do, or None
         """
         if level == 'noise' or channel is None:
-            return None  # noise stands alone; nothing to compare it against
+            return None  # the floor is the reference; nothing to compare it to
 
-        noise = (getattr(self, '_norm_captured', None) or {}).get('noise')
+        noise = (getattr(self, '_norm_captured', None) or {}).get(
+            'noise:{0}'.format(channel))
         if not noise:
             return None  # no floor to compare against yet
 
@@ -1140,7 +1161,6 @@ class Calibration:
 
         captured = self._norm_captured
         num = self._racecontext.race.num_nodes
-        noise = captured['noise']
         channels = self._norm_sweep_channels()
 
         taking_part = self._norm_participants()
@@ -1157,13 +1177,14 @@ class Calibration:
         for band, chan, freq in channels:
             label = '{0}{1}'.format(band, chan)
             gates = captured.get('high:{0}'.format(label))
-            if not gates:
+            floors = captured.get('noise:{0}'.format(label))
+            if not gates or not floors:
                 msg = 'No reading captured on {0}'.format(label)
                 logger.warning(msg)
                 self._racecontext.rhui.emit_priority_message(msg)
                 return False
             for idx in taking_part:
-                hi, fl = gates[idx], noise[idx]
+                hi, fl = gates[idx], floors[idx]
                 if hi is None or fl is None:
                     msg = 'Node {0} has no reading on {1}'.format(idx + 1, label)
                     logger.warning(msg)

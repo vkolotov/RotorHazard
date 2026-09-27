@@ -122,13 +122,14 @@ class WizardSwitchTest(unittest.TestCase):
         cal._norm_captured = {}
         cal._norm_note_capture_session()
 
-        self.assertFalse(cal.norm_vtx_switch())  # noise step: nothing to command
-        ctrl.send_set_vtx_config.assert_not_called()
+        # Every step carries a channel now, including the first of the noise
+        #  pass, so there is always something to command.
+        self.assertTrue(cal.norm_vtx_switch())
+        self.assertEqual(ctrl.send_set_vtx_config.call_args.args, ('R', 1))
 
-        for key, expected in (('noise', ('R', 1)),
-                              ('low:R1', ('R', 1)),
-                              ('high:R1', ('R', 2)),
-                              ('low:R2', ('R', 2))):
+        for key, expected in (('noise:R1', ('R', 2)),
+                              ('noise:R2', ('R', 1)),
+                              ('high:R1', ('R', 2))):
             cal._norm_captured[key] = [1, 1]
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_vtx_switch())
@@ -137,7 +138,7 @@ class WizardSwitchTest(unittest.TestCase):
     def test_nothing_is_sent_once_every_step_is_captured(self):
         ctrl = backpack()
         ctx, cal = context(count=1, controller=ctrl)
-        cal._norm_captured = {'noise': [10], 'low:R1': [50], 'high:R1': [90]}
+        cal._norm_captured = {'noise:R1': [10], 'high:R1': [90]}
         cal._norm_note_capture_session()
         self.assertEqual(cal.norm_wizard_state()['state'], 'ready')
         self.assertFalse(cal.norm_vtx_switch())
@@ -148,7 +149,7 @@ class WizardSwitchTest(unittest.TestCase):
         ctrl = backpack()
         ctrl.send_set_vtx_config.side_effect = RuntimeError('backpack is offline')
         ctx, cal = context(count=1, controller=ctrl)
-        cal._norm_captured = {'noise': [10]}
+        cal._norm_captured = {'noise:R1': [10]}
         cal._norm_note_capture_session()
         self.assertFalse(cal.norm_vtx_switch())
         self.assertTrue(ctx.rhui.emit_priority_message.called)
@@ -161,9 +162,10 @@ class WizardSwitchTest(unittest.TestCase):
         ctx, with_bp = context(count=1, controller=backpack())
         state = with_bp.norm_wizard_state()
         self.assertTrue(state['vtx'])
-        self.assertIsNone(state['channel'])  # noise step, so still no button
+        # the first step of the noise pass is already on a channel
+        self.assertEqual(state['channel'], 'R1')
 
-        with_bp._norm_captured = {'noise': [10]}
+        with_bp._norm_captured = {'noise:R1': [10]}
         with_bp._norm_note_capture_session()
         self.assertEqual(with_bp.norm_wizard_state()['channel'], 'R1')
 
@@ -176,7 +178,7 @@ class WizardSwitchTest(unittest.TestCase):
         with patch('calibration.gevent.sleep'):
             ctx.interface.nodes[0].node_nadir_rssi = 12
             self.assertTrue(cal.norm_wizard_capture())
-        self.assertEqual(cal._norm_captured['noise'], [12])
+        self.assertEqual(cal._norm_captured['noise:R1'], [12])
 
 
 if __name__ == '__main__':
