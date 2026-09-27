@@ -222,6 +222,15 @@ class NormalisationTest(unittest.TestCase):
         self.assertLess(sum(pivots) / len(pivots), enter_at,
                         'the mean would be lower - that is the point')
 
+    def test_suggested_exit_at_is_a_tenth_below_enter_at(self):
+        import calibration as cal_mod
+        fleet = [(89, 187), (94, 149), (67, 159), (109, 191)]
+        ctx, cal = self.fitted(fleet)
+        enter_at, exit_at = cal.norm_suggested_thresholds()
+        self.assertEqual(
+            exit_at,
+            enter_at - round(cal_mod.NORM_HYSTERESIS_FRACTION * enter_at))
+
     def test_suggested_exit_at_stays_above_the_floor(self):
         """An ExitAt at or below the floor means a pass that never ends."""
         fleet = [(89, 187), (94, 149), (67, 159), (109, 191)]

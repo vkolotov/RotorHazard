@@ -75,6 +75,12 @@ NORM_MIN_LEVEL_FRACTION = 30.0 / 255
 #  the value an operator types to undo a correction by hand.
 NORM_UNITY_SLOPE = 256
 
+# How far below EnterAt the suggested ExitAt sits, as a fraction of EnterAt.
+#  Measured static noise at the gate is under two counts peak to peak, so a
+#  tenth is ample hysteresis without being so wide that a fast pass fails to
+#  release before the next lap.
+NORM_HYSTERESIS_FRACTION = 0.10
+
 # What an operator may type into a scale field. A gain far outside this is a bad
 #  capture rather than a real receiver difference, and amplifies the node's own
 #  noise with the signal.
@@ -320,10 +326,11 @@ class Calibration:
         putting their trigger in the scaled region where the agreement the fit
         exists for does not hold.
 
-        ExitAt sits one tenth of the floor-to-gate span below it. Measured static
-        noise at the gate is under 2 counts peak to peak, so that is ample
-        hysteresis, and it leaves ExitAt well clear of the noise floor - a pass
-        whose exit threshold sat at or below the floor would start and never end.
+        ExitAt is a tenth below EnterAt. Measured static noise at the gate is
+        under 2 counts peak to peak, so that is ample hysteresis, and since the
+        floors now land on the reference node's own floor rather than near zero,
+        a tenth of EnterAt stays well above them - a pass whose exit threshold
+        sat at or below the floor would start and never end.
 
         :return: (enter_at, exit_at) or None
         """
@@ -336,30 +343,7 @@ class Calibration:
             return None
 
         enter_at = max(corrected)
-        # The corrected floor and gate bound the only range the nodes occupy
-        #  after a fit, so the span is measured between them rather than over
-        #  full scale: a tenth of full scale would put ExitAt under the floor.
-        coeffs = [(pivots[i], offsets[i], scales[i])
-                  for i in self._norm_participants() if pivots[i]]
-        # The floor is where the lower segment starts; taking raw 0 through the
-        #  fit gives it without needing the capture kept.
-        floor = min(self._corrected(0, c) for c in coeffs)
-        # The gate is where the fit put every node's gate capture, which is the
-        #  reference node's own gate - not what raw full scale maps to, which
-        #  overshoots it and would inflate the span.
-        captured = getattr(self, '_norm_captured', None) or {}
-        labels = self._norm_node_channels()
-        gates = [captured.get('high:{0}'.format(labels[i]), [None] * len(pivots))[i]
-                 for i in self._norm_participants() if pivots[i]]
-        gates = [g for g in gates if g is not None]
-        if gates:
-            gate = max(self._corrected(g, c) for g, c in zip(gates, coeffs))
-        else:
-            # Captures cleared, so fall back to the pivot's own share of the
-            #  range: the pivot sits at NORM_PIVOT_RATIO of floor-to-gate.
-            gate = floor + int(round((enter_at - floor) / NORM_PIVOT_RATIO))
-        span = max(1, gate - floor)
-        exit_at = max(floor + 1, enter_at - int(round(0.10 * span)))
+        exit_at = max(1, enter_at - int(round(NORM_HYSTERESIS_FRACTION * enter_at)))
         return enter_at, exit_at
 
     @catchLogExceptionsWrapper
