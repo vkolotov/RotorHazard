@@ -64,6 +64,9 @@ class NormalisationTest(unittest.TestCase):
         if scope:
             cal._norm_scope_sel = scope
             cal._norm_saved_freqs = cal._norm_profile_freqs()
+            # Frozen as norm_start freezes it: the sweep rewrites the profile, so
+            #  the channel list cannot be re-derived from it mid-run.
+            cal._norm_channels = cal._norm_sweep_channels()
         return ctx, nodes, cal
 
     @classmethod
@@ -341,6 +344,107 @@ class NormalisationTest(unittest.TestCase):
         self.assertEqual(len({a[1] for a in tuned}), 1)
         self.assertEqual(sorted(a[0] for a in tuned), [0, 1, 2])
 
+    def test_tuning_updates_the_profile_not_only_the_hardware(self):
+        """The page reads the channel from the profile, and so does the restore.
+
+        Writing only the hardware showed the operator their race assignment while
+        the nodes were elsewhere, and left the restore looking every node's fit up
+        under the wrong frequency.
+        """
+        ctx, _, cal = self.context(count=3, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        freqs = json.loads(ctx.race.profile.frequencies)
+        self.assertEqual(freqs['c'][:3], [1, 1, 1])
+        self.assertEqual(freqs['f'][:3], [self.R_FREQS[0]] * 3)
+        # and what the run has to put back is the assignment it started from
+        self.assertEqual(cal._norm_saved_freqs['f'][:3], list(self.R_FREQS[:3]))
+
+    def test_restoring_puts_the_profile_back(self):
+        fleet = [(89, 187), (94, 149), (67, 159)]
+        ctx, cal = self.fitted(fleet)
+        freqs = json.loads(ctx.race.profile.frequencies)
+        self.assertEqual(freqs['f'][:3], list(self.R_FREQS[:3]))
+        self.assertEqual(freqs['c'][:3], [1, 2, 3])
+
+    def test_a_pass_captures_every_channel_by_itself(self):
+        """One click per level: the operator sets the quad up once."""
+        ctx, nodes, cal = self.context(count=3, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        for node in nodes:
+            node.node_nadir_rssi = 90
+            node.node_peak_rssi = 180
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_capture_pass())
+        # the whole noise pass is in, and the gate pass is next
+        state = cal.norm_wizard_state()
+        self.assertEqual(state['level'], 'high')
+        self.assertEqual(state['channel'], 'R1')
+        self.assertEqual(sorted(cal._norm_captured),
+                         ['noise:R{0}'.format(i) for i in range(1, 9)])
+        # every channel was tuned, each to one frequency for the whole fleet
+        tuned = [c.args[1] for c in ctx.interface.set_frequency.call_args_list]
+        self.assertEqual(sorted(set(tuned)), sorted(self.R_FREQS))
+
+    def test_a_pass_can_be_cancelled_between_channels(self):
+        """Stopping keeps what was captured, never a half-read channel."""
+        ctx, nodes, cal = self.context(count=3, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        for node in nodes:
+            node.node_nadir_rssi = 90
+
+        # cancel from inside the loop, after the first channel is filed
+        real = cal.norm_wizard_capture
+        def capture_then_cancel():
+            ok = real()
+            cal.norm_cancel_pass()
+            return ok
+        with patch('calibration.gevent.sleep'):
+            with patch.object(cal, 'norm_wizard_capture', capture_then_cancel):
+                self.assertFalse(cal.norm_capture_pass())
+
+        self.assertIn('noise:R1', cal._norm_captured)
+        self.assertNotIn('noise:R3', cal._norm_captured)
+        # and the flag is cleared, so the next click runs again
+        self.assertFalse(getattr(cal, '_norm_pass_running', False))
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_capture_pass())
+        self.assertIn('noise:R8', cal._norm_captured)
+
+    def test_cancel_does_nothing_when_no_pass_is_running(self):
+        _, _, cal = self.context(count=2)
+        self.assertFalse(cal.norm_cancel_pass())
+
+    def test_retuning_waits_for_the_receivers_to_settle(self):
+        """A reading taken mid-switch is neither channel."""
+        import calibration as cal_mod
+        ctx, nodes, cal = self.context(count=2, scope=None)
+        for node in nodes:
+            node.node_nadir_rssi = 90
+        with patch('calibration.gevent.sleep') as slept:
+            self.assertTrue(cal.norm_start('R'))
+            self.assertTrue(cal.norm_wizard_capture())
+        waits = [c.args[0] for c in slept.call_args_list]
+        self.assertIn(cal_mod.NORM_RETUNE_SECONDS, waits)
+        self.assertIn(cal_mod.NORM_SETTLE_SECONDS, waits)
+        # the settle has to come after the retune wait, not before
+        self.assertLess(waits.index(cal_mod.NORM_RETUNE_SECONDS),
+                        len(waits) - 1)
+
+    def test_a_pass_stops_at_a_channel_that_will_not_capture(self):
+        """A rejected reading names its channel instead of being swept past."""
+        ctx, nodes, cal = self.context(count=2, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        for node in nodes:
+            node.node_nadir_rssi = 90
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_capture_pass())
+            # gate pass: a gate that never rises above the floor is refused
+            for node in nodes:
+                node.node_peak_rssi = 92
+            self.assertFalse(cal.norm_capture_pass())
+        self.assertEqual(cal.norm_wizard_state()['level'], 'high')
+        self.assertNotIn('high:R1', cal._norm_captured)
+
     def test_a_fit_is_stored_for_every_channel_swept(self):
         fleet = [(89, 187), (94, 149), (67, 159)]
         ctx, cal = self.fitted(fleet)
@@ -420,6 +524,9 @@ class NormalisationTest(unittest.TestCase):
         ctx, _, cal = self.context(count=2)
         ctx.race.profile.frequencies = json.dumps(
             {'b': ['R', 'R'], 'c': [1, 2], 'f': [5658, 0]})
+        # the run's assignment is re-read, as norm_start would take it
+        cal._norm_saved_freqs = None
+        cal._norm_channels = None
         self.assertEqual(cal._norm_participants(), [0])
         self.assertIsNone(cal._norm_node_channels()[1])
         # only the enabled node's channel raises a gate step

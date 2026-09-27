@@ -40,10 +40,18 @@ def context(count=2, controller=None):
                           interface=Mock(nodes=nodes), rhui=Mock(), rhdata=Mock(),
                           events=Mock(), vrx_manager=vrx)
     ctx.rhdata.get_profile.return_value = profile
+    def save(data):
+        for key, value in data.items():
+            if key != 'profile_id':
+                setattr(profile, key, json.dumps(value))
+        return profile
+    ctx.rhdata.alter_profile.side_effect = save
+    ctx.interface.set_normalisation.return_value = True
     cal = Calibration(ctx)
     # A run is armed only once a scope is chosen.
     cal._norm_scope_sel = 'current'
     cal._norm_saved_freqs = cal._norm_profile_freqs()
+    cal._norm_channels = cal._norm_sweep_channels()
     return ctx, cal
 
 

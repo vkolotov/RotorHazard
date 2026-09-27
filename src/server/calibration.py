@@ -106,6 +106,13 @@ NORM_BANDS = {
 #  within R band alone. R and L are 555 MHz apart, so across both it is worse.
 NORM_SCOPES = ('current', 'R', 'RL')
 
+# How long to wait after retuning before the extremes are even cleared. The
+#  RX5808's VCO and the filter behind it need time to settle on a new channel,
+#  and a reading taken during that is neither the old channel nor the new one.
+#  Separate from the settle below, which is about watching for a peak once the
+#  receiver is already stable.
+NORM_RETUNE_SECONDS = 2.0
+
 # How long to watch a node after clearing its extremes, before reading them.
 #  The clear has to happen after the operator has set the condition up, not
 #  before: a peak only ever rises, so extremes cleared at the end of the
@@ -222,9 +229,17 @@ class Calibration:
         firmware predates the protocol will ignore the coefficients. Neither
         can contribute a capture, so neither should be able to hold the wizard
         open or have a fit computed for it.
+
+        Taken from the run's own assignment while a run is under way: the sweep
+        parks every node on one channel, so the live profile would say they are
+        all on the same one and a node disabled by the operator would look active.
         """
-        freqs = json.loads(self._racecontext.race.profile.frequencies)
-        f = freqs.get('f') or []
+        saved = getattr(self, '_norm_saved_freqs', None)
+        if saved:
+            f = saved.get('f') or []
+        else:
+            freqs = json.loads(self._racecontext.race.profile.frequencies)
+            f = freqs.get('f') or []
         nodes = self._racecontext.interface.nodes
         out = []
         for idx in range(self._racecontext.race.num_nodes):
@@ -241,9 +256,17 @@ class Calibration:
 
         Nodes that are not participating get None, so they raise no step of
         their own and are skipped by the fit.
+
+        This is a node's own channel - the one it races on - so during a run it
+        comes from the saved assignment rather than from wherever the sweep has
+        currently parked the fleet.
         """
-        freqs = json.loads(self._racecontext.race.profile.frequencies)
-        bands, chans = freqs.get('b') or [], freqs.get('c') or []
+        saved = getattr(self, '_norm_saved_freqs', None)
+        if saved:
+            bands, chans = saved.get('b') or [], saved.get('c') or []
+        else:
+            freqs = json.loads(self._racecontext.race.profile.frequencies)
+            bands, chans = freqs.get('b') or [], freqs.get('c') or []
         taking_part = set(self._norm_participants())
         out = []
         for idx in range(self._racecontext.race.num_nodes):
@@ -264,6 +287,10 @@ class Calibration:
     def _norm_sweep_channels(self):
         """The channels this run calibrates, in capture order.
 
+        Frozen at run start. The sweep retunes the profile as it goes, so
+        re-deriving the list from it mid-run would collapse the 'current' scope
+        to whatever channel was last captured.
+
         Every node is tuned to the same channel for each capture, so a step
         yields a reading for every node on that one frequency. That is what makes
         the fit per [node, frequency]: each node ends up measured on every
@@ -275,6 +302,9 @@ class Calibration:
 
         :return: ((band, channel, frequency), ...)
         """
+        frozen = getattr(self, '_norm_channels', None)
+        if frozen:
+            return frozen
         scope = self._norm_scope()
         if scope == 'current':
             out, seen = [], set()
@@ -485,7 +515,9 @@ class Calibration:
         self._norm_applied_captures = False
         self._norm_levelled_only = False
         self._norm_invalidate_session()
+        self._norm_channels = None
         channels = self._norm_sweep_channels()
+        self._norm_channels = channels
         if not channels:
             self._racecontext.rhui.emit_priority_message(
                 'No channel to calibrate: assign frequencies first')
@@ -496,6 +528,10 @@ class Calibration:
         #  measure. Waiting until the first gate capture would leave them on
         #  their race channels through the noise step, and the noise floor has
         #  to be read on the same channel as the gate it is paired with.
+        # No settle wait here: this only parks the fleet so the page and the
+        #  hardware agree before the operator sets the quad up. Every capture
+        #  retunes and waits on its own, so blocking the click would buy nothing
+        #  and hold the socket handler for seconds.
         self._norm_tune_all(*channels[0])
         logger.info('Normalisation run started, scope=%s, %d channels',
                     scope, len(channels))
@@ -503,13 +539,35 @@ class Calibration:
         return True
 
     def _norm_tune_all(self, band, chan, freq):
-        """Put every participating node on one channel.
+        """Put every participating node on one channel, page included.
 
         Each capture reads every node on the same frequency, which is what makes
         the fit per [node, frequency] rather than per node.
+
+        The profile is written as well as the hardware. The page reads the band
+        and channel from the profile, so leaving it alone shows the operator the
+        race assignment while the nodes are somewhere else entirely - and the
+        restore path looks a node's fit up by its profile frequency, so a stale
+        profile would hand every node the wrong channel's fit.
         """
-        for idx in self._norm_participants():
+        taking_part = self._norm_participants()
+        profile = self._racecontext.race.profile
+        try:
+            freqs = json.loads(profile.frequencies)
+        except (TypeError, ValueError):
+            freqs = {}
+        for key in ('b', 'c', 'f'):
+            freqs.setdefault(key, [])
+            while len(freqs[key]) < self._racecontext.race.num_nodes:
+                freqs[key].append(None)
+        for idx in taking_part:
             self._racecontext.interface.set_frequency(idx, freq, band, chan)
+            freqs['b'][idx], freqs['c'][idx], freqs['f'][idx] = band, chan, freq
+        self._racecontext.race.profile = self._racecontext.rhdata.alter_profile({
+            'profile_id': profile.id,
+            'frequencies': freqs,
+            })
+        self._racecontext.rhui.emit_frequency_data()
         logger.info('Normalisation tuned every node to %s%s (%d MHz)',
                     band, chan, freq)
 
@@ -523,11 +581,17 @@ class Calibration:
         saved = getattr(self, '_norm_saved_freqs', None)
         if not saved:
             return False
+        profile = self._racecontext.race.profile
+        self._racecontext.race.profile = self._racecontext.rhdata.alter_profile({
+            'profile_id': profile.id,
+            'frequencies': {'b': saved['b'], 'c': saved['c'], 'f': saved['f']},
+            })
         for idx in range(self._racecontext.race.num_nodes):
             freq = saved['f'][idx]
             if freq:
                 self._racecontext.interface.set_frequency(
                     idx, freq, saved['b'][idx], saved['c'][idx])
+        self._racecontext.rhui.emit_frequency_data()
         logger.info('Normalisation restored the channel assignment')
         self._norm_saved_freqs = None
         return True
@@ -590,7 +654,8 @@ class Calibration:
                 return {'state': 'capturing', 'level': level, 'channel': chan,
                         'index': len(captured), 'total': len(steps),
                         'busy': busy, 'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                        'noise_ready': noise_ready, 'scope': self._norm_scope()}
+                        'noise_ready': noise_ready, 'scope': self._norm_scope(),
+                        'sweeping': bool(getattr(self, '_norm_pass_running', False))}
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
                 'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
@@ -637,12 +702,23 @@ class Calibration:
         Actual frequencies rather than channel labels, so a retune that keeps
         the label - or one the label cannot express - still counts as a
         different configuration.
+
+        While a run is under way that means the assignment the run started from,
+        not the live one: the sweep retunes the whole fleet for every step, so
+        fingerprinting what the nodes are tuned to right now would make every
+        capture invalidate itself. What must still be caught is the operator
+        changing the assignment underneath the run, and that changes the saved
+        copy's counterpart, not the sweep's own parking.
         """
-        try:
-            freqs = json.loads(self._racecontext.race.profile.frequencies)
-            tuning = tuple(freqs.get('f') or [])
-        except (TypeError, ValueError, AttributeError):
-            tuning = ()
+        saved = getattr(self, '_norm_saved_freqs', None)
+        if saved:
+            tuning = tuple(saved.get('f') or [])
+        else:
+            try:
+                freqs = json.loads(self._racecontext.race.profile.frequencies)
+                tuning = tuple(freqs.get('f') or [])
+            except (TypeError, ValueError, AttributeError):
+                tuning = ()
         return (getattr(self, '_norm_epoch', 0),
                 getattr(self._racecontext.race.profile, 'id', None),
                 tuning)
@@ -683,6 +759,10 @@ class Calibration:
                 for band, chan, freq in self._norm_sweep_channels():
                     if '{0}{1}'.format(band, chan) == state['channel']:
                         self._norm_tune_all(band, chan, freq)
+                        # Let the receivers settle on the new channel before the
+                        #  extremes are cleared, or the peak recorded is partly
+                        #  the old channel's.
+                        gevent.sleep(NORM_RETUNE_SECONDS)
                         break
             self.norm_reset_extremums()
             gevent.sleep(NORM_SETTLE_SECONDS)
@@ -735,6 +815,75 @@ class Calibration:
             self._racecontext.rhui.emit_norm_wizard_state()
 
     @catchLogExceptionsWrapper
+    def norm_cancel_pass(self):
+        """Ask a running pass to stop after the channel it is on.
+
+        The loop checks this between channels rather than being killed outright,
+        so it stops with every capture it has taken either filed or discarded -
+        never with a reading half-read off the nodes.
+        """
+        if not getattr(self, '_norm_pass_running', False):
+            return False
+        self._norm_pass_cancel = True
+        logger.info('Normalisation pass cancellation requested')
+        return True
+
+    @catchLogExceptionsWrapper
+    def norm_capture_pass(self):
+        """Capture one whole level across every channel, unattended.
+
+        The operator sets the condition up once - quad off for the noise pass, at
+        the gate for the gate pass - and this walks the channels: tune the whole
+        fleet, settle, read, repeat. There is nothing for them to do between
+        channels, so there is no reason to make them click through sixteen
+        identical steps.
+
+        Stops at the first channel that will not capture, leaving the channels
+        already taken in place, so a rejected reading names its channel instead of
+        being buried in a run that carried on regardless.
+
+        :return: True when the whole pass was captured
+        """
+        state = self.norm_wizard_state()
+        if state['state'] != 'capturing' or getattr(self, '_norm_busy', False):
+            return False
+        level = state['level']
+        remaining = [chan for lvl, chan in self._norm_steps()
+                     if lvl == level
+                     and '{0}:{1}'.format(lvl, chan) not in self._norm_captured]
+        if not remaining:
+            return False
+
+        logger.info('Normalisation %s pass: %d channels to capture',
+                    level, len(remaining))
+        self._norm_pass_running = True
+        self._norm_pass_cancel = False
+        try:
+            for _ in list(remaining):
+                if getattr(self, '_norm_pass_cancel', False):
+                    logger.info('Normalisation %s pass cancelled', level)
+                    self._racecontext.rhui.emit_priority_message(
+                        '{0} pass cancelled; captures so far are kept'.format(
+                            level.capitalize()))
+                    return False
+                step = self.norm_wizard_state()
+                if step['state'] != 'capturing' or step['level'] != level:
+                    break  # the pass finished, or something moved underneath us
+                if not self.norm_wizard_capture():
+                    logger.warning('Normalisation %s pass stopped at %s',
+                                   level, step['channel'])
+                    return False
+        finally:
+            self._norm_pass_running = False
+            self._norm_pass_cancel = False
+        done = self.norm_wizard_state()
+        self._racecontext.rhui.emit_priority_message(
+            '{0} pass captured on {1} channels'.format(
+                level.capitalize(), len(remaining))
+            if done['level'] != level or done['state'] != 'capturing'
+            else '{0} pass incomplete'.format(level.capitalize()))
+        return True
+
     def norm_wizard_apply_noise(self):
         """Level every node's noise floor, using only the noise capture.
 
@@ -1078,6 +1227,7 @@ class Calibration:
         #  so put the assignment back before anything else.
         self.norm_restore_frequencies()
         self._norm_scope_sel = None
+        self._norm_channels = None
         num = self._racecontext.race.num_nodes
         self._norm_busy = True
         try:

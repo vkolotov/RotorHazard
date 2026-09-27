@@ -1231,6 +1231,25 @@ def on_norm_start(data=None):
     if norm_wizard_mutation_allowed():
         RaceContext.calibration.norm_start((data or {}).get('scope'))
 
+@SOCKET_IO.on('norm_capture_pass')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_capture_pass(_data=None):
+    '''Capture a whole level across every channel in scope.'''
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_capture_pass()
+
+@SOCKET_IO.on('norm_cancel_pass')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_cancel_pass(_data=None):
+    '''Stop a running sweep after the channel it is on.
+
+    Deliberately not behind norm_wizard_mutation_allowed: stopping is always
+    allowed, and a guard that refused it would leave the sweep running.
+    '''
+    RaceContext.calibration.norm_cancel_pass()
+
 @SOCKET_IO.on('norm_wizard_capture')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper

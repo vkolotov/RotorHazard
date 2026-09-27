@@ -463,15 +463,20 @@
 			$('#norm_scope_current, #norm_scope_r, #norm_scope_rl')
 				.toggle(choosing).prop('disabled', false);
 			$('#norm_wizard_action, #norm_wizard_back').toggle(!choosing);
+			if (choosing) { $('#norm_capture_pass').hide(); }
 			if (choosing) {
 				prog.text("{{ __('choose what to calibrate') }}");
 				$('#norm_wizard_reset').prop('disabled', true);
 				return;
 			}
 
+			/* Cancel is the one control that stays live during a sweep: a guard
+			   that disabled it would leave no way to stop. */
+			$('#norm_cancel_pass').toggle(!!msg.sweeping).prop('disabled', false);
+
 			if (msg.busy) {
 				var left = msg.settle || 5;
-				$('#norm_wizard_action, #norm_wizard_back, #norm_wizard_reset, #norm_vtx_switch, #norm_apply_noise').prop('disabled', true);
+				$('#norm_wizard_action, #norm_wizard_back, #norm_wizard_reset, #norm_vtx_switch, #norm_apply_noise, #norm_capture_pass').prop('disabled', true);
 				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
 				window.eqTick = setInterval(function () {
 					left -= 1;
@@ -489,13 +494,22 @@
 					btn.text("{{ __('Normalised') }}").data('act', '').prop('disabled', true);
 					prog.text('');
 					$('#norm_wizard_back').prop('disabled', true);
+					$('#norm_capture_pass').hide();
 				} else if (msg.state == 'ready') {
 					btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
 					prog.text("{{ __('all steps captured') }}");
 					$('#norm_wizard_back').prop('disabled', false);
+					$('#norm_capture_pass').hide();
 				} else {
+					/* The whole pass is the normal way through: the operator sets
+					   the quad up once and the sweep walks the channels. The
+					   single-channel button stays for repeating one reading. */
 					var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
 					btn.text("{{ __('Capture') }}: " + label).data('act', 'capture').prop('disabled', false);
+					var pass = msg.level == 'noise'
+						? "{{ __('Capture all: VTX off') }}"
+						: "{{ __('Capture all: quad at gate') }}";
+					$('#norm_capture_pass').text(pass).prop('disabled', false).show();
 					prog.text(msg.index + ' / ' + msg.total);
 					$('#norm_wizard_back').prop('disabled', msg.index === 0);
 				}
@@ -556,6 +570,14 @@
 
 		$('#norm_wizard_action').click(function (event) {
 			socket.emit($(this).data('act') == 'apply' ? 'norm_wizard_apply' : 'norm_wizard_capture');
+		});
+
+		$('#norm_capture_pass').click(function (event) {
+			socket.emit('norm_capture_pass');
+		});
+
+		$('#norm_cancel_pass').click(function (event) {
+			socket.emit('norm_cancel_pass');
 		});
 
 		$('#norm_wizard_back').click(function (event) {
@@ -2941,6 +2963,8 @@
 					<button id="norm_apply_noise" class="alt-button" style="display: none;">{{ __('Level Floors') }}</button>
 					<button id="norm_vtx_switch" class="alt-button" style="display: none;"></button>
 					<button id="norm_wizard_action"></button>
+					<button id="norm_capture_pass"></button>
+					<button id="norm_cancel_pass" class="alt-button" style="display: none;">{{ __('Cancel') }}</button>
 					<span class="norm-progress" id="norm_wizard_progress"></span>
 				</div>
 			</li>
