@@ -127,12 +127,14 @@ class RssiIntegrationTest(unittest.TestCase):
             self.assertNotEqual(enter, [80 * 8])
 
     def test_race_save_writes_both_axis_attributes(self):
-        """Exercise the real writer, not a stand-in for it.
+        """Both halves of the axis are written, with the right arguments.
 
-        The history test supplies the attributes directly, so it passes even
-        when nothing writes them. This calls the code in RHRace that saves a
-        race and checks both halves of the axis are recorded with the
-        arguments the calibration API actually takes.
+        A static read of the save path, not an execution of it: it asserts
+        that RHRace writes adc_bits and eq_signature and calls _eq_signature
+        with the width, which is what a previous rebase silently dropped. It
+        cannot show that the save path reaches those writes or that the values
+        are right - the history test above covers the values, and the save
+        method itself is exercised on hardware.
         """
         import ast
         source = (SRC / 'server/RHRace.py').read_text()
