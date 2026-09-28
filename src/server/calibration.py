@@ -91,20 +91,28 @@ NORM_SLOPE_MAX = 2048     # x8.00
 #  here rather than read from the page's own table, because the sweep commands
 #  the channels itself and cannot depend on a browser being open.
 NORM_BANDS = {
-    'R': ((1, 5658), (2, 5695), (3, 5732), (4, 5769),
-          (5, 5806), (6, 5843), (7, 5880), (8, 5917)),
-    'L': ((1, 5362), (2, 5399), (3, 5436), (4, 5473),
-          (5, 5510), (6, 5547), (7, 5584), (8, 5621)),
+    'R': ((1, 5658), (2, 5695), (3, 5732), (4, 5769), (5, 5806), (6, 5843), (7, 5880), (8, 5917)),
+    'L': ((1, 5362), (2, 5399), (3, 5436), (4, 5473), (5, 5510), (6, 5547), (7, 5584), (8, 5621)),
+    'F': ((1, 5740), (2, 5760), (3, 5780), (4, 5800), (5, 5820), (6, 5840), (7, 5860), (8, 5880)),
+    'E': ((1, 5705), (2, 5685), (3, 5665), (4, 5645), (5, 5885), (6, 5905), (7, 5925), (8, 5945)),
+    'B': ((1, 5733), (2, 5752), (3, 5771), (4, 5790), (5, 5809), (6, 5828), (7, 5847), (8, 5866)),
+    'A': ((1, 5865), (2, 5845), (3, 5825), (4, 5805), (5, 5785), (6, 5765), (7, 5745), (8, 5725)),
+    'U': ((0, 5300), (1, 5325), (2, 5348), (3, 5366), (4, 5384), (5, 5402), (6, 5420), (7, 5438), (8, 5456), (9, 5985)),
+    'D': ((1, 5660), (2, 5695), (3, 5735), (4, 5770), (5, 5805), (6, 5880), (7, 5914), (8, 5839)),
+    'J': ((1, 5695), (2, 5770), (3, 5880)),
+    'S': ((1, 5660), (2, 5695), (3, 5735), (4, 5770), (5, 5805), (6, 5839), (7, 5878), (8, 5914)),
+    'O': ((1, 5669), (2, 5705), (3, 5768), (4, 5804), (5, 5839), (6, 5876), (7, 5912)),
+    'Q': ((1, 5677), (2, 5794), (3, 5902)),
     }
 
 # What a sweep may cover. 'current' keeps whatever the nodes are tuned to and
-#  calibrates only those channels; the others sweep a whole band, or both.
+#  calibrates only those channels; band selections can be combined.
 #
 # A fit is per [node, frequency]: a receiver's sensitivity differs channel to
 #  channel, so one fit reused across a band left a measurable error - calibrate
 #  on one channel and move the fleet and cross-node agreement degrades to 6-11%
 #  within R band alone. R and L are 555 MHz apart, so across both it is worse.
-NORM_SCOPES = ('current', 'R', 'RL')
+NORM_SCOPES = ('current', *NORM_BANDS)
 
 # How long to wait after retuning before the extremes are even cleared. The
 #  RX5808's VCO and the filter behind it need time to settle on a new channel,
@@ -279,10 +287,21 @@ class Calibration:
                        else 'Node {0}'.format(idx + 1))
         return out
 
+    @staticmethod
+    def _norm_scope_selection(scope):
+        """Validate selections, accepting older single-scope clients too."""
+        if isinstance(scope, str):
+            scope = ['R', 'L'] if scope == 'RL' else [scope]
+        if not isinstance(scope, (list, tuple)) or not scope:
+            return None
+        if any(not isinstance(item, str) or item not in NORM_SCOPES for item in scope):
+            return None
+        return tuple(item for item in NORM_SCOPES if item in scope)
+
     def _norm_scope(self):
-        """The scope the current run was started with, defaulting to current."""
+        """The selected scopes for this run, defaulting to current."""
         scope = getattr(self, '_norm_scope_sel', None)
-        return scope if scope in NORM_SCOPES else 'current'
+        return scope if self._norm_scope_selection(scope) else 'current'
 
     def _norm_sweep_channels(self):
         """The channels this run calibrates, in capture order.
@@ -305,23 +324,25 @@ class Calibration:
         frozen = getattr(self, '_norm_channels', None)
         if frozen:
             return frozen
-        scope = self._norm_scope()
-        if scope == 'current':
-            out, seen = [], set()
+        scopes = self._norm_scope_selection(self._norm_scope())
+        out, seen = [], set()
+
+        def add(band, chan, freq):
+            # Bands may share frequencies (R7 and F8, for example). One
+            # capture per frequency is enough, whatever labels selected it.
+            if band and chan is not None and freq and freq not in seen:
+                seen.add(freq)
+                out.append((band, chan, freq))
+
+        if 'current' in scopes:
             profile_freqs = self._norm_profile_freqs()
             for idx in self._norm_participants():
-                band = profile_freqs['b'][idx]
-                chan = profile_freqs['c'][idx]
-                freq = profile_freqs['f'][idx]
-                if not band or not chan or not freq:
-                    continue
-                if (band, chan) in seen:
-                    continue
-                seen.add((band, chan))
-                out.append((band, chan, freq))
-            return tuple(out)
-        bands = ('R',) if scope == 'R' else ('R', 'L')
-        return tuple((b, c, f) for b in bands for c, f in NORM_BANDS[b])
+                add(*(profile_freqs[key][idx] for key in ('b', 'c', 'f')))
+        for band in scopes:
+            if band != 'current':
+                for chan, freq in NORM_BANDS[band]:
+                    add(band, chan, freq)
+        return tuple(out)
 
     def _norm_profile_freqs(self):
         """The profile's band/channel/frequency lists, padded to the node count."""
@@ -494,10 +515,10 @@ class Calibration:
         it is the operator's race configuration and has to come back whether the
         run finishes, is reset, or is abandoned.
 
-        :param scope: One of NORM_SCOPES
+        :param scope: A selection of NORM_SCOPES, or a legacy single scope
         :return: True when the run was armed
         """
-        if scope not in NORM_SCOPES:
+        if not self._norm_scope_selection(scope):
             return False
         if getattr(self, '_norm_busy', False):
             return False
@@ -510,10 +531,9 @@ class Calibration:
         #  'current' scope: that scope still parks every node on one channel at a
         #  time, so the per-node assignment is just as disturbed.
         self._norm_saved_freqs = self._norm_profile_freqs()
-        self._norm_scope_sel = scope
+        self._norm_scope_sel = list(scope) if isinstance(scope, (list, tuple)) else scope
         self._norm_captured = {}
         self._norm_applied_captures = False
-        self._norm_levelled_only = False
         self._norm_invalidate_session()
         self._norm_channels = None
         channels = self._norm_sweep_channels()
@@ -622,13 +642,9 @@ class Calibration:
             return {'state': 'choosing', 'level': None, 'channel': None,
                     'index': 0, 'total': 0, 'busy': busy,
                     'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                    'noise_ready': False, 'scope': None, 'sweeping': False}
+                    'scope': None, 'sweeping': False}
 
-        # Floor levelling stores a fit too, but it is a starting point with the
-        #  sweep still ahead of it, so it must not park the wizard the way a
-        #  finished calibration does.
-        applied = any(self._norm_stored('norm_pivots', 0)) \
-            and not getattr(self, '_norm_levelled_only', False)
+        applied = any(self._norm_stored('norm_pivots', 0))
         if applied and (not captured or getattr(self, '_norm_applied_captures', False)):
             # already calibrated - do not arm the first step, so a stray click
             #  cannot start overwriting a good calibration. The captures behind
@@ -636,18 +652,8 @@ class Calibration:
             return {'state': 'applied', 'level': None, 'channel': None,
                     'index': 0, 'total': len(steps), 'busy': busy,
                     'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                    'noise_ready': False, 'scope': self._norm_scope(),
+                    'scope': self._norm_scope(),
                     'sweeping': False}
-
-        # Noise alone is enough to level the floors: with no quad there is no
-        #  second point and so no slope, but the offsets can still line every
-        #  node's floor up on one value. Offer that as soon as noise is in,
-        #  since it needs nothing else and the rest of the sweep is long.
-        # Floor levelling works off the noise pass, so offer it once that pass is
-        #  complete rather than after a single channel.
-        noise_ready = all('noise:{0}'.format(label) in captured
-                          for _, label in self._norm_steps()
-                          if label is not None) if captured else False
 
         for level, chan in steps:
             key = level if chan is None else '{0}:{1}'.format(level, chan)
@@ -655,13 +661,26 @@ class Calibration:
                 return {'state': 'capturing', 'level': level, 'channel': chan,
                         'index': len(captured), 'total': len(steps),
                         'busy': busy, 'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                        'noise_ready': noise_ready, 'scope': self._norm_scope(),
+                        'scope': self._norm_scope(),
                         'sweeping': bool(getattr(self, '_norm_pass_running', False))}
         return {'state': 'ready', 'level': None, 'channel': None,
                 'index': len(steps), 'total': len(steps), 'busy': busy,
                 'settle': NORM_SETTLE_SECONDS, 'vtx': vtx,
-                'noise_ready': noise_ready, 'scope': self._norm_scope(),
+                'scope': self._norm_scope(),
                 'sweeping': bool(getattr(self, '_norm_pass_running', False))}
+
+    def norm_normalised_channels(self):
+        """Channel labels from persisted fits, including after a server restart."""
+        channels = list(self._norm_sweep_channels())
+        channels.extend((band, chan, freq) for band, rows in NORM_BANDS.items()
+                        for chan, freq in rows)
+        labels, seen = [], set()
+        for band, chan, freq in channels:
+            if freq not in seen and any(self._norm_fit_for(idx, freq)
+                                        for idx in range(self._racecontext.race.num_nodes)):
+                labels.append('{0}{1}'.format(band, chan))
+                seen.add(freq)
+        return labels
 
     def norm_captured_table(self):
         """Per-node view for the UI.
@@ -883,109 +902,15 @@ class Calibration:
         finally:
             self._norm_pass_running = False
             self._norm_pass_cancel = False
+            # Capture updates are sent while the pass is still running. Publish
+            # the idle state too, so the page can offer HIGH capture or retry.
+            self._racecontext.rhui.emit_norm_wizard_state()
         done = self.norm_wizard_state()
         self._racecontext.rhui.emit_priority_message(
             '{0} pass captured on {1} channels'.format(
                 level.capitalize(), len(remaining))
             if done['level'] != level or done['state'] != 'capturing'
             else '{0} pass incomplete'.format(level.capitalize()))
-        return True
-
-    def norm_wizard_apply_noise(self):
-        """Level every node's noise floor, using only the noise capture.
-
-        With no quad in the air there is one measured point per node, which is
-        not enough for a slope - so the scales stay at unity and the offsets do
-        the work: the correction becomes plain subtraction that puts every
-        floor on the same value. Nodes then sit at a common idle level without
-        anyone having to fly the calibration pass.
-
-        A later full sweep overwrites this; it is a starting point, not a
-        substitute for a two-point fit.
-        """
-        captured = getattr(self, '_norm_captured', None) or {}
-        if getattr(self, '_norm_busy', False):
-            return False
-
-        num = self._racecontext.race.num_nodes
-        # A floor belongs to a channel, so take each node's floor from the
-        #  channel it will be running on - the one it is about to be restored to.
-        saved = getattr(self, '_norm_saved_freqs', None) or self._norm_profile_freqs()
-        by_freq = {f: '{0}{1}'.format(b, c)
-                   for b, c, f in self._norm_sweep_channels()}
-        noise = [None] * num
-        for idx in range(num):
-            label = by_freq.get(saved['f'][idx])
-            row = captured.get('noise:{0}'.format(label)) if label else None
-            if row and idx < len(row):
-                noise[idx] = row[idx]
-        taking_part = [i for i in self._norm_participants()
-                       if noise[i] is not None]
-        if not taking_part:
-            self._racecontext.rhui.emit_priority_message(
-                'No node has a noise reading to level')
-            return False
-
-        # Land every floor on the quietest node's own floor, so the correction
-        #  only ever subtracts. Lifting a node instead would push its whole
-        #  range towards the ceiling for no gain in resolution.
-        target = min(noise[i] for i in taking_part)
-
-        pivots = self._norm_stored('norm_pivots', 0)
-        offsets = self._norm_stored('norm_offsets', 0)
-        scales = self._norm_stored('norm_scales', NORM_UNITY_SLOPE)
-
-        for idx in range(num):
-            if idx not in taking_part:
-                continue
-            # Pivot 1 rather than 0: zero disables the correction outright, and
-            #  every reading is at or above 1, so the upper segment is the one
-            #  in use and the lower one never fires. That upper segment is the
-            #  offset alone, which is exactly the correction one point supports.
-            pivots[idx] = 1
-            offsets[idx] = noise[idx] - target
-            scales[idx] = NORM_UNITY_SLOPE
-
-        self._norm_busy = True
-        failed = []
-        try:
-            self._racecontext.rhui.emit_norm_wizard_state()
-            for idx in taking_part:
-                if not self._racecontext.interface.set_normalisation(
-                        idx, pivots[idx], offsets[idx], scales[idx]):
-                    failed.append(idx + 1)
-            if not failed:
-                self.norm_reset_extremums()
-        finally:
-            self._norm_busy = False
-
-        if failed:
-            self._norm_unresolved = list(failed)
-            msg = ('Noise levelling was not accepted by node(s) {0}; '
-                   'their correction is unknown - retry before racing').format(
-                       ', '.join(str(n) for n in failed))
-            logger.warning(msg)
-            self._racecontext.rhui.emit_priority_message(msg)
-            self._racecontext.rhui.emit_norm_wizard_state()
-            return False
-
-        self._norm_unresolved = []
-        self._norm_store(pivots, offsets, scales)
-        # Every reading the nodes give from here on is corrected, so nothing
-        #  captured before this point can be compared with anything captured
-        #  after it - the two sit on different axes, and a fit across the join
-        #  measures the levelling rather than the receivers. Start the captures
-        #  over against the levelled nodes.
-        self._norm_captured = {}
-        self._norm_invalidate_session()
-        # Deliberately not _norm_applied_captures: the sweep is not finished, and
-        #  marking it applied would park the wizard and refuse the real fit.
-        self._norm_levelled_only = True
-        self._racecontext.rhui.emit_norm_wizard_state()
-        logger.info('Noise floors levelled to %d: offsets=%s',
-                    target, [noise[i] - target for i in taking_part])
-        self._racecontext.rhui.emit_priority_message(
-            'Noise floors levelled on {0} nodes'.format(len(taking_part)))
         return True
 
     @catchLogExceptionsWrapper
@@ -1203,8 +1128,9 @@ class Calibration:
                 tuned = label
                 break
 
+        from vtx_control import VTX_BANDS
         sent = False
-        if self.norm_vtx_available():
+        if label[0] in VTX_BANDS and self.norm_vtx_available():
             try:
                 self._vtx().command_channel(label)
                 sent = True
@@ -1226,14 +1152,19 @@ class Calibration:
 
     @catchLogExceptionsWrapper
     def norm_wizard_back(self):
-        """Drop the most recent capture and return to that step."""
+        """Return one HIGH channel, or restart the automated noise pass."""
         captured = getattr(self, '_norm_captured', None) or {}
         if not captured:
             return False
         order = [l if c is None else '{0}:{1}'.format(l, c)
                  for l, c in self._norm_steps()]
         last = [k for k in order if k in captured][-1]
-        del captured[last]
+        if last.startswith('noise:'):
+            # Noise is one automated action in the UI. Returning to it must
+            # re-arm the whole pass, rather than just its final channel.
+            captured.clear()
+        else:
+            del captured[last]
         # the set no longer matches the fit that was applied from it
         self._norm_applied_captures = False
         # Cancel a capture still settling, then re-stamp what remains: the
@@ -1255,7 +1186,6 @@ class Calibration:
         """
         self._norm_captured = {}
         self._norm_applied_captures = False
-        self._norm_levelled_only = False
         self._norm_invalidate_session()
         # A run that is reset mid-sweep has left the fleet on a capture channel,
         #  so put the assignment back before anything else.
@@ -1462,7 +1392,6 @@ class Calibration:
         #  the channel it lands on.
         self.norm_restore_frequencies()
         self._norm_applied_captures = True
-        self._norm_levelled_only = False
         self._racecontext.rhui.emit_norm_wizard_state()
         logger.info('Normalisation applied: pivots=%s offsets=%s scales=%s',
                     pivots, offsets, scales)

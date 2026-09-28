@@ -1229,7 +1229,8 @@ def norm_wizard_mutation_allowed():
 def on_norm_start(data=None):
     '''Begin a calibration run at the chosen scope.'''
     if norm_wizard_mutation_allowed():
-        RaceContext.calibration.norm_start((data or {}).get('scope'))
+        if not RaceContext.calibration.norm_start((data or {}).get('scope')):
+            RaceContext.rhui.emit_norm_wizard_state()
 
 @SOCKET_IO.on('norm_capture_pass')
 @requires_socketio_auth
@@ -1281,14 +1282,6 @@ def on_norm_wizard_apply(_data=None):
     '''Fit and apply the captured calibration.'''
     if norm_wizard_mutation_allowed():
         RaceContext.calibration.norm_wizard_apply()
-
-@SOCKET_IO.on('norm_wizard_apply_noise')
-@requires_socketio_auth
-@catchLogExcWithDBWrapper
-def on_norm_wizard_apply_noise(_data=None):
-    '''Level the noise floors from the noise capture alone.'''
-    if norm_wizard_mutation_allowed():
-        RaceContext.calibration.norm_wizard_apply_noise()
 
 @SOCKET_IO.on('norm_wizard_set_coefficient')
 @requires_socketio_auth
