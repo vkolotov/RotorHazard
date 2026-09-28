@@ -959,8 +959,7 @@ def on_load_data(data):
             RaceContext.rhui.emit_node_tuning(nobroadcast=True)
         elif load_type == 'enter_and_exit_at_levels':
             RaceContext.rhui.emit_enter_and_exit_at_levels(nobroadcast=True)
-            RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
-
+            RaceContext.rhui.emit_norm_wizard_state(nobroadcast=True)
             RaceContext.rhui.emit_rssi_resolution_state(nobroadcast=True)
         elif load_type == 'start_thresh_lower_amount':
             RaceContext.rhui.emit_start_thresh_lower_amount(nobroadcast=True)
@@ -1068,6 +1067,7 @@ def on_set_frequency(data):
     RaceContext.race.profile = profile
 
     RaceContext.interface.set_frequency(node_index, frequency, band, channel)
+    RaceContext.calibration.norm_apply_for_frequency(node_index, frequency)
 
     RaceContext.race.clear_results()
 
@@ -1161,6 +1161,7 @@ def restore_node_frequency(node_index):
     band = profile_freqs["b"][node_index]
     channel = profile_freqs["c"][node_index]
     RaceContext.interface.set_frequency(node_index, freq, band, channel)
+    RaceContext.calibration.norm_apply_for_frequency(node_index, freq)
     logger.info('Frequency restored: Node {0} Frequency {1}'.format(node_index+1, freq))
 
 @SOCKET_IO.on('set_enter_at_level')
@@ -1206,7 +1207,7 @@ def on_set_language(data):
     '''Set interface language.'''
     RaceContext.serverconfig.set_item('UI', 'currentLanguage', data['language'])
 
-def eq_wizard_mutation_allowed():
+def norm_wizard_mutation_allowed():
     '''Whether the wizard may touch the nodes right now.
 
     Capturing resets peak/nadir tracking and applying changes the RSSI axis
@@ -1217,48 +1218,107 @@ def eq_wizard_mutation_allowed():
     if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE):
         RaceContext.rhui.emit_priority_message(
             __('Save or discard the current race before calibrating.'), False)
-        RaceContext.rhui.emit_eq_wizard_state()
+        RaceContext.rhui.emit_norm_wizard_state()
         return False
     return True
 
-@SOCKET_IO.on('eq_wizard_capture')
+@SOCKET_IO.on('norm_start')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_capture(_data=None):
+def on_norm_start(data=None):
+    '''Begin a calibration run at the chosen scope.'''
+    if norm_wizard_mutation_allowed():
+        if not RaceContext.calibration.norm_start((data or {}).get('scope')):
+            RaceContext.rhui.emit_norm_wizard_state()
+
+@SOCKET_IO.on('norm_capture_pass')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_capture_pass(_data=None):
+    '''Capture a whole level across every channel in scope.'''
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_capture_pass()
+
+@SOCKET_IO.on('norm_cancel_pass')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_cancel_pass(_data=None):
+    '''Stop a running sweep after the channel it is on.
+
+    Deliberately not behind norm_wizard_mutation_allowed: stopping is always
+    allowed, and a guard that refused it would leave the sweep running.
+    '''
+    RaceContext.calibration.norm_cancel_pass()
+
+@SOCKET_IO.on('norm_wizard_capture')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_wizard_capture(_data=None):
     '''Capture the wizard's next step.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_capture()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_capture()
 
-@SOCKET_IO.on('eq_wizard_back')
+@SOCKET_IO.on('norm_wizard_back')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_back(_data=None):
+def on_norm_wizard_back(_data=None):
     '''Discard the last captured step.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_back()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_back()
 
-@SOCKET_IO.on('eq_wizard_reset')
+@SOCKET_IO.on('norm_wizard_reset')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_reset(_data=None):
+def on_norm_wizard_reset(_data=None):
     '''Clear the calibration and start again.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_reset()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_reset()
 
-@SOCKET_IO.on('eq_wizard_apply')
+@SOCKET_IO.on('norm_wizard_apply')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_apply(_data=None):
+def on_norm_wizard_apply(_data=None):
     '''Fit and apply the captured calibration.'''
-    if eq_wizard_mutation_allowed():
-        RaceContext.calibration.eq_wizard_apply()
+    if norm_wizard_mutation_allowed():
+        RaceContext.calibration.norm_wizard_apply()
 
-@SOCKET_IO.on('eq_wizard_query')
+@SOCKET_IO.on('norm_wizard_set_coefficient')
 @requires_socketio_auth
 @catchLogExcWithDBWrapper
-def on_eq_wizard_query(_data=None):
+def on_norm_wizard_set_coefficient(data=None):
+    '''Set one node's offset or scale by hand.'''
+    if norm_wizard_mutation_allowed():
+        data = data or {}
+        RaceContext.calibration.norm_wizard_set_coefficient(
+            data.get('node'), data.get('which'), data.get('value'))
+
+@SOCKET_IO.on('norm_vtx_switch')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_vtx_switch(_data=None):
+    '''Command the quad onto the channel the next capture needs.
+
+    Touches no node state, so unlike the capture steps this is allowed while a
+    race is loaded: it only sends a channel out over the backpack.
+    '''
+    RaceContext.calibration.norm_vtx_switch()
+
+@SOCKET_IO.on('norm_apply_thresholds')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_apply_thresholds(data=None):
+    '''Write one EnterAt/ExitAt pair to every node.'''
+    if norm_wizard_mutation_allowed():
+        data = data or {}
+        RaceContext.calibration.norm_apply_thresholds(
+            data.get('enter_at'), data.get('exit_at'))
+
+@SOCKET_IO.on('norm_wizard_query')
+@requires_socketio_auth
+@catchLogExcWithDBWrapper
+def on_norm_wizard_query(_data=None):
     '''Report the wizard position to the asking client.'''
-    RaceContext.rhui.emit_eq_wizard_state(nobroadcast=True)
+    RaceContext.rhui.emit_norm_wizard_state(nobroadcast=True)
 
 @SOCKET_IO.on('cap_enter_at_btn')
 @requires_socketio_auth
@@ -1614,6 +1674,7 @@ def on_set_profile(data, emit_vals=True):
                                   'enter_ats': enter_ats_loaded, 'exit_ats': exit_ats_loaded})
 
         RaceContext.race.profile = profile
+        previous_axis = RaceContext.calibration._stored_scale_id(profile)
         Events.trigger(Evt.PROFILE_SET, {
             'profile_id': profile_val,
             })
@@ -1631,14 +1692,17 @@ def on_set_profile(data, emit_vals=True):
         full_res = RaceContext.serverconfig.get_item('GENERAL', 'FULL_RSSI_RESOLUTION')
         for idx in range(RaceContext.race.num_nodes):
             RaceContext.interface.set_adc_resolution(idx, full_res)
-        # Equalisation before thresholds: a threshold is compared against the
-        #  corrected reading, so the correction has to be in force before the
-        #  axis it belongs to is known.
-        RaceContext.calibration.hardware_set_all_equalisation()
+        # A saved fit measured at another ADC width cannot be sent to the nodes.
+        if not RaceContext.calibration._norm_resolution_matches():
+            num = RaceContext.race.num_nodes
+            RaceContext.calibration._norm_store(
+                [0] * num, [0] * num, [256] * num, {})
+        RaceContext.calibration.hardware_set_all_normalisation()
         # A profile that was not open when the width last changed still holds
         #  thresholds from the old axis. Convert it now; a profile already on
         #  this axis is left alone.
-        converted = RaceContext.calibration.convert_thresholds_to_scale()
+        converted = RaceContext.calibration.convert_thresholds_to_scale(
+            from_axis=previous_axis)
         if converted and converted[0] is not None:
             enter_ats, exit_ats = converted
         else:
@@ -2776,39 +2840,38 @@ def apply_rssi_resolution(full_resolution):
     scale. Nothing is rewritten - the operator re-runs calibration - but they
     are told plainly rather than left to discover it mid-race.
     """
-    applied = 0
-    refused = []
-    for idx in range(RaceContext.race.num_nodes):
-        node = RaceContext.interface.nodes[idx]
-        if node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
+    nodes = RaceContext.interface.nodes[:RaceContext.race.num_nodes]
+    supported = [(node.api_level >= 38 and
+                  getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi())
+                 for node in nodes]
+    if full_resolution and not all(supported):
+        RaceContext.rhui.emit_priority_message(
+            __('High RSSI resolution requires API 38 STM32 firmware on every node.'))
+        return False
+    changed = []
+    for idx, enabled in enumerate(supported):
+        if enabled:
             if RaceContext.interface.set_adc_resolution(idx, full_resolution):
-                applied += 1
+                changed.append(idx)
             else:
-                refused.append(idx + 1)
-
-    if refused:
-        msg = __("RSSI resolution was not confirmed by node(s) {0}; they are "
-                 "still on the previous width").format(
-                     ', '.join(str(n) for n in refused))
-        logger.warning(msg)
-        RaceContext.rhui.set_ui_message('rssi-resolution-partial', msg,
-                                        header='Warning', subclass='rssi-scale')
-    if applied:
-        logger.info("RSSI resolution set to %s on %d node(s)",
-                    "high (12 bit)" if full_resolution else "low (8 bit)", applied)
+                previous = not bool(full_resolution)
+                rollback_failed = [i + 1 for i in changed
+                                   if not RaceContext.interface.set_adc_resolution(i, previous)]
+                RaceContext.calibration._norm_unresolved = [idx + 1] + rollback_failed
+                RaceContext.rhui.emit_priority_message(
+                    __('RSSI resolution was not confirmed by node {0}; retry before racing.')
+                    .format(idx + 1))
+                return False
+    if changed:
+        logger.info('RSSI resolution set to %s on %d node(s)',
+                    'high (12 bit)' if full_resolution else 'low (8 bit)', len(changed))
         RaceContext.rhui.set_ui_message(
             'rssi-resolution',
-            __("RSSI resolution changed. EnterAt/ExitAt were rescaled to match. "
-               "Node equalisation was cleared and must be run again, and "
-               "adaptive calibration will ignore races recorded on the old scale."),
+            __('RSSI resolution changed. EnterAt/ExitAt were rescaled to match. '
+               'Node normalisation was cleared and must be run again, and '
+               'adaptive calibration will ignore races recorded on the old scale.'),
             header='Warning', subclass='rssi-scale')
-    elif full_resolution:
-        logger.info("Full RSSI resolution requested but no node supports it")
-        RaceContext.rhui.set_ui_message(
-            'rssi-resolution',
-            __("No connected node supports full RSSI resolution; the setting has "
-               "no effect."),
-            header='Notice', subclass='rssi-scale')
+    return True
 
 @SOCKET_IO.on('set_config')
 @requires_socketio_auth
@@ -2818,7 +2881,7 @@ def on_set_config(data):
         # DONE means a finished race is still unsaved. Switching now would
         #  staple new-scale thresholds onto history recorded on the old one.
         if RaceContext.race.race_status in (RaceStatus.STAGING, RaceStatus.RACING, RaceStatus.DONE) \
-                or getattr(RaceContext.calibration, '_eq_busy', False):
+                or getattr(RaceContext.calibration, '_norm_busy', False):
             RaceContext.rhui.emit_priority_message(__('Save or discard the current race, and wait for calibration to finish, before changing RSSI resolution.'))
             RaceContext.rhui.emit_rssi_resolution_state()
             return
@@ -2829,25 +2892,33 @@ def on_set_config(data):
                 'GENERAL', 'FULL_RSSI_RESOLUTION')):
             RaceContext.rhui.emit_rssi_resolution_state()
             return
+    previous_axis = (RaceContext.calibration._stored_scale_id(RaceContext.race.profile)
+                     if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION' else None)
+    if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
+        if not apply_rssi_resolution(data['value']):
+            RaceContext.rhui.emit_rssi_resolution_state()
+            return
     RaceContext.serverconfig.set_item(data['section'], data['key'], data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'ADMIN_SOCKET_AUTH':
         AdminAuth.set_admin_socket_auth_enabled(data['value'])
     if data['section'] == 'GENERAL' and data['key'] == 'FULL_RSSI_RESOLUTION':
-        apply_rssi_resolution(data['value'])
-        RaceContext.calibration._eq_captured = {}
-        # Equalisation first: a threshold is a corrected value, so the axis it
+        RaceContext.calibration._norm_captured = {}
+        RaceContext.calibration._norm_invalidate_session()
+        num = RaceContext.race.num_nodes
+        RaceContext.calibration._norm_store([0] * num, [0] * num, [256] * num, {})
+        # Normalisation first: a threshold is a corrected value, so the axis it
         #  has to land on is only known once the correction in force is
-        #  settled. Equalisation itself cannot be converted and is dropped when
+        #  settled. Normalisation itself cannot be converted and is dropped when
         #  the width changes.
-        RaceContext.calibration.hardware_set_all_equalisation()
-        RaceContext.calibration.convert_thresholds_to_scale()
+        RaceContext.calibration.hardware_set_all_normalisation()
+        RaceContext.calibration.convert_thresholds_to_scale(from_axis=previous_axis)
         # Reset last, and only once the new width and thresholds have settled.
         #  A node crossing during the change re-fills its pass peak from the
         #  old scale, and a pass peak only updates while crossing, so an early
         #  reset leaves that value frozen on screen.
         gevent.sleep(0.5)
-        RaceContext.calibration.eq_reset_extremums()
-        RaceContext.rhui.emit_eq_wizard_state()
+        RaceContext.calibration.norm_reset_extremums()
+        RaceContext.rhui.emit_norm_wizard_state()
         RaceContext.rhui.emit_rssi_resolution_state()
         RaceContext.rhui.emit_enter_and_exit_at_levels()
     if data['section'] == 'GENERAL' and data['key'] == 'DEBUG' and data['value'] is False:
@@ -3423,6 +3494,7 @@ def assign_frequencies():
 
     for idx in range(RaceContext.race.num_nodes):
         RaceContext.interface.set_frequency(idx, freqs["f"][idx], freqs["b"][idx], freqs["c"][idx])
+        RaceContext.calibration.norm_apply_for_frequency(idx, freqs["f"][idx])
         RaceContext.race.clear_results()
         Events.trigger(Evt.FREQUENCY_SET, {
             'nodeIndex': idx,

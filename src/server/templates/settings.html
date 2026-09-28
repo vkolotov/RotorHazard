@@ -439,14 +439,112 @@
 		});
 
 		/* Profiles */
-		socket.on('eq_wizard_state', function (msg) {
-			var btn = $('#eq_wizard_action');
-			var prog = $('#eq_wizard_progress');
+		/* Normalisation scope selection */
+		var norm_scope_options = ['current', 'R', 'L', 'F', 'E', 'B', 'A', 'U', 'D', 'J', 'S', 'O', 'Q'];
+		var norm_scope_selected = ['current'];
+		var norm_scope_state = null;
+		var update_norm_scope_buttons = function () {
+			$.each(norm_scope_options, function (i, scope) {
+				var selected = norm_scope_selected.indexOf(scope) >= 0;
+				$('#norm_scope_' + scope.toLowerCase())
+					.attr('aria-pressed', selected ? 'true' : 'false')
+					.toggleClass('selected', selected);
+			});
+			$('#norm_scope_start').prop('disabled', norm_scope_selected.length === 0);
+		};
+		$.each(norm_scope_options, function (i, scope) {
+			$('#norm_scope_' + scope.toLowerCase()).click(function () {
+				if (norm_scope_state != 'choosing') { return; }
+				var index = norm_scope_selected.indexOf(scope);
+				if (index >= 0) { norm_scope_selected.splice(index, 1); }
+				else { norm_scope_selected.push(scope); }
+				update_norm_scope_buttons();
+			});
+		});
+		$('#norm_scope_start').click(function () {
+			if (norm_scope_state != 'choosing' || norm_scope_selected.length === 0) { return; }
+			$(this).prop('disabled', true);
+			socket.emit('norm_start', {scope: norm_scope_selected.slice()});
+		});
+
+		socket.on('norm_wizard_state', function (msg) {
+			norm_scope_state = msg.state;
+			if (msg.scope) {
+				norm_scope_selected = Array.isArray(msg.scope) ? msg.scope.slice()
+					: (msg.scope == 'RL' ? ['R', 'L'] : [msg.scope]);
+			}
+			var btn = $('#norm_wizard_action');
+			var prog = $('#norm_wizard_progress');
 			if (window.eqTick) { clearInterval(window.eqTick); window.eqTick = null; }
 
+			/* Each step shows only what it needs, because a button that does
+			   nothing useful here is a button that invites a wrong click.
+			   Everything is hidden first and then the step turns on its own. */
+			var all = ['#norm_scope_selection', '#norm_scope_start',
+			           '#norm_wizard_back', '#norm_vtx_switch', '#norm_wizard_action',
+			           '#norm_capture_pass', '#norm_cancel_pass'];
+			$(all.join(', ')).hide().prop('disabled', false);
+			$('#norm_wizard_reset').toggle(msg.state != 'choosing' && !msg.busy && !msg.sweeping)
+				.prop('disabled', false);
+			prog.text('');
+
+			if (msg.captured) {
+				for (var i = 0; i < msg.captured.length; i++) {
+					var r = msg.captured[i];
+					/* The three fitted values are shown, not edited: they are
+					   derived from the captures together, so changing one alone
+					   describes no real receiver. */
+					$.each({'pivot': r.pivot, 'offset': r.offset,
+					        'scale': r.scale}, function (k, v) {
+						var set = v !== null && v !== undefined && v !== 0;
+						$('#norm_' + k + '_' + i).text(set ? v : '\u2013');
+					});
+					/* Say what the scale means, since 256 = x1.00 is not
+					   obvious from the digits alone. */
+					$('#norm_scale_x_' + i).text(
+						r.scale ? '\u00d7' + (r.scale / 256).toFixed(2) : '');
+				}
+			}
+
+			/* The suggestion only exists once a fit does. Leave a field being
+			   typed in alone, or the next state push overwrites it mid-edit. */
+			var haveFit = msg.suggested_enter_at !== null
+			           && msg.suggested_enter_at !== undefined;
+			$.each({'enter_at': msg.suggested_enter_at,
+			        'exit_at': msg.suggested_exit_at}, function (k, v) {
+				var el = $('#norm_suggest_' + k);
+				if (!el.is(':focus')) { el.val(haveFit ? v : ''); }
+				el.prop('disabled', !haveFit);
+			});
+			$('#norm_apply_thresholds').prop('disabled', !haveFit);
+			$('#norm_threshold_controls').toggle(haveFit && !msg.busy && !msg.sweeping);
+
+			if (msg.state == 'choosing') {
+				$('#norm_scope_selection, #norm_scope_start').show();
+				update_norm_scope_buttons();
+				prog.text("{{ __('Choose channels, then start calibration') }}");
+				return;
+			}
+
+			var stepTotal = msg.total + 1; // Includes applying the captured fit.
+			var stepProgress = "{{ __('Capturing') }}: " + msg.channel + ' ' + msg.level
+				+ ' (' + (msg.index + 1) + '/' + stepTotal + ')'
+				+ ' \u2014 ' + (msg.level == 'noise' ? "{{ __('VTX off') }}" : "{{ __('VTX on, quad at gate') }}");
+
+			if (msg.sweeping) {
+				/* Cancel is the only live control during a sweep: a guard that
+				   disabled it would leave no way to stop. */
+				$('#norm_cancel_pass').show();
+				prog.text(stepProgress);
+				return;
+			}
+
 			if (msg.busy) {
+				prog.text(msg.state == 'ready'
+					? "{{ __('Applying normalisation') }} (" + stepTotal + '/' + stepTotal + ')'
+					: stepProgress);
 				var left = msg.settle || 5;
-				$('#eq_wizard_action, #eq_wizard_back, #eq_wizard_reset').prop('disabled', true);
+				$('#norm_wizard_action').show().prop('disabled', true);
 				btn.text("{{ __('Measuring') }}\u2026 " + left.toFixed(0) + 's');
 				window.eqTick = setInterval(function () {
 					left -= 1;
@@ -456,68 +554,89 @@
 						clearInterval(window.eqTick); window.eqTick = null;
 					}
 				}, 1000);
+				return;
+			}
+
+			if (msg.state == 'applied') {
+				prog.text("{{ __('Normalised') }}: " + (msg.normalised_channels || []).join(', '));
+				return;
+			}
+			if (msg.state == 'incompatible') {
+				prog.text("{{ __('Calibration uses another RSSI resolution. Reset to calibrate these channels.') }}");
+				return;
+			}
+
+			if (msg.state == 'ready') {
+				$('#norm_wizard_back').show();
+				$('#norm_wizard_action').show()
+					.text("{{ __('Apply') }}").data('act', 'apply');
+				prog.text("{{ __('Apply normalisation') }} (" + (msg.total + 1) + '/' + (msg.total + 1) + ')');
+				return;
+			}
+
+			/* Capturing. The noise pass runs itself - the VTX is off, so there is
+			   no quad to place and no channel to command, and nothing for the
+			   operator to do between channels. The gate pass is one channel at a
+			   time: each needs the quad at the mark, which is their work. */
+			$('#norm_wizard_back').toggle(msg.index > 0);
+
+			if (msg.level == 'noise') {
+				$('#norm_capture_pass').show()
+					.text("{{ __('Capture noise (VTX off)') }}");
+				prog.text("{{ __('Capture noise') }} (" + msg.index + '/' + msg.total + ') \u2014 ' + "{{ __('VTX off') }}");
 			} else {
-				$('#eq_wizard_reset').prop('disabled', false);
-				if (msg.state == 'incompatible') {
-					btn.text("{{ __('Reset calibration for this resolution') }}").data('act', '').prop('disabled', true);
-					prog.text('');
-					$('#eq_wizard_back').prop('disabled', true);
-				} else if (msg.state == 'applied') {
-					btn.text("{{ __('Equalised') }}").data('act', '').prop('disabled', true);
-					prog.text('');
-					$('#eq_wizard_back').prop('disabled', true);
-				} else if (msg.state == 'ready') {
-					btn.text("{{ __('Apply') }}").data('act', 'apply').prop('disabled', false);
-					prog.text("{{ __('all steps captured') }}");
-					$('#eq_wizard_back').prop('disabled', false);
-				} else {
-					var label = msg.channel ? (msg.channel + ' ' + msg.level) : msg.level;
-					btn.text("{{ __('Capture') }}: " + label).data('act', 'capture').prop('disabled', false);
-					prog.text(msg.index + ' / ' + msg.total);
-					$('#eq_wizard_back').prop('disabled', msg.index === 0);
+				if (msg.vtx || msg.channel) {
+					$('#norm_vtx_switch').show()
+						.text("{{ __('Switch to') }} " + msg.channel);
 				}
-			}
-
-			if (msg.captured) {
-				for (var i = 0; i < msg.captured.length; i++) {
-					var r = msg.captured[i];
-					var lbl, a, b, d;
-					if (r.mode == 'applied') {
-						lbl = "{{ __('Eq') }}"; a = r.low; b = r.high; d = r.slope_lo;
-					} else {
-						lbl = "{{ __('Cal') }}"; a = r.noise; b = r.low; d = r.high;
-					}
-					$('#eq_lbl_' + i).text(lbl);
-					$.each({'a': a, 'b': b, 'c': d}, function (k, v) {
-						var el = $('#eq_' + k + '_' + i);
-						el.text(v === null || v === undefined ? '\u2013' : v);
-						el.toggleClass('eq-set', v !== null && v !== undefined);
-					});
-				}
+				$('#norm_wizard_action').show()
+					.text("{{ __('Capture') }}: " + msg.channel)
+					.data('act', 'capture');
+				prog.text(stepProgress);
 			}
 		});
 
-		$('#eq_wizard_action').click(function (event) {
-			socket.emit($(this).data('act') == 'apply' ? 'eq_wizard_apply' : 'eq_wizard_capture');
+		$('#norm_apply_thresholds').click(function (event) {
+			var en = parseInt($('#norm_suggest_enter_at').val());
+			var ex = parseInt($('#norm_suggest_exit_at').val());
+			if (isNaN(en) || isNaN(ex)) { return; }
+			socket.emit('norm_apply_thresholds', {enter_at: en, exit_at: ex});
 		});
 
-		$('#eq_wizard_back').click(function (event) {
-			socket.emit('eq_wizard_back');
+		$('#norm_vtx_switch').click(function (event) {
+			socket.emit('norm_vtx_switch');
 		});
 
-		$('#eq_wizard_reset').click(function (event) {
+		$('#norm_wizard_action').click(function (event) {
+			socket.emit($(this).data('act') == 'apply' ? 'norm_wizard_apply' : 'norm_wizard_capture');
+		});
+
+		$('#norm_capture_pass').click(function (event) {
+			socket.emit('norm_capture_pass');
+		});
+
+		$('#norm_cancel_pass').click(function (event) {
+			socket.emit('norm_cancel_pass');
+		});
+
+		$('#norm_wizard_back').click(function (event) {
+			socket.emit('norm_wizard_back');
+		});
+
+		$('#norm_wizard_reset').click(function (event) {
 			if (confirm("{{ __('Clear the calibration on every node and start again?') }}")) {
-				socket.emit('eq_wizard_reset');
+				socket.emit('norm_wizard_reset');
 			}
 		});
 
-		socket.emit('eq_wizard_query');
+		socket.emit('norm_wizard_query');
 
 		socket.on('rssi_resolution_state', function (msg) {
 			var sel = $('#set_full_rssi_resolution');
 			sel.val(msg.full ? 'true' : 'false');
 			sel.data('applied', msg.full ? 'true' : 'false');
 			sel.prop('disabled', !msg.supported);
+			$('#norm_suggest_enter_at, #norm_suggest_exit_at').attr('max', msg.full ? 4095 : 255);
 		});
 
 		$('#set_full_rssi_resolution').change(function (event) {
@@ -530,7 +649,7 @@
 			warning += "\n\n";
 			warning += "{{ __('Every RSSI reading changes by a factor of eight. EnterAt/ExitAt will be rescaled to match, so lap detection keeps working.') }}";
 			warning += "\n\n";
-			warning += "{{ __('Node equalisation cannot be converted and will be cleared - run the Equalise wizard again to get the most out of the new scale. Saved races are left untouched, and adaptive calibration will ignore races recorded on the old scale.') }}";
+			warning += "{{ __('Node normalisation cannot be converted and will be cleared - run the Normalise wizard again to get the most out of the new scale. Saved races are left untouched, and adaptive calibration will ignore races recorded on the old scale.') }}";
 			if (confirm(warning)) {
 				socket.emit('set_config', {
 					section: 'GENERAL',
@@ -541,6 +660,7 @@
 				sel.val(sel.data('applied'));
 			}
 		});
+
 
 		socket.on('node_tuning', function (msg) {
 			$('#set_profile').empty();
@@ -2708,18 +2828,29 @@
 <style>
 /* match the flex sizing ol.form gives its inputs, so the wizard row lines up
    with the controls below it */
-.eq-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
-             flex: 1 1 0; margin-left: 0.5em; }
-.eq-wizard button { margin: 0; }
-.eq-wizard #eq_wizard_action { flex: 1 1 auto; }
-.eq-wizard .eq-progress { opacity: 0.7; white-space: nowrap; font-style: italic;
-                          font-size: 0.9em; flex: 0 0 auto; }
-.eq-readout { display: flex; align-items: center; gap: 0.35em; font-size: 0.85em;
+/* Scope choices wrap on narrow screens while each button stays readable. */
+.norm-wizard { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
+             flex: 1 1 0; margin-left: 0.5em; min-width: 0; }
+.norm-thresholds input { width: 4.5em; flex: 0 0 auto; min-width: 0; margin: 0; }
+.norm-thresholds button { flex: 0 0 auto; }
+.norm-wizard button { margin: 0; }
+.norm-scope-selection { display: flex; flex-wrap: wrap; gap: 0.35em; }
+.norm-scope-selection button { white-space: nowrap; }
+.norm-scope-selection button.selected { background: hsl(var(--hue_0), var(--sat_0), var(--lum_0_high)); color: var(--contrast_0_high); box-shadow: inset 0 0 0 2px currentColor; }
+.norm-scope-selection button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.norm-wizard #norm_wizard_action { flex: 1 1 auto; }
+.norm-wizard .norm-progress { opacity: 0.7; white-space: normal; font-style: italic;
+                          font-size: 0.9em; flex: 0 1 auto; }
+.norm-readout { display: flex; align-items: center; gap: 0.35em; font-size: 0.85em;
               margin-top: 0.3em; }
-.eq-readout .eq-lbl { opacity: 0.6; }
-.eq-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
+.norm-readout .norm-lbl { opacity: 0.6; }
+.norm-cap { min-width: 3.2em; text-align: right; opacity: 0.35;
           font-variant-numeric: tabular-nums; }
-.eq-cap.eq-set { opacity: 1; }
+.norm-cap.norm-set { opacity: 1; }
+/* The three fitted values are read-only rows in the per-node table, so they
+   take the .datarow styling; only the gain annotation needs its own. */
+.norm-gain { opacity: 0.6; font-size: 0.85em; margin-left: 0.3em;
+           font-variant-numeric: tabular-nums; }
 </style>
 {% endblock %} {% block content %}
 <main class="page-settings">
@@ -2827,12 +2958,6 @@
 						<button class="cap_exit_at_btn" data-node_index="{{ node }}" title="{{ __('Capture current RSSI') }}"><svg height="1em" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M0 14h16v2H0zM10 6V0H6v6H3l5 7 5-7z"/></svg></button>
 					</div>
 
-					<div class="eq-readout" data-node="{{ node }}">
-						<span class="eq-lbl" id="eq_lbl_{{ node }}">{{ __('Cal') }}</span>
-						<span class="eq-cap" id="eq_a_{{ node }}">&ndash;</span>
-						<span class="eq-cap" id="eq_b_{{ node }}">&ndash;</span>
-						<span class="eq-cap" id="eq_c_{{ node }}">&ndash;</span>
-					</div>
 				</div>
 				<table>
 					<tr class="datarow">
@@ -2871,6 +2996,25 @@
 							<span class="debug_pass_count_{{ node }}"></span>
 						</td>
 					</tr>
+					<tr class="datarow">
+						<td>{{ __('NormPivot') }}</td>
+						<td>
+							<span id="norm_pivot_{{ node }}"></span>
+						</td>
+					</tr>
+					<tr class="datarow">
+						<td>{{ __('NormOffset') }}</td>
+						<td>
+							<span id="norm_offset_{{ node }}"></span>
+						</td>
+					</tr>
+					<tr class="datarow">
+						<td>{{ __('NormScale') }}</td>
+						<td>
+							<span id="norm_scale_{{ node }}"></span>
+							<span class="norm-gain" id="norm_scale_x_{{ node }}"></span>
+						</td>
+					</tr>
 				</table>
 				<div id="node_notice_{{ node }}"></div>
 			</div>
@@ -2881,13 +3025,42 @@
 		<ol class="form">
 			<li>
 				<div class="label-block">
-					<label>{{ __('Equalise Nodes') }}</label>
+					<label>{{ __('Normalise Nodes') }}</label>
 				</div>
-				<div class="eq-wizard">
-					<button id="eq_wizard_reset" class="alt-button">{{ __('Reset') }}</button>
-					<button id="eq_wizard_back" class="alt-button">{{ __('Back') }}</button>
-					<button id="eq_wizard_action"></button>
-					<span class="eq-progress" id="eq_wizard_progress"></span>
+				<div class="norm-wizard">
+					<div id="norm_scope_selection" class="norm-scope-selection" role="group" aria-label="{{ __('Channels to normalise') }}" style="display: none;">
+						<button type="button" id="norm_scope_current" class="alt-button" aria-pressed="false">{{ __('Current channels') }}</button>
+						<button type="button" id="norm_scope_r" class="alt-button" aria-pressed="false">{{ __('R') }}</button>
+						<button type="button" id="norm_scope_l" class="alt-button" aria-pressed="false">{{ __('L') }}</button>
+						<button type="button" id="norm_scope_f" class="alt-button" aria-pressed="false">{{ __('F') }}</button>
+						<button type="button" id="norm_scope_e" class="alt-button" aria-pressed="false">{{ __('E') }}</button>
+						<button type="button" id="norm_scope_b" class="alt-button" aria-pressed="false">{{ __('B') }}</button>
+						<button type="button" id="norm_scope_a" class="alt-button" aria-pressed="false">{{ __('A') }}</button>
+						<button type="button" id="norm_scope_u" class="alt-button" aria-pressed="false">{{ __('U') }}</button>
+						<button type="button" id="norm_scope_d" class="alt-button" aria-pressed="false">{{ __('D') }}</button>
+						<button type="button" id="norm_scope_j" class="alt-button" aria-pressed="false">{{ __('J') }}</button>
+						<button type="button" id="norm_scope_s" class="alt-button" aria-pressed="false">{{ __('S') }}</button>
+						<button type="button" id="norm_scope_o" class="alt-button" aria-pressed="false">{{ __('O') }}</button>
+						<button type="button" id="norm_scope_q" class="alt-button" aria-pressed="false">{{ __('Q') }}</button>
+					</div>
+					<button type="button" id="norm_scope_start" style="display: none;">{{ __('Start calibration') }}</button>
+					<button id="norm_wizard_reset" class="alt-button" style="display: none;">{{ __('Reset') }}</button>
+					<button id="norm_wizard_back" class="alt-button" style="display: none;">{{ __('Back') }}</button>
+					<button id="norm_vtx_switch" class="alt-button" style="display: none;"></button>
+					<button id="norm_wizard_action" style="display: none;"></button>
+					<button id="norm_capture_pass" style="display: none;"></button>
+					<button id="norm_cancel_pass" class="alt-button" style="display: none;">{{ __('Cancel') }}</button>
+					<span class="norm-progress" id="norm_wizard_progress"></span>
+				</div>
+			</li>
+			<li id="norm_threshold_controls" style="display: none;">
+				<div class="label-block">
+					<label for="norm_suggest_enter_at">{{ __('Suggested EnterAt/ExitAt') }}</label>
+				</div>
+				<div class="norm-wizard norm-thresholds">
+					<input type="number" id="norm_suggest_enter_at" min="1" max="255" step="1" title="{{ __('EnterAt: the highest pivot in the fleet, so every node triggers where it is at unity gain') }}">
+					<input type="number" id="norm_suggest_exit_at" min="1" max="255" step="1" title="{{ __('ExitAt: one tenth of the floor-to-gate span below EnterAt') }}">
+					<button id="norm_apply_thresholds" class="alt-button">{{ __('Apply') }}</button>
 				</div>
 			</li>
 			<li>

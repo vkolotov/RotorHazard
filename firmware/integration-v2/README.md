@@ -5,20 +5,19 @@
 - Arduino CLI: 1.5.1
 - FQBN: `STMicroelectronics:stm32:GenF4:pnum=BLACKPILL_F411CE,xserial=generic,usb=none,xusb=FS,opt=osstd,rtlib=nano`
 - Extra C++ flags: `-DSTM32_F4_PROCTYPE`
-- SHA-256: `bd2e4dbeeeb11dbd4c33ea21f96c91518cd79f64c6ff3ac885c16de61b81d4d4`
-- Image: `RH_S32_BPill_node_STM32F4_api38.bin` (22740 bytes)
+- SHA-256: `628501a7c8567198814df15009edba5704119f82b752865c0815e31b6c56baae`
+- Image: `RH_S32_BPill_node_STM32F4_api38.bin` (22688 bytes, built Sep 29 2026 at 11:27:01)
 
-This branch is both pull requests as they stand: per-node equalisation at
-node API 37, and the wide-RSSI transport plus runtime ADC width at 38 on top
-of it. Equalisation commands are gated at 37, so they still reach a node
-running only that firmware.
+This image combines per-node normalisation with wide-RSSI transport and
+runtime ADC width selection at node API 38. Normalisation commands are gated
+at API 37, so they also reach nodes running the earlier firmware.
 
 The binary contains firmware version, processor type, and build timestamp
 strings. Flash using RotorHazard's node updater, then restart the server.
-See [deployment and migration](../../doc/node-equalisation.md).
+See [firmware upgrade instructions](../../doc/node-firmware-upgrade.md).
 
-Validation: both Python suites and the C++ threshold framing regression
-passed. STM32F411 and AVR Nano builds passed. STM32 uses 22,292 bytes flash
-and 15,172 bytes RAM. AVR uses 12,324 bytes flash and 1,777 bytes RAM; the
-compiler warns of low remaining AVR RAM (271 bytes). Only STM32 firmware is
-included for deployment to this timer.
+Validation: Python normalisation, resolution and VTX suites, the C++ threshold
+framing regression, and UI tests passed. STM32F411 and AVR Nano builds passed.
+STM32 uses 22,240 bytes flash and 15,140 bytes RAM. AVR uses 12,300 bytes flash
+and 1,775 bytes RAM; the compiler warns of low remaining AVR RAM (273 bytes).
+Only STM32 firmware is included for deployment to this timer.

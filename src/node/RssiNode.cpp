@@ -189,26 +189,31 @@ rssi_t RssiNode::rssiRead()
         raw >>= 1;
     }
 
-    if (!settings.eqPivot)
+    if (!settings.normPivot)
         return (rssi_t) raw;  // no calibration applied
 
-    // Per-node equalisation, applied here so that everything downstream -
+    // Per-node normalisation, applied here so that everything downstream -
     //  smoothing, peak/nadir tracking, crossing detection - works on corrected
-    //  values. Two straight segments meet at the pivot: above it the fit is
-    //  anchored on two real signal levels and is the one lap detection uses,
-    //  below it the slope only keeps an idle node off zero so it still looks
-    //  alive. Q8 fixed point; the server folds its output scale into the
-    //  offsets, so nothing here needs to know what that scale is.
+    //  values. Two straight segments meet at the pivot. Above it the offset
+    //  alone applies: unity gain, so peak amplitude, local slope and the
+    //  timing of the maximum all survive untouched, and a fluctuation of n
+    //  raw counts is n counts out. That region is where a pass is decided, so
+    //  it is left undistorted by construction - there is no gain here to get
+    //  wrong. Below the pivot the scale bends the reading onto a common noise
+    //  floor, where matching receiver sensitivity matters more than keeping
+    //  the shape. Q8 fixed point; the server folds its output scale into the
+    //  offset, so nothing here needs to know what that scale is.
     int32_t adj;
-    if (raw >= (int)settings.eqPivot)
-        adj = (((int32_t)raw - settings.eqOffsetUp) * settings.eqSlopeUp) >> 8;
+    if (raw >= (int)settings.normPivot)
+        adj = (int32_t)raw - settings.normOffset;
     else
-        adj = (((int32_t)raw - settings.eqOffsetLo) * settings.eqSlopeLo) >> 8;
+        adj = (int32_t)settings.normPivotTarget
+            + ((((int32_t)raw - settings.normPivot) * settings.normScale) >> 8);
 
     if (adj < 0)
         adj = 0;
-    else if (adj > MAX_EQ_RSSI)
-        adj = MAX_EQ_RSSI;  // one below MAX_RSSI, which is the nadir sentinel
+    else if (adj > MAX_NORM_RSSI)
+        adj = MAX_NORM_RSSI;  // one below MAX_RSSI, which is the nadir sentinel
     return (rssi_t) adj;
 }
 

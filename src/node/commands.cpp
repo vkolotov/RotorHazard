@@ -51,23 +51,15 @@ byte Message::getPayloadSize()
             size = 2;
             break;
 
-        case WRITE_EQ_PIVOT:  // equalisation pivot (raw ADC)
+        case WRITE_NORM_PIVOT:  // normalisation pivot (raw ADC)
             size = 2;
             break;
 
-        case WRITE_EQ_OFFSET_UP:  // equalisation offset, above pivot
+        case WRITE_NORM_OFFSET:  // normalisation offset
             size = 2;
             break;
 
-        case WRITE_EQ_SLOPE_UP:  // equalisation slope, above pivot (Q8)
-            size = 2;
-            break;
-
-        case WRITE_EQ_OFFSET_LO:  // equalisation offset, below pivot
-            size = 2;
-            break;
-
-        case WRITE_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
+        case WRITE_NORM_SCALE:  // normalisation scale, below pivot (Q8)
             size = 2;
             break;
 
@@ -177,24 +169,16 @@ void Message::handleWriteCommand(bool serialFlag)
             handleStatusMessage((byte)(u16val >> 8), (byte)(u16val & 0x00FF));
             break;
 
-        case WRITE_EQ_PIVOT:  // equalisation pivot (raw ADC)
-            cmdRssiNodePtr->setEqPivot(buffer.read16());
+        case WRITE_NORM_PIVOT:  // normalisation pivot (raw ADC)
+            cmdRssiNodePtr->setNormPivot(buffer.read16());
             break;
 
-        case WRITE_EQ_OFFSET_UP:  // equalisation offset, above pivot
-            cmdRssiNodePtr->setEqOffsetUp((int16_t) buffer.read16());
+        case WRITE_NORM_OFFSET:  // normalisation offset
+            cmdRssiNodePtr->setNormOffset((int16_t) buffer.read16());
             break;
 
-        case WRITE_EQ_SLOPE_UP:  // equalisation slope, above pivot (Q8)
-            cmdRssiNodePtr->setEqSlopeUp(buffer.read16());
-            break;
-
-        case WRITE_EQ_OFFSET_LO:  // equalisation offset, below pivot
-            cmdRssiNodePtr->setEqOffsetLo((int16_t) buffer.read16());
-            break;
-
-        case WRITE_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
-            cmdRssiNodePtr->setEqSlopeLo(buffer.read16());
+        case WRITE_NORM_SCALE:  // normalisation scale, below pivot (Q8)
+            cmdRssiNodePtr->setNormScale(buffer.read16());
             break;
 
         case RESET_NODE_EXTREMUMS:  // restart node peak/nadir tracking
@@ -296,24 +280,16 @@ void Message::handleReadCommand(bool serialFlag)
             ioBufferWriteRssi(buffer, cmdRssiNodePtr->getExitAtLevel());
             break;
 
-        case READ_EQ_PIVOT:  // equalisation pivot (raw ADC)
-            buffer.write16(cmdRssiNodePtr->getEqPivot());
+        case READ_NORM_PIVOT:  // normalisation pivot (raw ADC)
+            buffer.write16(cmdRssiNodePtr->getNormPivot());
             break;
 
-        case READ_EQ_OFFSET_UP:  // equalisation offset, above pivot
-            buffer.write16((uint16_t) cmdRssiNodePtr->getEqOffsetUp());
+        case READ_NORM_OFFSET:  // normalisation offset
+            buffer.write16((uint16_t) cmdRssiNodePtr->getNormOffset());
             break;
 
-        case READ_EQ_SLOPE_UP:  // equalisation slope, above pivot (Q8)
-            buffer.write16(cmdRssiNodePtr->getEqSlopeUp());
-            break;
-
-        case READ_EQ_OFFSET_LO:  // equalisation offset, below pivot
-            buffer.write16((uint16_t) cmdRssiNodePtr->getEqOffsetLo());
-            break;
-
-        case READ_EQ_SLOPE_LO:  // equalisation slope, below pivot (Q8)
-            buffer.write16(cmdRssiNodePtr->getEqSlopeLo());
+        case READ_NORM_SCALE:  // normalisation scale, below pivot (Q8)
+            buffer.write16(cmdRssiNodePtr->getNormScale());
             break;
 
         case READ_ADC_RESOLUTION:  // ADC width in bits

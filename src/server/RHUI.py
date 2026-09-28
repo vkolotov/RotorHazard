@@ -764,14 +764,18 @@ class RHUI():
         else:
             self._socket.emit('enter_and_exit_at_levels', emit_payload)
 
-    def emit_eq_wizard_state(self, **params):
-        """Emits the equalisation wizard position and what it has captured."""
-        emit_payload = self._racecontext.calibration.eq_wizard_state()
-        emit_payload['captured'] = self._racecontext.calibration.eq_captured_table()
+    def emit_norm_wizard_state(self, **params):
+        """Emits the normalisation wizard position and what it has captured."""
+        emit_payload = self._racecontext.calibration.norm_wizard_state()
+        emit_payload['captured'] = self._racecontext.calibration.norm_captured_table()
+        emit_payload['normalised_channels'] = self._racecontext.calibration.norm_normalised_channels()
+        suggested = self._racecontext.calibration.norm_suggested_thresholds()
+        emit_payload['suggested_enter_at'] = suggested[0] if suggested else None
+        emit_payload['suggested_exit_at'] = suggested[1] if suggested else None
         if ('nobroadcast' in params):
-            emit('eq_wizard_state', emit_payload)
+            emit('norm_wizard_state', emit_payload)
         else:
-            self._socket.emit('eq_wizard_state', emit_payload)
+            self._socket.emit('norm_wizard_state', emit_payload)
 
     def emit_rssi_resolution_state(self, **params):
         """Emits the RSSI resolution setting and whether any node can honour it."""

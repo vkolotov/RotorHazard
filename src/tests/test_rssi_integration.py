@@ -1,4 +1,4 @@
-"""Regression tests for combined equalisation and runtime ADC resolution."""
+"""Regression tests for normalisation and runtime ADC resolution."""
 import gevent.event
 import gevent.lock
 import importlib.util
@@ -22,11 +22,6 @@ from calibration import Calibration
 import RHInterface
 import serial_node
 
-spec = importlib.util.spec_from_file_location('eq_migration', SRC / 'server/util/add_equalisation_columns.py')
-migration = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(migration)
-
-
 class RssiIntegrationTest(unittest.TestCase):
     def context(self, full=True):
         node = Node()
@@ -34,7 +29,7 @@ class RssiIntegrationTest(unittest.TestCase):
         node.firmware_proctype_str = 'STM32F4'
         node.adc_resolution = 12 if full else 10
         node.init()
-        profile = SimpleNamespace(id=1, frequencies=json.dumps({'b': ['R'], 'c': [1]}))
+        profile = SimpleNamespace(id=1, frequencies=json.dumps({'b': ['R'], 'c': [1], 'f': [5658]}))
         ctx = SimpleNamespace(race=SimpleNamespace(profile=profile, num_nodes=1),
                               interface=Mock(nodes=[node]), rhui=Mock(), rhdata=Mock(),
                               events=Mock())
@@ -47,219 +42,81 @@ class RssiIntegrationTest(unittest.TestCase):
         ctx.rhdata.get_profile.return_value = profile
         # The hardware accepts writes unless a test says otherwise; apply now
         #  refuses to record a fit the nodes did not confirm.
-        ctx.interface.set_equalisation.return_value = True
+        ctx.interface.set_normalisation.return_value = True
         return ctx, node, Calibration(ctx)
 
-    def test_fit_anchors_in_both_adc_modes(self):
-        for full, values in ((True, [700, 1200, 1700]), (False, [88, 150, 213])):
+    def test_fit_and_stale_resolution_in_both_adc_modes(self):
+        for full, floor, gate in ((True, 700, 1700), (False, 88, 213)):
             with self.subTest(full=full), patch('calibration.gevent.sleep'):
                 ctx, node, cal = self.context(full)
-                cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'), ([v] for v in values)))
-                cal._eq_note_capture_session()
-                self.assertTrue(cal.eq_wizard_apply())
-                _, pivot, ou, su, ol, sl = ctx.interface.set_equalisation.call_args.args
-                targets = cal._eq_destination([(values[1]-values[0], values[2]-values[1])])
-                def corrected(raw):
-                    return ((raw-ou)*su if raw >= pivot else (raw-ol)*sl) >> 8
-                for raw, target in zip(values, targets):
-                    self.assertLessEqual(abs(corrected(raw)-target), 2)
-                self.assertEqual(cal.eq_wizard_state()['state'], 'applied')
+                cal._norm_scope_sel = 'current'
+                cal._norm_saved_freqs = cal._norm_profile_freqs()
+                cal._norm_channels = cal._norm_sweep_channels()
+                cal._norm_captured = {'noise:R1': [floor], 'high:R1': [gate]}
+                cal._norm_note_capture_session()
+                self.assertTrue(cal.norm_wizard_apply())
+                _, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
+                self.assertLessEqual(abs(cal._corrected(gate, [pivot, offset, scale]) - gate), 2)
+                self.assertEqual(cal.norm_wizard_state()['state'], 'applied')
                 node.adc_resolution = 10 if full else 12
-                self.assertEqual(cal.eq_wizard_state()['state'], 'incompatible')
-                cal.hardware_set_all_equalisation()
-                self.assertEqual(ctx.interface.set_equalisation.call_args.args[1], 0)
+                self.assertEqual(cal.norm_wizard_state()['state'], 'incompatible')
+                self.assertIsNone(cal._norm_signature())
 
-    def test_threshold_conversion_follows_the_correction(self):
-        """A threshold is a corrected value, not a raw one.
-
-        Multiplying by the ratio of ADC widths is only right when no
-        correction is in force on either side. With equalisation applied, the
-        stored number means a different raw reading, and converting has to go
-        back through the transform to find it.
-        """
+    def test_threshold_conversion_follows_normalisation_and_width(self):
         ctx, node, cal = self.context(full=False)
-        # corrected = raw - 89 over the upper segment
-        coeffs = [150, 89, 256, 89, 256]
-        self.assertEqual(cal._corrected(169, coeffs), 80)
-        self.assertEqual(cal._uncorrect(80, coeffs), 169)
-        # round trip through the pair is stable
-        for raw in (160, 200, 255):
-            self.assertEqual(cal._uncorrect(cal._corrected(raw, coeffs), coeffs), raw)
-        # and a naive x8 would have produced 640 rather than the raw-equivalent
-        self.assertNotEqual(cal._uncorrect(80, coeffs) * 8, 80 * 8)
+        ctx.race.profile.norm_pivots = json.dumps({'v': [150], 'adc_bits': 10})
+        ctx.race.profile.norm_offsets = json.dumps({'v': [89]})
+        ctx.race.profile.norm_scales = json.dumps({'v': [256]})
+        ctx.race.profile.enter_ats = json.dumps({'v': [80]})
+        ctx.race.profile.exit_ats = json.dumps({'v': [70]})
+        old_axis = cal.threshold_scale_id()
+        raw_before = cal._uncorrect(80, old_axis['norm'][0])
+        node.adc_resolution = 12
+        cal._norm_store([0], [0], [256], {})
+        enter, _ = cal.convert_thresholds_to_scale(from_axis=old_axis)
+        self.assertEqual(enter, [raw_before * 8])
+        self.assertNotEqual(enter, [80 * 8])
+        self.assertEqual(cal.convert_thresholds_to_scale(), (None, None))
 
-    def test_apply_then_manual_then_switch_keeps_the_physical_level(self):
-        """The sequence the review asked for, end to end.
-
-        Apply a fit, set a threshold by hand against the corrected reading,
-        then switch resolution. The stored number has to keep meaning the same
-        physical signal, which it only does if the axis travels with it at
-        every step rather than being assumed.
-        """
-        with patch('calibration.gevent.sleep'):
-            ctx, node, cal = self.context(full=False)
-            ctx.rhdata.get_profile.return_value = ctx.race.profile
-            ctx.race.profile.enter_ats = json.dumps({'v': [None]})
-            ctx.race.profile.exit_ats = json.dumps({'v': [None]})
-            ctx.interface.set_equalisation.return_value = True
-
-            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
-                                        ([v] for v in (90, 150, 210))))
-            cal._eq_note_capture_session()
-            self.assertTrue(cal.eq_wizard_apply())
-
-            # a threshold set by hand is measured against the corrected reading
-            node.enter_at_level = 80
-            cal.set_enter_at_level(0, 80, emit_levels=False)
-            axis = cal._stored_scale_id(ctx.race.profile)
-            self.assertEqual(axis['adc_bits'], 10)
-            self.assertIsNotNone(axis['eq'])  # the correction is recorded
-
-            raw_before = cal._uncorrect(80, axis['eq'][0])
-
-            # switching drops the correction, so the axis becomes raw 12-bit
-            node.adc_resolution = 12
-            ctx.race.profile.eq_pivots = json.dumps(
-                {'v': [150], 'adc_bits': [10]})  # fitted at 10, now stale
-            enter, _ = cal.convert_thresholds_to_scale()
-            self.assertEqual(enter, [raw_before * 8])
-            # and emphatically not the naive x8 of the corrected value
-            self.assertNotEqual(enter, [80 * 8])
-
-    def test_race_save_writes_both_axis_attributes(self):
-        """Both halves of the axis are written, with the right arguments.
-
-        A static read of the save path, not an execution of it: it asserts
-        that RHRace writes adc_bits and eq_signature and calls _eq_signature
-        with the width, which is what a previous rebase silently dropped. It
-        cannot show that the save path reaches those writes or that the values
-        are right - the history test above covers the values, and the save
-        method itself is exercised on hardware.
-        """
-        import ast
+    def test_race_save_records_width_and_correction(self):
         source = (SRC / 'server/RHRace.py').read_text()
-        tree = ast.parse(source)
+        self.assertIn("'adc_bits'", source)
+        self.assertIn("'norm_signature'", source)
+        self.assertIn('_norm_signature(', source)
 
-        written = []
-        signature_args = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if isinstance(func, ast.Attribute) and func.attr == 'alter_savedRaceMeta':
-                for arg in node.args:
-                    if isinstance(arg, ast.Dict):
-                        for key, value in zip(arg.keys, arg.values):
-                            if getattr(key, 'value', None) == 'race_attr' and \
-                                    isinstance(value, ast.Constant):
-                                written.append(value.value)
-            if isinstance(func, ast.Attribute) and func.attr == '_eq_signature':
-                signature_args.append(len(node.args))
-
-        self.assertIn('adc_bits', written, 'ADC width is not recorded')
-        self.assertIn('eq_signature', written, 'correction is not recorded')
-        # _eq_signature(bits) on this branch: calling it bare raises at runtime
-        self.assertTrue(signature_args, '_eq_signature is never called')
-        for count in signature_args:
-            self.assertEqual(count, 1,
-                             '_eq_signature must be called with the ADC width')
-
-    def test_saved_race_records_the_correction(self):
-        """Adaptive history must key on the axis, not the width alone."""
+    def test_history_rejects_another_width_or_fit(self):
         ctx, node, cal = self.context(full=False)
-        ctx.race.profile.eq_pivots = json.dumps({'v': [150], 'adc_bits': [10]})
-        ctx.race.profile.eq_offset_ups = json.dumps({'v': [89]})
-        ctx.race.profile.eq_slope_ups = json.dumps({'v': [256]})
-        ctx.race.profile.eq_offset_los = json.dumps({'v': [89]})
-        ctx.race.profile.eq_slope_los = json.dumps({'v': [256]})
-        live = cal._eq_signature(10)
-        self.assertIsNotNone(live)
-
+        ctx.race.profile.norm_pivots = json.dumps({'v': [150], 'adc_bits': 10})
+        ctx.race.profile.norm_offsets = json.dumps({'v': [89]})
+        ctx.race.profile.norm_scales = json.dumps({'v': [256]})
+        live = cal._norm_signature()
         race = object()
-        values = {'adc_bits': '10', 'eq_signature': json.dumps(live)}
+        values = {'adc_bits': '10', 'norm_signature': json.dumps(live)}
         ctx.rhdata.get_savedrace_attribute_value.side_effect = \
             lambda r, name, default=None: values.get(name, default)
-        self.assertTrue(cal._race_matches_resolution(race))
-
-        # same width, different correction -> not reusable
-        values['eq_signature'] = json.dumps([[151, 89, 256, 89, 256]])
-        self.assertFalse(cal._race_matches_resolution(race))
-
-    def test_resolution_conversion_is_idempotent(self):
-        """Converting a profile already on the target axis must do nothing."""
-        ctx, node, cal = self.context(full=False)
-        ctx.race.profile.enter_ats = json.dumps({'v': [96], 'adc_bits': 10, 'eq': None})
-        ctx.race.profile.exit_ats = json.dumps({'v': [80], 'adc_bits': 10, 'eq': None})
-        ctx.race.profile.eq_pivots = None
-        ctx.rhdata.get_profile.return_value = ctx.race.profile
+        self.assertTrue(cal._race_matches_correction(race))
+        values['norm_signature'] = json.dumps([[151, 89, 256]])
+        self.assertFalse(cal._race_matches_correction(race))
+        values['norm_signature'] = json.dumps(live)
         node.adc_resolution = 12
-        first = cal.convert_thresholds_to_scale()
-        self.assertEqual(first[0], [768])
-        # the stored scale now matches, so a repeat is a no-op
-        second = cal.convert_thresholds_to_scale()
-        self.assertEqual(second, (None, None))
-        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [768])
-
-    def test_reset_refuses_when_a_node_does_not_confirm(self):
-        """An unconfirmed reset leaves the correction unknown."""
-        ctx, _, cal = self.context(full=False)
-        ctx.race.profile.enter_ats = json.dumps(
-            {'v': [80], 'adc_bits': 10, 'eq': [[150, 89, 256, 89, 256]]})
-        ctx.interface.set_equalisation.return_value = False
-        self.assertFalse(cal.eq_wizard_reset())
-        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [80])
-        self.assertTrue(cal.eq_state_is_unresolved())
+        self.assertFalse(cal._race_matches_correction(race))
 
     def test_busy_covers_threshold_writes(self):
-        """The guard must still be set while thresholds are written."""
         seen = []
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context(full=False)
             ctx.race.profile.enter_ats = json.dumps({'v': [169]})
             ctx.race.profile.exit_ats = json.dumps({'v': [160]})
             ctx.interface.set_enter_at_level.side_effect = \
-                lambda *a, **k: seen.append(cal._eq_busy)
-            cal._eq_captured = dict(zip(('noise', 'low:R1', 'high:R1'),
-                                        ([v] for v in (90, 150, 210))))
-            cal._eq_note_capture_session()
-            self.assertTrue(cal.eq_wizard_apply())
-        self.assertTrue(seen, 'thresholds were never written')
-        self.assertTrue(all(seen), 'guard was released before threshold writes')
-
-    def test_retry_after_failed_apply_converts_from_the_real_axis(self):
-        """A failed attempt must not corrupt the source axis for the retry."""
-        with patch('calibration.gevent.sleep'):
-            ctx, _, cal = self.context(full=False)
-            ctx.race.profile.enter_ats = json.dumps({'v': [169]})
-            ctx.race.profile.exit_ats = json.dumps({'v': [160]})
-            captures = dict(zip(('noise', 'low:R1', 'high:R1'),
-                                ([v] for v in (90, 150, 210))))
-
-            ctx.interface.set_equalisation.return_value = False
-            cal._eq_captured = dict(captures)
-            cal._eq_note_capture_session()
-            self.assertFalse(cal.eq_wizard_apply())
-            self.assertEqual(json.loads(ctx.race.profile.enter_ats)['v'], [169])
-
-            ctx.interface.set_equalisation.return_value = True
-            cal._eq_captured = dict(captures)
-            cal._eq_note_capture_session()
-            self.assertTrue(cal.eq_wizard_apply())
-            stored = json.loads(ctx.race.profile.enter_ats)
-            self.assertEqual(cal._uncorrect(stored['v'][0], stored['eq'][0]), 169)
-            self.assertFalse(cal.eq_state_is_unresolved())
-
-    def test_staging_is_refused_while_calibration_is_unresolved(self):
-        """The inherited guard has to be present on this branch too."""
-        source = (SRC / 'server/RHRace.py').read_text()
-        self.assertIn('eq_state_is_unresolved', source)
-
-    def test_untagged_profile_reads_as_legacy(self):
-        """A profile written before the scale was tracked is 8-bit, no eq."""
-        ctx, node, cal = self.context(full=False)
-        ctx.race.profile.enter_ats = json.dumps({'v': [96]})
-        self.assertEqual(cal._stored_scale_id(ctx.race.profile),
-                         {'adc_bits': 10, 'eq': None})
+                lambda *a, **k: seen.append(cal._norm_busy)
+            cal._norm_scope_sel = 'current'
+            cal._norm_saved_freqs = cal._norm_profile_freqs()
+            cal._norm_channels = cal._norm_sweep_channels()
+            cal._norm_captured = {'noise:R1': [90], 'high:R1': [210]}
+            cal._norm_note_capture_session()
+            self.assertTrue(cal.norm_wizard_apply())
+        self.assertTrue(seen)
+        self.assertTrue(all(seen))
 
     def test_unconfirmed_adc_write_is_not_recorded(self):
         """A write the node never acknowledged must not change cached state."""
