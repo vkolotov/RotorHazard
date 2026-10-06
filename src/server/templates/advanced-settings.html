@@ -10,7 +10,7 @@
 		{
 			'type': 'config',
 			'value': {
-				'GENERAL': ['SERIAL_PORTS']
+				'GENERAL': ['SERIAL_PORTS', 'AUTOSTART_OPEN_PRACTICE']
 			}
 		}
 	];
@@ -455,6 +455,12 @@
 					<option value="1" {{'selected' if getConfig('GENERAL', 'MOCK_NODE_SIGNAL')==1}}>{{ __('Replay') }} mock_data_[n].csv</option>
 					<option value="2" {{'selected' if getConfig('GENERAL', 'MOCK_NODE_SIGNAL')==2}}>{{ __('Simulated') }}</option>
 				</select>
+			</li>
+			<li>
+				<div class="label-block">
+					<label for="set_autostart_open_practice">{{ __('Autostart Open Practice') }}</label>
+				</div>
+				<input type="checkbox" id="set_autostart_open_practice" class="set-config" data-section="GENERAL" data-key="AUTOSTART_OPEN_PRACTICE" data-type="boolean" value="true" {{'checked' if getConfig('GENERAL', 'AUTOSTART_OPEN_PRACTICE')==true}}>
 			</li>
 		</ol>
 	</div>
