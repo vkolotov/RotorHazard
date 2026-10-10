@@ -1,5 +1,11 @@
 '''Node class for the RotorHazard interface.'''
 
+# Lowest node API level that carries each optional feature. Check support with
+#  the Node.supports_*() methods before using a feature, never by comparing
+#  api_level inline: an older node must fall back to the legacy behaviour, not
+#  be treated as one that failed.
+NODE_API_NORMALISATION = 37   # WRITE/READ_NORM_* coefficients
+
 class Node:
     '''Node class represents the arduino/rx pair.'''
     def __init__(self):
@@ -114,6 +120,14 @@ class Node:
             'pass_peak_rssi': self.pass_peak_rssi,
             'pass_nadir_rssi': self.pass_nadir_rssi
         }
+
+    def supports_normalisation(self):
+        '''True if the node firmware applies RSSI normalisation coefficients.
+
+        A node without it is not faulty: it runs uncorrected, which is what
+        every node did before the feature existed.
+        '''
+        return self.api_valid_flag and self.api_level >= NODE_API_NORMALISATION
 
     def is_valid_rssi(self, value):
         return value > 0 and value < self.max_rssi_value

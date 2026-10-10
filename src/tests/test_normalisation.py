@@ -1065,5 +1065,118 @@ class NormalisationTest(unittest.TestCase):
                 self.assertIn(column, columns)
 
 
+class NormalisationCapabilityTest(unittest.TestCase):
+    """Normalisation is gated by an explicit capability check."""
+
+    @staticmethod
+    def node(api_level):
+        node = Node()
+        node.api_level = api_level
+        node.init()
+        return node
+
+    def test_older_firmware_has_no_normalisation(self):
+        self.assertFalse(self.node(35).supports_normalisation())
+
+    def test_api_37_brings_normalisation(self):
+        self.assertTrue(self.node(37).supports_normalisation())
+
+
+class NormalisationFallbackTest(unittest.TestCase):
+    """A node whose firmware has no normalisation runs uncorrected.
+
+    It must be skipped, never counted as a node that rejected a write: that
+    would mark it unresolved, and an unresolved node blocks racing forever on
+    firmware that can never take the write.
+    """
+    # Borrowed rather than inherited, so NormalisationTest does not run twice.
+    R_FREQS = NormalisationTest.R_FREQS
+    context = NormalisationTest.context
+    sweep_captures = NormalisationTest.sweep_captures
+    capture = NormalisationTest.capture
+    noise_pass = NormalisationTest.noise_pass
+
+    def fleet(self, api_levels):
+        ctx, nodes, cal = self.context(count=len(api_levels))
+        for node, api in zip(nodes, api_levels):
+            node.api_level = api
+            node.init()
+        ctx.interface.supports_normalisation.side_effect = \
+            lambda idx: nodes[idx].supports_normalisation()
+        return ctx, nodes, cal
+
+    def test_startup_on_old_firmware_does_not_block_racing(self):
+        ctx, _, cal = self.fleet([35] * 8)
+        self.assertTrue(cal.hardware_set_all_normalisation())
+        self.assertFalse(cal.norm_state_is_unresolved())
+        ctx.interface.set_normalisation.assert_not_called()
+        ctx.rhui.emit_priority_message.assert_not_called()
+        self.assertEqual(cal.norm_unsupported_nodes(), list(range(1, 9)))
+
+    def test_a_mixed_fleet_only_writes_to_capable_nodes(self):
+        ctx, _, cal = self.fleet([38, 35, 37])
+        self.assertTrue(cal.hardware_set_all_normalisation())
+        written = [c.args[0] for c in ctx.interface.set_normalisation.call_args_list]
+        self.assertEqual(written, [0, 2])
+        self.assertFalse(cal.norm_state_is_unresolved())
+
+    def test_a_real_rejection_on_capable_firmware_still_blocks(self):
+        ctx, _, cal = self.fleet([38, 35])
+        ctx.interface.set_normalisation.return_value = False
+        self.assertFalse(cal.hardware_set_all_normalisation())
+        self.assertIn('not accepted by node(s) 1;',
+                      ctx.rhui.emit_priority_message.call_args.args[0])
+
+    def test_a_stored_fit_the_firmware_cannot_apply_blocks(self):
+        """Its thresholds were converted for a correction the node is not on."""
+        ctx, _, cal = self.fleet([38, 35])
+        ctx.race.profile.norm_pivots = json.dumps({'v': [150, 150]})
+        self.assertFalse(cal.hardware_set_all_normalisation())
+        self.assertIn('reset calibration',
+                      ctx.rhui.emit_priority_message.call_args.args[0])
+
+    def test_retuning_an_unsupported_node_sends_nothing(self):
+        ctx, _, cal = self.fleet([35])
+        self.assertFalse(cal.norm_apply_for_frequency(0, 5658))
+        ctx.interface.set_normalisation.assert_not_called()
+
+    def test_editing_a_coefficient_on_an_unsupported_node_is_refused(self):
+        ctx, _, cal = self.fleet([35])
+        ctx.race.profile.norm_pivots = json.dumps({'v': [150]})
+        self.assertFalse(cal.norm_wizard_set_coefficient(0, 'offset', -20))
+        ctx.interface.set_normalisation.assert_not_called()
+        self.assertFalse(cal.norm_state_is_unresolved())
+        self.assertIn('does not support',
+                      ctx.rhui.emit_priority_message.call_args.args[0])
+
+    def test_the_wizard_stores_no_correction_for_an_unsupported_node(self):
+        fleet = [(18, 52), (22, 61), (15, 88), (20, 58)]
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.fleet([38, 35, 38, 38])
+            cal._norm_captured = self.sweep_captures(fleet)
+            cal._norm_note_capture_session()
+            self.assertTrue(cal.norm_wizard_apply())
+        written = [c.args[0] for c in ctx.interface.set_normalisation.call_args_list]
+        self.assertNotIn(1, written)
+        self.assertEqual(json.loads(ctx.race.profile.norm_pivots)['v'][1], 0)
+        self.assertFalse(cal.norm_state_is_unresolved())
+
+    def test_noise_levelling_leaves_unsupported_nodes_out(self):
+        ctx, nodes, cal = self.fleet([38, 35, 38])
+        self.noise_pass(cal, nodes, [90, 95, 68])
+        self.assertTrue(cal.norm_wizard_apply_noise())
+        written = [c.args[0] for c in ctx.interface.set_normalisation.call_args_list]
+        self.assertEqual(written, [0, 2])
+        self.assertFalse(cal.norm_state_is_unresolved())
+
+    def test_reset_skips_unsupported_nodes(self):
+        with patch('calibration.gevent.sleep'):
+            ctx, _, cal = self.fleet([38, 35])
+            cal.norm_wizard_reset()
+        written = [c.args[0] for c in ctx.interface.set_normalisation.call_args_list]
+        self.assertEqual(written, [0])
+        self.assertFalse(cal.norm_state_is_unresolved())
+
+
 if __name__ == '__main__':
     unittest.main()
