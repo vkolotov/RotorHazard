@@ -667,7 +667,7 @@ class RHInterface(BaseHardwareInterface):
         it with whatever the node still holds.
         """
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 37:
+        if node.supports_extremums_reset():
             self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
             # Mirror what the node clears, or the stale server-side copies keep
             #  being drawn until the next pass replaces them.
@@ -694,7 +694,7 @@ class RHInterface(BaseHardwareInterface):
         that was never acknowledged must not be recorded as one that was.
         """
         node = self.nodes[node_index]
-        if not node.api_valid_flag or node.api_level < 38 or not node.has_wide_rssi():
+        if not node.supports_adc_resolution():
             return False
         bits = FULL_ADC_BITS if full_resolution else LEGACY_ADC_BITS
         self.set_and_validate_value_8(node, WRITE_ADC_RESOLUTION,
