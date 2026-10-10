@@ -2780,7 +2780,7 @@ def apply_rssi_resolution(full_resolution):
     refused = []
     for idx in range(RaceContext.race.num_nodes):
         node = RaceContext.interface.nodes[idx]
-        if node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi():
+        if getattr(node, 'supports_adc_resolution', None) and node.supports_adc_resolution():
             if RaceContext.interface.set_adc_resolution(idx, full_resolution):
                 applied += 1
             else:
