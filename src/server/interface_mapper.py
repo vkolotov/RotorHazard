@@ -170,12 +170,21 @@ class InterfaceMapper:
         local_index = mapped_node.index
         return mapped_node.interface.set_exit_at_level(local_index, level)
 
+    def supports_normalisation(self, node_index):
+        # An interface without the feature (mock nodes, secondaries) runs
+        #  uncorrected; that is a capability, not a failure.
+        mapped_node = self._node_map[node_index]
+        if hasattr(mapped_node.interface, "supports_normalisation"):
+            return bool(mapped_node.interface.supports_normalisation(mapped_node.index))
+        return False
+
     def set_normalisation(self, node_index, pivot, offset, scale):
         mapped_node = self._node_map[node_index]
         local_index = mapped_node.index
         if hasattr(mapped_node.interface, "set_normalisation"):
             return mapped_node.interface.set_normalisation(
                 local_index, pivot, offset, scale)
+        return False
 
     def reset_node_extremums(self, node_index):
         mapped_node = self._node_map[node_index]

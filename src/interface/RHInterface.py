@@ -622,6 +622,10 @@ class RHInterface(BaseHardwareInterface):
             if self.transmit_exit_at_level(node, level):
                 node.exit_at_level = level
 
+    def supports_normalisation(self, node_index):
+        """True if the node firmware can be sent normalisation coefficients."""
+        return self.nodes[node_index].supports_normalisation()
+
     def set_normalisation(self, node_index, pivot, offset, scale):
         """Send one node its calibration.
 
@@ -629,9 +633,12 @@ class RHInterface(BaseHardwareInterface):
         the node needs no target of its own. Above the pivot the offset applies
         alone at unity gain; below it scale is the Q8 gain. pivot 0 disables the
         correction.
+
+        Callers must check supports_normalisation() first: False here means a
+        supported node did not confirm the write.
         """
         node = self.nodes[node_index]
-        if not node.api_valid_flag or node.api_level < 37:
+        if not node.supports_normalisation():
             return False
         # Pivot 0 first so the correction is off while the coefficients are in
         #  flux, and pivot last so it only comes on once they are all in.
