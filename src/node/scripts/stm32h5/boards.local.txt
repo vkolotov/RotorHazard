@@ -1,0 +1,24 @@
+# RotorHazard node: WeAct "Black Pill" STM32H523CEU6 module
+#
+# The STM32 core (2.12.0) ships the H523C variant pin tables but no board menu
+#  entry and no linker script.  Install with 'install_stm32h5_board.sh', which
+#  copies this file next to the core's boards.txt and 'ldscript.ld' into the
+#  variant folder.
+#
+# The generic variant puts 'Serial' on USART4 (PA0/PA1), which are RSSI inputs
+#  on the Black Pill pinout; move it to USART1 (PA9/PA10) like the F411 module,
+#  which is also the port the STM32 system bootloader listens on.  The plain
+#  PA9/PA10 pin names select LPUART1 on this chip; the _ALT1 names select USART1.
+#
+# The variant also enables the OCTOSPI HAL module; in core 2.12.0 that compiles
+#  the H5 DLYB LL driver without its header and the build fails.  The node does
+#  not use OCTOSPI, so disable it.
+
+GenH5.menu.pnum.RH_BLACKPILL_H523CE=RotorHazard Black Pill H523CE
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.upload.maximum_size=524288
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.upload.maximum_data_size=278528
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.build.board=GENERIC_H523CEUX
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.build.product_line=STM32H523xx
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.build.variant=STM32H5xx/H523C(C-E)(T-U)_H533CE(T-U)
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.build.extra_flags=-DSERIAL_UART_INSTANCE=1 -DPIN_SERIAL_RX=PA10_ALT1 -DPIN_SERIAL_TX=PA9_ALT1 -DLED_BUILTIN=PC13 -DHAL_OSPI_MODULE_DISABLED
+GenH5.menu.pnum.RH_BLACKPILL_H523CE.debug.svd_file={runtime.tools.STM32_SVD.path}/svd/STM32H5xx/STM32H523.svd

@@ -6,6 +6,9 @@
 
 #ifdef STM32_CORE_VERSION
 #define STM32_MODE_FLAG 1  // 1 for STM 32-bit processor running multiple nodes
+#if defined(STM32H5xx) && !defined(STM32_H5_PROCTYPE)
+#define STM32_H5_PROCTYPE 1  // STM32H523CE "Black Pill" module; uses the F4 pinout
+#endif
 #else
 #define STM32_MODE_FLAG 0  // 0 for Arduino processor running single node
 #endif
@@ -100,7 +103,11 @@
 #define RX5808_SEL0_PIN PB6            //SEL output lines to RX5808 modules
 #define RX5808_SEL1_PIN PB7
 #define RX5808_SEL2_PIN PB8
+#if STM32_H5_PROCTYPE
+#define RX5808_SEL3_PIN PB5            //the 48-pin STM32H523 has no PB9 (VCAP pin)
+#else
 #define RX5808_SEL3_PIN PB9
+#endif
 #define RX5808_SEL4_PIN PB12
 #define RX5808_SEL5_PIN PB13
 #define RX5808_SEL6_PIN PB14
@@ -112,7 +119,7 @@
 
 #define AUXLED_OUTPUT_PIN PA15
 
-#ifndef STM32_F4_PROCTYPE  // pinouts for STM32F103C8T6 "Blue Pill" module
+#if !defined(STM32_F4_PROCTYPE) && !defined(STM32_H5_PROCTYPE)  // pinouts for STM32F103C8T6 "Blue Pill" module
 
 #define RSSI_INPUT0_PIN A0             //RSSI inputs from RX5808 modules
 #define RSSI_INPUT1_PIN A1
@@ -132,7 +139,7 @@
 #define RPI_SIGNAL_PIN PB0
 #define RPI_SIGNAL_ONSTATE HIGH
 
-#else                   // pinouts for STM32F411CEU6 "Black Pill" module
+#else  // pinouts for STM32F411CEU6 and STM32H523CEU6 "Black Pill" modules
 
 #define RSSI_INPUT0_PIN PB1            //RSSI inputs from RX5808 modules
 #define RSSI_INPUT1_PIN A0
