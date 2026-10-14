@@ -41,6 +41,8 @@ Support for STM32 processors in the Arduino IDE is provided by the [STM32duino p
 
 *STM32F4:* If the code needs to be built for an STM32F4 module (as described [here](../../resources/S32_BPill_PCB/stm32f4module.md)) the above process may be used if the "Board part number" is configured to match the processor type.  Also, to configure the proper I/O pinout, the following line should added to the "src/node/config.h" file (right after the "#include" statements):  `#define STM32_F4_PROCTYPE 1`
 
+*STM32H5:* The code may also be built for the STM32H523CE "[Black Pill](https://docs.zephyrproject.org/latest/boards/weact/blackpill_h523ce/doc/index.html)" module (Cortex-M33, 250 MHz). The STM32 core (2.12.0) has no board entry or linker script for this part, so first run `src/node/scripts/install_stm32h5_board.sh <STM32 core dir>` (e.g. `~/.arduino15/packages/STMicroelectronics/hardware/stm32/2.12.0`), then select "Generic STM32H5 series" with the "Board part number" set to "RotorHazard Black Pill H523CE". The STM32H5 pinout is detected automatically and matches the STM32F4 pinout except for one pin: the 48-pin STM32H523 has no PB9, so RX5808 SEL3 moves to **PB5**. The serial link uses USART1 (PA9/PA10), as on the F4 module. Name the firmware file `RH_S32_BPill_node_STM32H5.bin` so that the server offers it for STM32H5 nodes.
+
 ## Command-line Compiling and Uploading (S32_BPill Nodes)
 
 Command-line batch/script files for compiling and uploading the node code may be found in the `src/node/scripts` directory. For these files to work, the Arduino IDE needs to be installed -- Arduino IDE version 1.8 or newer is required, and it can be downloaded from https://www.arduino.cc/en/Main/Software
@@ -56,6 +58,8 @@ The following batch/script files are available:
 * *upload_stm32* : Builds the S32_BPill node code and uploads it using the serial (COM) port specified as the first argument. An optional second argument, "--skipBuild", may be specified to skip the build and upload the last firmware file that was built. See the last step [above](#s32ftdi) for info on using an FTDI for uploading
 
 * *upload_stm32_F4* : Version of 'upload_stm32' for the STM32F411CE "[Black Pill](https://github.com/WeActTC/MiniSTM32F4x1)" module
+
+* *install_stm32h5_board.sh* : Adds the "RotorHazard Black Pill H523CE" board entry and its linker script to an installed STM32 core (needed once before building for the STM32H523CE module)
 
 ## Compiling and Uploading with Sloeber Eclipse (S32_BPill Nodes)
 

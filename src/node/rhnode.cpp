@@ -46,7 +46,9 @@ const char *firmwareBuildTimeString = "FIRMWARE_BUILDTIME: " __TIME__;
 #if !STM32_MODE_FLAG
 const char *firmwareProcTypeString = "FIRMWARE_PROCTYPE: Arduino";
 #else
-#if !STM32_F4_PROCTYPE
+#if STM32_H5_PROCTYPE
+const char *firmwareProcTypeString = "FIRMWARE_PROCTYPE: STM32H5";
+#elif !STM32_F4_PROCTYPE
 const char *firmwareProcTypeString = "FIRMWARE_PROCTYPE: STM32F1";
 #else
 const char *firmwareProcTypeString = "FIRMWARE_PROCTYPE: STM32F4";
@@ -803,6 +805,8 @@ void handleStatusMessage(byte msgTypeVal, byte msgDataVal)
 // address for STM32 bootloader
 #if defined(STM32F1)
 #define BOOTLOADER_ADDRESS 0x1FFFF000
+#elif defined(STM32H5xx)
+#define BOOTLOADER_ADDRESS 0x0BF97000  // STM32H523/533/562/563/573, see ST AN2606
 #else
 #define BOOTLOADER_ADDRESS 0x1FFF0000
 #endif
@@ -831,6 +835,20 @@ void doJumpToBootloader()
     SysTick->VAL = 0;
 
     __disable_irq();  // disable all interrupts
+
+#if defined(STM32H5xx)
+    // the H5 has no memory remap; the bootloader starts with its own clocks,
+    //  so make sure no interrupt or cached code from the application survives
+    for (uint8_t i = 0; i < (sizeof(NVIC->ICER) / sizeof(NVIC->ICER[0])); ++i)
+    {
+        NVIC->ICER[i] = 0xFFFFFFFF;
+        NVIC->ICPR[i] = 0xFFFFFFFF;
+    }
+#if defined(HAL_ICACHE_MODULE_ENABLED)
+    HAL_ICACHE_Disable();
+#endif
+    __enable_irq();  // all sources are off in the NVIC; as in ST's jump-to-bootloader example
+#endif
 
     // Remap system memory to address 0x0000 0000 in address space
     // For each family registers may be different.

@@ -64,6 +64,9 @@ CHIP_IDS = {
     0x419: "STM32F42xxx and STM32F43xxx",
     0x449: "STM32F74xxx/75xxx",
     0x451: "STM32F76xxx/77xxx",
+    # RM0481 DBGMCU_IDCODE
+    0x478: "STM32H523xx/533xx",
+    0x484: "STM32H562xx/563xx/573xx",
     # RM0394 46.6.1 MCU device ID code
     0x435: "STM32L4xx",
     # see ST AN4872
@@ -227,6 +230,8 @@ class Stm32Bootloader:
         "L4": 0x1FFF7590,
         # ST RM0444 section 38.1 Unique device ID register
         "G0": 0x1FFF7590,
+        # ST RM0481 Unique device ID register
+        "H5": 0x08FFF800,
     }
 
     UID_SWAP = [[1, 0], [3, 2], [7, 6, 5, 4], [11, 10, 9, 8]]
@@ -258,6 +263,8 @@ class Stm32Bootloader:
         "L4": 0x1FFF75E0,
         # ST RM0444 section 38.2 Flash memory size data register
         "G0": 0x1FFF75E0,
+        # ST RM0481 Flash size data register
+        "H5": 0x08FFF80C,
     }
 
     DATA_TRANSFER_SIZE = 256  # bytes
@@ -909,8 +916,12 @@ def flash_file_to_stm32(portStr, srcStr):
             deviceId = bootloaderObj.get_id()
             Console_output_fn("Device chip id: 0x%X (%s)" % (deviceId, CHIP_IDS.get(deviceId, "Unknown")))
             successFlag = True
-            family = "F4" if deviceId == 0x431 or deviceId == 0x433 or \
-                     deviceId == 0x413 or deviceId == 0x419 else "F1"
+            if deviceId == 0x431 or deviceId == 0x433 or deviceId == 0x413 or deviceId == 0x419:
+                family = "F4"
+            elif deviceId == 0x478 or deviceId == 0x484:
+                family = "H5"
+            else:
+                family = "F1"
             try:
                 if family != "F4":
                     flash_size = bootloaderObj.get_flash_size(family)
