@@ -733,7 +733,7 @@ class NormalisationTest(unittest.TestCase):
         """
         _, nodes, cal = self.context(count=2)
         self.assertTrue(self.noise_pass(cal, nodes, [90, 95]))
-        self.assertTrue(self.capture(cal, nodes, 'high', [187, 100]))   # R1 ok
+        self.assertTrue(self.capture(cal, nodes, 'high', [187, 150]))   # R1 ok
         self.assertIn('high:R1', cal._norm_captured)
         # R2's gate sits 6 counts over its floor: the quad never arrived
         self.assertFalse(self.capture(cal, nodes, 'high', [100, 101]))
@@ -754,13 +754,38 @@ class NormalisationTest(unittest.TestCase):
         self.assertTrue(self.capture(cal, nodes, 'high', [90 + gap]))  # exactly the limit
         self.assertIn('high:R1', cal._norm_captured)
 
-    def test_only_the_node_on_that_channel_is_judged(self):
-        """Off-channel nodes read bleed, so their tiny rise means nothing."""
+    def test_a_weak_receiver_below_the_minimum_is_still_calibrated(self):
+        """The minimum judges the placement, not each receiver.
+
+        A weak receiver is what normalisation exists to correct. Node 2 here
+        rises about half as far as node 1, as the pocket timer's weakest node
+        did with the quad on the mark, and is below the absolute minimum.
+        """
         _, nodes, cal = self.context(count=2)
         self.assertTrue(self.noise_pass(cal, nodes, [90, 95]))
-        # on R1 only node 1 is judged; node 2 reads bleed and barely moves
-        self.assertTrue(self.capture(cal, nodes, 'high', [187, 96]))
+        gap = cal._norm_min_gap()
+        self.assertTrue(self.capture(cal, nodes, 'high', [90 + 2 * gap, 95 + gap - 5]))
         self.assertIn('high:R1', cal._norm_captured)
+
+    def test_a_receiver_that_does_not_see_the_quad_is_refused(self):
+        """Every node is tuned to the channel, so one that barely rises is broken."""
+        _, nodes, cal = self.context(count=2)
+        self.assertTrue(self.noise_pass(cal, nodes, [90, 95]))
+        gap = cal._norm_min_gap()
+        self.assertFalse(self.capture(cal, nodes, 'high', [90 + 2 * gap, 96]))
+        self.assertNotIn('high:R1', cal._norm_captured)
+        message = cal._racecontext.rhui.emit_priority_message.call_args.args[0]
+        self.assertIn('Node 2', message)
+        self.assertIn('not seeing the quad', message)
+
+    def test_the_placement_is_judged_by_the_strongest_node(self):
+        """If even the best receiver is under the minimum, the quad is misplaced."""
+        _, nodes, cal = self.context(count=2)
+        self.assertTrue(self.noise_pass(cal, nodes, [90, 95]))
+        gap = cal._norm_min_gap()
+        self.assertFalse(self.capture(cal, nodes, 'high', [90 + gap - 1, 95 + gap - 2]))
+        message = cal._racecontext.rhui.emit_priority_message.call_args.args[0]
+        self.assertIn('strongest node (node 1)', message)
 
     def applied(self, count=1, pivot=150, offset=50, scale=300):
         """A context with a fit already stored and on the nodes."""

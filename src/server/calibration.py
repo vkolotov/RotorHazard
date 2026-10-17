@@ -74,7 +74,20 @@ def node_full_resolution(node):
 #  measured fleet spanned 34 to 49 counts with the quad properly placed, so 30
 #  sits below every real measurement while still catching a pass flown too
 #  close to the gate.
+#
+# It judges the placement, so it is applied to the strongest node on the
+#  channel. A weak receiver is what normalisation exists to correct: the pocket
+#  timer's node 5 sat at 20 to 29 counts (in 255ths) with the quad on the mark
+#  while its neighbours read 35 to 42, and an absolute minimum per node refused
+#  to calibrate it at all.
 NORM_MIN_LEVEL_FRACTION = 30.0 / 255
+
+# Minimum gap for any one node, as a fraction of the strongest node's gap on
+#  the same channel. Every node is tuned to the channel being captured, so a
+#  node far below the rest is not seeing the quad at all - a dead or detuned
+#  receiver whose fit would be a huge scale applied to noise. Weak receivers in
+#  a measured fleet sat at 0.54 of the strongest or better.
+NORM_MIN_NODE_FRACTION = 0.25
 
 # The Q8 scale that changes nothing: the node multiplies by scale >> 8, so 256
 #  is exactly one. Both the default for a node that has never been fitted and
@@ -1099,22 +1112,38 @@ class Calibration:
         if not noise:
             return None  # no floor to compare against yet
 
-        # Only nodes tuned to this channel measure it; the rest are bystanders
-        #  reading bleed from an adjacent channel and say nothing useful here.
-        labels = self._norm_node_channels()
-        gap = self._norm_min_gap()
+        # The sweep tunes every participant to this channel, so every one of
+        #  them measures it.
+        gaps = {}
         for idx in self._norm_participants():
-            if labels[idx] != channel:
-                continue
             hi, fl = vals[idx], noise[idx]
-            if hi is None or fl is None:
-                continue
-            if (hi - fl) < gap:
+            if hi is not None and fl is not None:
+                gaps[idx] = (hi - fl, hi, fl)
+        if not gaps:
+            return None
+
+        # The placement: even the strongest receiver barely sees the quad.
+        best_idx = max(gaps, key=lambda i: gaps[i][0])
+        best_gap, hi, fl = gaps[best_idx]
+        need = self._norm_min_gap()
+        if best_gap < need:
+            return ('{0}: the strongest node (node {1}) is only {2} above its '
+                    'noise floor {3}, need {4}. The quad is too far from the '
+                    'gate or off channel - place it on the marked spot and '
+                    'capture this pass again from the first '
+                    'channel.').format(channel, best_idx + 1, best_gap, fl, need)
+
+        # One receiver that does not see the quad while the rest do.
+        need = max(1, int(round(NORM_MIN_NODE_FRACTION * best_gap)))
+        for idx, (gap, hi, fl) in gaps.items():
+            if gap < need:
                 return ('Node {0} ({1}): gate {2} is only {3} above its noise '
-                        'floor {4}, need {5}. The quad is too far from the gate '
-                        'or off channel - place it on the marked spot and '
-                        'capture this pass again from the first '
-                        'channel.').format(idx + 1, channel, hi, hi - fl, fl, gap)
+                        'floor {4}, while node {5} rises {6}; need {7}. The '
+                        'receiver is not seeing the quad - check its antenna '
+                        'and module, then capture this pass again from the '
+                        'first channel.').format(
+                            idx + 1, channel, hi, gap, fl,
+                            best_idx + 1, best_gap, need)
         return None
 
     def _vtx(self):
