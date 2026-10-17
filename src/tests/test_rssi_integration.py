@@ -49,9 +49,9 @@ class RssiIntegrationTest(unittest.TestCase):
         for full, floor, gate in ((True, 700, 1700), (False, 88, 213)):
             with self.subTest(full=full), patch('calibration.gevent.sleep'):
                 ctx, node, cal = self.context(full)
-                cal._norm_scope_sel = 'current'
+                cal._norm_scope_sel = ['R']
                 cal._norm_saved_freqs = cal._norm_profile_freqs()
-                cal._norm_channels = cal._norm_sweep_channels()
+                cal._norm_channels = cal._norm_sweep_channels()[:1]  # R1 only
                 cal._norm_captured = {'noise:R1': [floor], 'high:R1': [gate]}
                 cal._norm_note_capture_session()
                 self.assertTrue(cal.norm_wizard_apply())
@@ -109,9 +109,9 @@ class RssiIntegrationTest(unittest.TestCase):
             ctx.race.profile.exit_ats = json.dumps({'v': [160]})
             ctx.interface.set_enter_at_level.side_effect = \
                 lambda *a, **k: seen.append(cal._norm_busy)
-            cal._norm_scope_sel = 'current'
+            cal._norm_scope_sel = ['R']
             cal._norm_saved_freqs = cal._norm_profile_freqs()
-            cal._norm_channels = cal._norm_sweep_channels()
+            cal._norm_channels = cal._norm_sweep_channels()[:1]  # R1 only
             cal._norm_captured = {'noise:R1': [90], 'high:R1': [210]}
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())

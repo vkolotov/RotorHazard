@@ -35,7 +35,7 @@ class NormalisationTest(unittest.TestCase):
     #  resolves them.
     R_FREQS = (5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917)
 
-    def context(self, count=1, scope='current'):
+    def context(self, count=1, scope=('R',)):
         nodes = []
         for _ in range(count):
             node = Node()
@@ -64,9 +64,10 @@ class NormalisationTest(unittest.TestCase):
         if scope:
             cal._norm_scope_sel = scope
             cal._norm_saved_freqs = cal._norm_profile_freqs()
-            # Frozen as norm_start freezes it: the sweep rewrites the profile, so
-            #  the channel list cannot be re-derived from it mid-run.
-            cal._norm_channels = cal._norm_sweep_channels()
+            # Frozen as norm_start freezes it, but to the first `count`
+            #  channels of the band, so each test sweeps one channel per node
+            #  rather than all eight.
+            cal._norm_channels = cal._norm_sweep_channels()[:count]
         return ctx, nodes, cal
 
     @classmethod
@@ -330,9 +331,9 @@ class NormalisationTest(unittest.TestCase):
                                  tuple((band, c, f) for c, f in channels))
                 self.assertEqual(len(cal._norm_steps()), 2 * len(channels))
 
-    def test_combined_scopes_keep_current_channels_and_deduplicate_frequencies(self):
+    def test_combined_scopes_deduplicate_frequencies(self):
         _, _, cal = self.context(count=2, scope=None)
-        self.assertTrue(cal.norm_start(['F', 'current', 'R', 'R']))
+        self.assertTrue(cal.norm_start(['F', 'R', 'R']))
         channels = cal._norm_sweep_channels()
         self.assertEqual(channels[:2], (('R', 1, 5658), ('R', 2, 5695)))
         self.assertEqual(len(channels), 15)  # R7 and F8 share 5880 MHz.
@@ -355,12 +356,14 @@ class NormalisationTest(unittest.TestCase):
         controller.command_channel.assert_not_called()
         self.assertEqual(cal.norm_wizard_state()['channel'], 'U0')
 
-    def test_the_current_scope_sweeps_only_the_channels_in_use(self):
-        _, _, cal = self.context(count=3, scope=None)
-        self.assertTrue(cal.norm_start('current'))
-        self.assertEqual(cal._norm_steps(),
-                         [('noise', c) for c in ('R1', 'R2', 'R3')]
-                         + [('high', c) for c in ('R1', 'R2', 'R3')])
+    def test_there_is_no_current_channels_scope(self):
+        """Only whole bands are calibrated; the nodes' own channels are not a scope."""
+        for selection in ('current', ['current'], ['R', 'current']):
+            with self.subTest(selection=selection):
+                ctx, _, cal = self.context(count=3, scope=None)
+                self.assertFalse(cal.norm_start(selection))
+                ctx.interface.set_frequency.assert_not_called()
+                self.assertEqual(cal.norm_wizard_state()['state'], 'choosing')
 
     def test_a_capture_tunes_every_node_to_the_step_channel(self):
         """One channel per step, all nodes on it - that is what makes the fit
@@ -621,7 +624,7 @@ class NormalisationTest(unittest.TestCase):
             self.assertEqual(cal.norm_wizard_state()['state'], 'applied')
 
     def test_disabled_node_does_not_take_part(self):
-        """A node with no frequency raises no step and gets no fit."""
+        """A node with no frequency takes no part and gets no channel of its own."""
         ctx, _, cal = self.context(count=2)
         ctx.race.profile.frequencies = json.dumps(
             {'b': ['R', 'R'], 'c': [1, 2], 'f': [5658, 0]})
@@ -630,9 +633,6 @@ class NormalisationTest(unittest.TestCase):
         cal._norm_channels = None
         self.assertEqual(cal._norm_participants(), [0])
         self.assertIsNone(cal._norm_node_channels()[1])
-        # only the enabled node's channel raises a gate step
-        labels = [chan for _, chan in cal._norm_steps() if chan]
-        self.assertEqual(sorted(set(labels)), ['R1'])
 
     def test_level_is_the_outer_loop(self):
         """The quad is powered off once for the noise pass, on once for the gate.

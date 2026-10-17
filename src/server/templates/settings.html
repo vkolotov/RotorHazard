@@ -440,8 +440,8 @@
 
 		/* Profiles */
 		/* Normalisation scope selection */
-		var norm_scope_options = ['current', 'R', 'L', 'F', 'E', 'B', 'A', 'U', 'D', 'J', 'S', 'O', 'Q'];
-		var norm_scope_selected = ['current'];
+		var norm_scope_options = ['R', 'L', 'F', 'E', 'B', 'A', 'U', 'D', 'J', 'S', 'O', 'Q'];
+		var norm_scope_selected = ['R'];
 		var norm_scope_state = null;
 		var update_norm_scope_buttons = function () {
 			$.each(norm_scope_options, function (i, scope) {
@@ -3029,7 +3029,6 @@
 				</div>
 				<div class="norm-wizard">
 					<div id="norm_scope_selection" class="norm-scope-selection" role="group" aria-label="{{ __('Channels to normalise') }}" style="display: none;">
-						<button type="button" id="norm_scope_current" class="alt-button" aria-pressed="false">{{ __('Current channels') }}</button>
 						<button type="button" id="norm_scope_r" class="alt-button" aria-pressed="false">{{ __('R') }}</button>
 						<button type="button" id="norm_scope_l" class="alt-button" aria-pressed="false">{{ __('L') }}</button>
 						<button type="button" id="norm_scope_f" class="alt-button" aria-pressed="false">{{ __('F') }}</button>

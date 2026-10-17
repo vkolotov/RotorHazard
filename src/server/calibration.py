@@ -124,14 +124,18 @@ NORM_BANDS = {
     'Q': ((1, 5677), (2, 5794), (3, 5902)),
     }
 
-# What a sweep may cover. 'current' keeps whatever the nodes are tuned to and
-#  calibrates only those channels; band selections can be combined.
+# What a sweep may cover: whole bands, which can be combined.
+#
+# There is no "the channels the nodes are on now" scope. Every node is measured
+#  on every channel in the sweep anyway, so a band costs only the extra gate
+#  captures, and a fit made for one race's channel set leaves every other
+#  channel uncorrected the moment a pilot changes.
 #
 # A fit is per [node, frequency]: a receiver's sensitivity differs channel to
 #  channel, so one fit reused across a band left a measurable error - calibrate
 #  on one channel and move the fleet and cross-node agreement degrades to 6-11%
 #  within R band alone. R and L are 555 MHz apart, so across both it is worse.
-NORM_SCOPES = ('current', *NORM_BANDS)
+NORM_SCOPES = tuple(NORM_BANDS)
 
 # How long to wait after retuning before the extremes are even cleared. The
 #  RX5808's VCO and the filter behind it need time to settle on a new channel,
@@ -336,32 +340,29 @@ class Calibration:
         return tuple(item for item in NORM_SCOPES if item in scope)
 
     def _norm_scope(self):
-        """The selected scopes for this run, defaulting to current."""
+        """The selected scopes for this run, or None before one is chosen."""
         scope = getattr(self, '_norm_scope_sel', None)
-        return scope if self._norm_scope_selection(scope) else 'current'
+        return scope if self._norm_scope_selection(scope) else None
 
     def _norm_sweep_channels(self):
         """The channels this run calibrates, in capture order.
 
-        Frozen at run start. The sweep retunes the profile as it goes, so
-        re-deriving the list from it mid-run would collapse the 'current' scope
-        to whatever channel was last captured.
+        Frozen at run start, so the capture order cannot shift under a run.
 
         Every node is tuned to the same channel for each capture, so a step
         yields a reading for every node on that one frequency. That is what makes
         the fit per [node, frequency]: each node ends up measured on every
         channel rather than only on its own.
 
-        'current' calibrates the distinct channels the nodes are already tuned
-        to; the band scopes calibrate every channel in the band, whatever the
-        nodes happen to be set to.
+        A band scope calibrates every channel in the band, whatever the nodes
+        happen to be set to.
 
         :return: ((band, channel, frequency), ...)
         """
         frozen = getattr(self, '_norm_channels', None)
         if frozen:
             return frozen
-        scopes = self._norm_scope_selection(self._norm_scope())
+        scopes = self._norm_scope_selection(self._norm_scope()) or ()
         out, seen = [], set()
 
         def add(band, chan, freq):
@@ -371,14 +372,9 @@ class Calibration:
                 seen.add(freq)
                 out.append((band, chan, freq))
 
-        if 'current' in scopes:
-            profile_freqs = self._norm_profile_freqs()
-            for idx in self._norm_participants():
-                add(*(profile_freqs[key][idx] for key in ('b', 'c', 'f')))
         for band in scopes:
-            if band != 'current':
-                for chan, freq in NORM_BANDS[band]:
-                    add(band, chan, freq)
+            for chan, freq in NORM_BANDS[band]:
+                add(band, chan, freq)
         return tuple(out)
 
     def _norm_profile_freqs(self):
@@ -566,9 +562,8 @@ class Calibration:
                 'No node is available to calibrate')
             return False
 
-        # Keep the assignment before anything is retuned. Kept even for the
-        #  'current' scope: that scope still parks every node on one channel at a
-        #  time, so the per-node assignment is just as disturbed.
+        # Keep the assignment before anything is retuned: the sweep parks every
+        #  node on one channel at a time.
         self._norm_saved_freqs = self._norm_profile_freqs()
         self._norm_scope_sel = list(scope) if isinstance(scope, (list, tuple)) else scope
         self._norm_captured = {}
