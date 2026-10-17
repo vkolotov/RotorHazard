@@ -226,7 +226,7 @@ void setup()
         {  //RX5808 not installed in slot
             if (nIdx < RssiNode::multiRssiNodeCount - 1)
             {  //not last slot; shift down nodes later in array
-                for (int i=nIdx; i<RssiNode::multiRssiNodeCount; ++i)
+                for (int i=nIdx; i<RssiNode::multiRssiNodeCount-1; ++i)
                     RssiNode::rssiNodeArray[i].copyNodeData(&RssiNode::rssiNodeArray[i+1]);
             }
             --RssiNode::multiRssiNodeCount;
