@@ -219,5 +219,41 @@ int main() {
                                    capture_output=True)
                     subprocess.run([binary], check=True, capture_output=True)
 
+
+class NodeCapabilityTest(unittest.TestCase):
+    """The 12-bit RSSI features are gated by explicit capability checks."""
+
+    @staticmethod
+    def node(api_level, proctype='STM32F1'):
+        node = Node()
+        node.api_level = api_level
+        node.firmware_proctype_str = proctype
+        node.init()
+        return node
+
+    def test_older_firmware_has_neither_feature(self):
+        node = self.node(35)
+        self.assertFalse(node.supports_extremums_reset())
+        self.assertFalse(node.supports_adc_resolution())
+
+    def test_api_37_brings_extremums_reset_only(self):
+        node = self.node(37)
+        self.assertTrue(node.supports_extremums_reset())
+        self.assertFalse(node.supports_adc_resolution())
+
+    def test_adc_resolution_needs_api_38_on_stm32(self):
+        self.assertTrue(self.node(38).supports_adc_resolution())
+        self.assertFalse(self.node(38, proctype='ATmega328P').supports_adc_resolution())
+
+    def test_unsupported_nodes_are_not_sent_the_commands(self):
+        intf = RHInterface.RHInterface.__new__(RHInterface.RHInterface)
+        intf.nodes = [self.node(35)]
+        intf.set_value_8 = Mock()
+        intf.set_and_validate_value_8 = Mock()
+        intf.reset_node_extremums(0)
+        self.assertFalse(intf.set_adc_resolution(0, True))
+        intf.set_value_8.assert_not_called()
+        intf.set_and_validate_value_8.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()

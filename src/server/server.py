@@ -2841,8 +2841,8 @@ def apply_rssi_resolution(full_resolution):
     are told plainly rather than left to discover it mid-race.
     """
     nodes = RaceContext.interface.nodes[:RaceContext.race.num_nodes]
-    supported = [(node.api_level >= 38 and
-                  getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi())
+    supported = [bool(getattr(node, 'supports_adc_resolution', None) and
+                      node.supports_adc_resolution())
                  for node in nodes]
     if full_resolution and not all(supported):
         RaceContext.rhui.emit_priority_message(

@@ -1,5 +1,13 @@
 '''Node class for the RotorHazard interface.'''
 
+# Lowest node API level that carries each optional feature. Check support with
+#  the Node.supports_*() methods before using a feature, never by comparing
+#  api_level inline: an older node must fall back to the legacy behaviour, not
+#  be treated as one that failed.
+NODE_API_NORMALISATION = 37   # WRITE/READ_NORM_* coefficients
+NODE_API_EXTREMUMS_RESET = 37  # RESET_NODE_EXTREMUMS
+NODE_API_WIDE_RSSI = 38        # 16-bit RSSI fields and WRITE/READ_ADC_RESOLUTION (STM32 only)
+
 class Node:
     '''Node class represents the arduino/rx pair.'''
     def __init__(self):
@@ -126,9 +134,25 @@ class Node:
         from any server setting. Both ends have to agree or every reading is
         parsed wrong.
         '''
-        return self.api_level >= 38 and \
+        return self.api_level >= NODE_API_WIDE_RSSI and \
                bool(self.firmware_proctype_str) and \
                self.firmware_proctype_str.upper().startswith('STM32')
+
+    def supports_normalisation(self):
+        '''True if the node firmware applies RSSI normalisation coefficients.
+
+        A node without it is not faulty: it runs uncorrected, which is what
+        every node did before the feature existed.
+        '''
+        return self.api_valid_flag and self.api_level >= NODE_API_NORMALISATION
+
+    def supports_extremums_reset(self):
+        '''True if the node can restart its own peak/nadir tracking.'''
+        return self.api_valid_flag and self.api_level >= NODE_API_EXTREMUMS_RESET
+
+    def supports_adc_resolution(self):
+        '''True if the node can switch between legacy and full ADC width.'''
+        return self.api_valid_flag and self.has_wide_rssi()
 
     def is_valid_rssi(self, value):
         return value > 0 and value < self.max_rssi_value

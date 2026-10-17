@@ -1004,6 +1004,10 @@ class Calibration:
             return False
         if getattr(self, '_norm_busy', False):
             return False
+        if not self._norm_supported(node_index):
+            self._racecontext.rhui.emit_priority_message(
+                'Node {0} firmware does not support normalisation'.format(node_index + 1))
+            return False
 
         pivots = self._norm_stored('norm_pivots', 0)
         offsets = self._norm_stored('norm_offsets', 0)
@@ -1231,6 +1235,8 @@ class Calibration:
             self._norm_store([0] * num, [0] * num, [NORM_UNITY_SLOPE] * num, {})
             failed = []
             for idx in range(num):
+                if not self._norm_supported(idx):
+                    continue  # never corrected, so already clear
                 if not self._racecontext.interface.set_normalisation(idx, 0, 0, NORM_UNITY_SLOPE):
                     failed.append(idx + 1)
             if not failed:
@@ -1361,11 +1367,14 @@ class Calibration:
         #  about to be restored to. A node whose channel was never calibrated
         #  gets pivot 0 and runs uncorrected rather than on another channel's fit.
         saved = getattr(self, '_norm_saved_freqs', None) or self._norm_profile_freqs()
+        # A node whose firmware has no normalisation gets pivot 0 too: it will
+        #  run uncorrected whatever is stored, and the stored coefficients are
+        #  what defines the threshold axis, so they must say so.
         pivots, offsets, scales = [], [], []
         for idx in range(num):
             fit = None
             freq = saved['f'][idx]
-            if freq:
+            if freq and self._norm_supported(idx):
                 fit = (per_freq.get(str(freq)) or [None] * num)[idx]
             if fit is None:
                 pivots.append(0)
@@ -1382,6 +1391,8 @@ class Calibration:
             self._norm_store(pivots, offsets, scales, per_freq)
             failed = []
             for idx in range(num):
+                if not self._norm_supported(idx):
+                    continue
                 if not self._racecontext.interface.set_normalisation(
                         idx, pivots[idx], offsets[idx], scales[idx]):
                     failed.append(idx + 1)
@@ -1458,6 +1469,8 @@ class Calibration:
 
         :return: True when a fit was written, False when the node was cleared
         """
+        if not self._norm_supported(node_index):
+            return False  # runs uncorrected on every channel; nothing to send
         fit = self._norm_fit_for(node_index, freq)
         if not self._norm_resolution_matches():
             logger.warning('Stored node normalisation belongs to another ADC width')
@@ -1496,6 +1509,21 @@ class Calibration:
     def norm_unresolved_nodes(self):
         return list(getattr(self, '_norm_unresolved', []) or [])
 
+    def _norm_supported(self, node_index):
+        """True if this node's firmware can take normalisation at all.
+
+        Check this before every coefficient write. A node that cannot take it
+        runs uncorrected - its readings are exactly the raw axis - so it is
+        skipped, never counted as a node that rejected a write.
+        """
+        supports = getattr(self._racecontext.interface, 'supports_normalisation', None)
+        return bool(supports(node_index)) if supports else False
+
+    def norm_unsupported_nodes(self):
+        """1-based numbers of the nodes whose firmware has no normalisation."""
+        return [idx + 1 for idx in range(self._racecontext.race.num_nodes)
+                if not self._norm_supported(idx)]
+
     def norm_reset_extremums(self):
         """Restart peak/nadir tracking on every node."""
         for idx in range(self._racecontext.race.num_nodes):
@@ -1511,20 +1539,38 @@ class Calibration:
             offsets = [0] * len(offsets)
             scales = [NORM_UNITY_SLOPE] * len(scales)
         failed = []
+        unsupported = []
         for idx in range(self._racecontext.race.num_nodes):
+            if not self._norm_supported(idx):
+                unsupported.append(idx + 1)
+                continue
             if not self._racecontext.interface.set_normalisation(
                     idx, pivots[idx], offsets[idx], scales[idx]):
                 failed.append(idx + 1)
+        if unsupported:
+            # Expected on older firmware, so information rather than a warning,
+            #  and it does not hold up racing.
+            logger.info('Node firmware without normalisation on node(s) %s; '
+                        'they run uncorrected',
+                        ', '.join(str(n) for n in unsupported))
+        # A correction stored for a node that cannot apply it (e.g. the node was
+        #  swapped for older firmware) means its thresholds sit on an axis the
+        #  node is not on. That is a real mismatch: block, and say how to clear it.
+        stale = [n for n in unsupported if pivots[n - 1]]
+        if stale:
+            msg = ('Node(s) {0} have a stored normalisation their firmware cannot '
+                   'apply; reset calibration before racing').format(
+                       ', '.join(str(n) for n in stale))
+            logger.warning(msg)
+            self._racecontext.rhui.emit_priority_message(msg)
         if failed:
             msg = ('Normalisation was not accepted by node(s) {0}; '
                    'those nodes are running uncorrected').format(
                        ', '.join(str(n) for n in failed))
             logger.warning(msg)
             self._racecontext.rhui.emit_priority_message(msg)
-            self._norm_unresolved = failed
-        else:
-            self._norm_unresolved = []
-        return not failed
+        self._norm_unresolved = sorted(failed + stale)
+        return not self._norm_unresolved
 
     def threshold_scale_id(self, bits=None):
         """The ADC width and correction defining a threshold's RSSI axis."""

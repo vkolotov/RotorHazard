@@ -769,6 +769,9 @@ class RHUI():
         emit_payload = self._racecontext.calibration.norm_wizard_state()
         emit_payload['captured'] = self._racecontext.calibration.norm_captured_table()
         emit_payload['normalised_channels'] = self._racecontext.calibration.norm_normalised_channels()
+        # Nodes whose firmware has no normalisation run uncorrected; the UI can
+        #  say so instead of the wizard appearing to fail on them.
+        emit_payload['unsupported_nodes'] = self._racecontext.calibration.norm_unsupported_nodes()
         suggested = self._racecontext.calibration.norm_suggested_thresholds()
         emit_payload['suggested_enter_at'] = suggested[0] if suggested else None
         emit_payload['suggested_exit_at'] = suggested[1] if suggested else None
@@ -780,7 +783,7 @@ class RHUI():
     def emit_rssi_resolution_state(self, **params):
         """Emits the RSSI resolution setting and whether any node can honour it."""
         supported = any(
-            node.api_level >= 38 and getattr(node, 'has_wide_rssi', None) and node.has_wide_rssi()
+            getattr(node, 'supports_adc_resolution', None) and node.supports_adc_resolution()
             for node in self._racecontext.interface.nodes)
         emit_payload = {
             'full': bool(self._racecontext.serverconfig.get_item(
