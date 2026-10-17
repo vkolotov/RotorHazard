@@ -134,8 +134,8 @@ test('progress describes the current channel, level, step and VTX setup', () => 
 test('scope buttons toggle independently; only Start sends the combined selection', () => {
     const ui = wizard();
     ui.render({state: 'choosing'});
-    assert.equal(ui.element('norm_scope_current').attrs['aria-pressed'], 'true');
-    ui.click('norm_scope_current');
+    assert.equal(ui.element('norm_scope_r').attrs['aria-pressed'], 'true');
+    ui.click('norm_scope_r');
     assert.equal(ui.element('norm_scope_start').props.disabled, true);
     ui.click('norm_scope_start');
     assert.equal(ui.emitted.length, 0);

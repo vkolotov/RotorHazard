@@ -49,9 +49,10 @@ def context(count=2, controller=None):
     ctx.interface.set_normalisation.return_value = True
     cal = Calibration(ctx)
     # A run is armed only once a scope is chosen.
-    cal._norm_scope_sel = 'current'
+    cal._norm_scope_sel = ['R']
     cal._norm_saved_freqs = cal._norm_profile_freqs()
-    cal._norm_channels = cal._norm_sweep_channels()
+    # The first `count` channels of the band, one per node, as a short sweep.
+    cal._norm_channels = cal._norm_sweep_channels()[:count]
     return ctx, cal
 
 
