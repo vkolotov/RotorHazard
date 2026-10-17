@@ -5,6 +5,7 @@
 #  api_level inline: an older node must fall back to the legacy behaviour, not
 #  be treated as one that failed.
 NODE_API_NORMALISATION = 37   # WRITE/READ_NORM_* coefficients
+NODE_API_EXTREMUMS_RESET = 37  # RESET_NODE_EXTREMUMS
 
 class Node:
     '''Node class represents the arduino/rx pair.'''
@@ -128,6 +129,10 @@ class Node:
         every node did before the feature existed.
         '''
         return self.api_valid_flag and self.api_level >= NODE_API_NORMALISATION
+
+    def supports_extremums_reset(self):
+        '''True if the node can restart its own peak/nadir tracking.'''
+        return self.api_valid_flag and self.api_level >= NODE_API_EXTREMUMS_RESET
 
     def is_valid_rssi(self, value):
         return value > 0 and value < self.max_rssi_value

@@ -1229,7 +1229,8 @@ def norm_wizard_mutation_allowed():
 def on_norm_start(data=None):
     '''Begin a calibration run at the chosen scope.'''
     if norm_wizard_mutation_allowed():
-        RaceContext.calibration.norm_start((data or {}).get('scope'))
+        if not RaceContext.calibration.norm_start((data or {}).get('scope')):
+            RaceContext.rhui.emit_norm_wizard_state()
 
 @SOCKET_IO.on('norm_capture_pass')
 @requires_socketio_auth
@@ -1281,14 +1282,6 @@ def on_norm_wizard_apply(_data=None):
     '''Fit and apply the captured calibration.'''
     if norm_wizard_mutation_allowed():
         RaceContext.calibration.norm_wizard_apply()
-
-@SOCKET_IO.on('norm_wizard_apply_noise')
-@requires_socketio_auth
-@catchLogExcWithDBWrapper
-def on_norm_wizard_apply_noise(_data=None):
-    '''Level the noise floors from the noise capture alone.'''
-    if norm_wizard_mutation_allowed():
-        RaceContext.calibration.norm_wizard_apply_noise()
 
 @SOCKET_IO.on('norm_wizard_set_coefficient')
 @requires_socketio_auth
@@ -1682,6 +1675,7 @@ def on_set_profile(data, emit_vals=True):
                                   'enter_ats': enter_ats_loaded, 'exit_ats': exit_ats_loaded})
 
         RaceContext.race.profile = profile
+        previous_axis = RaceContext.calibration._stored_scale_id(profile)
         Events.trigger(Evt.PROFILE_SET, {
             'profile_id': profile_val,
             })
@@ -1694,9 +1688,17 @@ def on_set_profile(data, emit_vals=True):
                 heartbeat_thread_function.imdtabler_flag = True
 
         RaceContext.interface.set_all_frequencies(freqs)
-        RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
-        RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
         RaceContext.calibration.hardware_set_all_normalisation()
+        # A profile that was not open when the correction last changed still
+        #  holds thresholds from the old axis. Convert it now; a profile already
+        #  on this axis is left alone.
+        converted = RaceContext.calibration.convert_thresholds_to_scale(
+            from_axis=previous_axis)
+        if converted and converted[0] is not None:
+            enter_ats, exit_ats = converted
+        else:
+            RaceContext.calibration.hardware_set_all_enter_ats(enter_ats)
+            RaceContext.calibration.hardware_set_all_exit_ats(exit_ats)
 
     else:
         logger.warning('Invalid set_profile value: ' + str(profile_val))

@@ -320,6 +320,41 @@ class NormalisationTest(unittest.TestCase):
         freqs = [f for _, _, f in cal._norm_sweep_channels()]
         self.assertIn(cal_mod.NORM_BANDS['L'][0][1], freqs)
 
+    def test_every_band_can_be_selected_independently(self):
+        import calibration as cal_mod
+        for band, channels in cal_mod.NORM_BANDS.items():
+            with self.subTest(band=band):
+                _, _, cal = self.context(count=2, scope=None)
+                self.assertTrue(cal.norm_start([band]))
+                self.assertEqual(cal._norm_sweep_channels(),
+                                 tuple((band, c, f) for c, f in channels))
+                self.assertEqual(len(cal._norm_steps()), 2 * len(channels))
+
+    def test_combined_scopes_keep_current_channels_and_deduplicate_frequencies(self):
+        _, _, cal = self.context(count=2, scope=None)
+        self.assertTrue(cal.norm_start(['F', 'current', 'R', 'R']))
+        channels = cal._norm_sweep_channels()
+        self.assertEqual(channels[:2], (('R', 1, 5658), ('R', 2, 5695)))
+        self.assertEqual(len(channels), 15)  # R7 and F8 share 5880 MHz.
+        self.assertEqual(len({freq for _, _, freq in channels}), 15)
+        self.assertEqual(cal._norm_sweep_channels(), channels)  # Frozen after retuning.
+
+    def test_invalid_scope_selections_do_not_retune_nodes(self):
+        for selection in ([], {}, ['R', 'invalid'], ['R', {}], 1, None):
+            with self.subTest(selection=selection):
+                ctx, _, cal = self.context(count=2, scope=None)
+                self.assertFalse(cal.norm_start(selection))
+                ctx.interface.set_frequency.assert_not_called()
+
+    def test_extra_bands_retune_nodes_without_an_unsupported_vtx_command(self):
+        _, _, cal = self.context(count=2, scope=None)
+        self.assertTrue(cal.norm_start(['U']))
+        controller = Mock()
+        cal._vtx_controller = controller
+        self.assertTrue(cal.norm_vtx_switch())
+        controller.command_channel.assert_not_called()
+        self.assertEqual(cal.norm_wizard_state()['channel'], 'U0')
+
     def test_the_current_scope_sweeps_only_the_channels_in_use(self):
         _, _, cal = self.context(count=3, scope=None)
         self.assertTrue(cal.norm_start('current'))
@@ -401,6 +436,37 @@ class NormalisationTest(unittest.TestCase):
             self.assertEqual(cal.norm_wizard_state()['level'], 'high')
             self.assertFalse(cal.norm_capture_pass())      # the gate does not
         self.assertNotIn('high:R1', cal._norm_captured)
+
+    def test_noise_pass_publishes_idle_state_on_every_exit(self):
+        """The browser must leave its sweep controls on success, cancel or failure."""
+        for outcome in ('complete', 'cancel', 'missing_reading'):
+            with self.subTest(outcome=outcome):
+                ctx, nodes, cal = self.context(count=2, scope=None)
+                self.assertTrue(cal.norm_start('R'))
+                for node in nodes:
+                    node.node_nadir_rssi = 90 if outcome != 'missing_reading' else 0
+                published = []
+                ctx.rhui.emit_norm_wizard_state.side_effect = lambda: published.append(
+                    cal.norm_wizard_state())
+                capture = cal.norm_wizard_capture
+
+                def capture_then_cancel():
+                    result = capture()
+                    cal.norm_cancel_pass()
+                    return result
+
+                with patch('calibration.gevent.sleep'), patch.object(
+                        cal, 'norm_wizard_capture',
+                        capture_then_cancel if outcome == 'cancel' else capture):
+                    self.assertEqual(cal.norm_capture_pass(), outcome == 'complete')
+
+                self.assertTrue(any(state['sweeping'] for state in published))
+                final = published[-1]
+                self.assertFalse(final['sweeping'])
+                self.assertFalse(final['busy'])
+                self.assertEqual(final['state'], 'capturing')
+                self.assertEqual(final['level'], 'high' if outcome == 'complete' else 'noise')
+                self.assertEqual(final['channel'], 'R2' if outcome == 'cancel' else 'R1')
 
     def test_switching_moves_the_nodes_as_well_as_the_quad(self):
         """One button, because they are one action."""
@@ -611,6 +677,35 @@ class NormalisationTest(unittest.TestCase):
         self.assertEqual(cal.norm_wizard_state()['level'], 'high')
         self.assertEqual(cal.norm_wizard_state()['channel'], 'R2')
 
+    def test_back_from_first_high_restarts_the_whole_noise_pass(self):
+        ctx, nodes, cal = self.context(count=2, scope=None)
+        self.assertTrue(cal.norm_start('R'))
+        for node in nodes:
+            node.node_nadir_rssi = 90
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(cal.norm_capture_pass())
+            self.assertEqual(cal.norm_wizard_state()['level'], 'high')
+            self.assertTrue(cal.norm_wizard_back())
+            state = cal.norm_wizard_state()
+            self.assertEqual((state['level'], state['channel'], state['index']),
+                             ('noise', 'R1', 0))
+            self.assertEqual(state['scope'], 'R')
+            self.assertEqual(state['total'], 16)
+            self.assertEqual(cal._norm_captured, {})
+            self.assertTrue(cal.norm_capture_pass())
+        self.assertEqual(len(cal._norm_captured), 8)
+        self.assertEqual(cal.norm_wizard_state()['level'], 'high')
+
+    def test_normalised_channels_survive_restart_and_clear_on_reset(self):
+        ctx, cal = self.fitted([(90, 180), (95, 190)])
+        self.assertEqual(cal.norm_normalised_channels(), ['R1', 'R2'])
+        restarted = Calibration(ctx)
+        self.assertEqual(restarted.norm_wizard_state()['state'], 'applied')
+        self.assertEqual(restarted.norm_normalised_channels(), ['R1', 'R2'])
+        with patch('calibration.gevent.sleep'):
+            self.assertTrue(restarted.norm_wizard_reset())
+        self.assertEqual(restarted.norm_normalised_channels(), [])
+
     def noise_pass(self, cal, nodes, floors):
         """Run every step of the noise pass, each node reading `floors`."""
         for level, _ in cal._norm_steps():
@@ -807,78 +902,6 @@ class NormalisationTest(unittest.TestCase):
         self.assertFalse(cal.norm_wizard_set_coefficient(0, 'scale', 320))
         self.assertEqual(cal.norm_captured_table()[0]['scale'], 300)
 
-    def test_noise_alone_levels_the_floors(self):
-        """No quad in the air, so no slope - the offsets do all the work."""
-        import calibration as cal_mod
-        ctx, nodes, cal = self.context(count=3)
-        self.noise_pass(cal, nodes, [90, 95, 68])
-        self.assertTrue(cal.norm_wizard_state()['noise_ready'])
-        self.assertTrue(cal.norm_wizard_apply_noise())
-
-        sent = {c.args[0]: c.args for c in ctx.interface.set_normalisation.call_args_list}
-        self.assertEqual(sorted(sent), [0, 1, 2])
-        for idx, floor in enumerate((90, 95, 68)):
-            _, pivot, offset, scale = sent[idx]
-            # unity scale: one measured point supports subtraction, not gain
-            self.assertEqual(scale, cal_mod.NORM_UNITY_SLOPE)
-            # every floor lands on the quietest node's floor
-            self.assertEqual(floor - offset, 68)
-            self.assertTrue(pivot, 'pivot 0 would disable the correction')
-
-    def test_the_noise_button_is_offered_only_once_the_pass_is_done(self):
-        """A floor belongs to a channel, so levelling waits for the whole pass."""
-        _, nodes, cal = self.context(count=2)
-        self.assertFalse(cal.norm_wizard_state()['noise_ready'])
-        self.assertFalse(cal.norm_wizard_apply_noise())
-        ctx_calls = cal._racecontext.interface.set_normalisation.call_count
-        self.assertEqual(ctx_calls, 0)
-        # one channel of the pass is not enough
-        self.capture(cal, nodes, 'noise', [90, 95])
-        self.assertFalse(cal.norm_wizard_state()['noise_ready'])
-        self.assertTrue(self.noise_pass(cal, nodes, [90, 95]))
-        self.assertTrue(cal.norm_wizard_state()['noise_ready'])
-
-    def test_noise_levelling_is_not_stored_when_a_node_refuses(self):
-        ctx, nodes, cal = self.context(count=2)
-        self.capture(cal, nodes, 'noise', [90, 95])
-        ctx.interface.set_normalisation.return_value = False
-        self.assertFalse(cal.norm_wizard_apply_noise())
-        self.assertTrue(cal.norm_state_is_unresolved())
-        # nothing written to the profile
-        self.assertFalse(any(cal._norm_stored('norm_pivots', 0)))
-
-    def test_levelling_discards_the_captures_it_was_made_from(self):
-        """Readings taken after levelling sit on a different axis.
-
-        The nodes now subtract an offset, so a capture from before the
-        levelling cannot be compared with one from after it: the difference
-        between them measures the levelling, not the receiver. This bit in
-        practice - a noise floor captured at 94 against a low captured at 103
-        once the floors had moved to 67 looked like a 9-count span and was
-        refused, when the real span was 36.
-        """
-        _, nodes, cal = self.context(count=2)
-        self.capture(cal, nodes, 'noise', [90, 95])
-        self.assertTrue(cal.norm_wizard_apply_noise())
-        self.assertEqual(cal._norm_captured, {})
-        state = cal.norm_wizard_state()
-        self.assertEqual((state['state'], state['level']), ('capturing', 'noise'))
-
-    def test_a_full_sweep_still_overrides_levelled_floors(self):
-        """Levelling is a starting point, not a substitute for the fit."""
-        ctx, nodes, cal = self.context(count=1)
-        self.noise_pass(cal, nodes, [90])
-        self.assertTrue(cal.norm_wizard_apply_noise())
-        # the sweep restarts against the levelled nodes, which now read lower
-        self.capture(cal, nodes, 'noise', [67])
-        self.capture(cal, nodes, 'high', [210])
-        with patch('calibration.gevent.sleep'):
-            self.assertTrue(cal.norm_wizard_apply())
-        _, pivot, offset, scale = ctx.interface.set_normalisation.call_args.args
-        # derived from the new captures, not the levelling pivot of 1
-        import calibration as cal_mod
-        self.assertEqual(pivot, 67 + round((210 - 67) * cal_mod.NORM_PIVOT_RATIO))
-
     def test_unconfirmed_write_is_not_recorded(self):
         """A coefficient write the node never acknowledged is not success."""
         import RHInterface
@@ -961,8 +984,8 @@ class NormalisationTest(unittest.TestCase):
             self.assertTrue(cal.norm_state_is_unresolved())
             self.assertEqual(cal.norm_unresolved_nodes(), [1])
 
-    def test_apply_writes_no_thresholds_at_all(self):
-        """Applying a fit touches the node constants and nothing else."""
+    def test_apply_keeps_thresholds_on_the_new_axis(self):
+        """Applying a fit preserves the physical gate represented by thresholds."""
         with patch('calibration.gevent.sleep'):
             ctx, _, cal = self.context()
             ctx.race.profile.enter_ats = json.dumps({'v': [169]})
@@ -971,8 +994,10 @@ class NormalisationTest(unittest.TestCase):
                                         ([v] for v in (90, 210))))
             cal._norm_note_capture_session()
             self.assertTrue(cal.norm_wizard_apply())
-        ctx.interface.set_enter_at_level.assert_not_called()
-        ctx.interface.set_exit_at_level.assert_not_called()
+        ctx.interface.set_enter_at_level.assert_called_once()
+        ctx.interface.set_exit_at_level.assert_called_once()
+        self.assertEqual(json.loads(ctx.race.profile.enter_ats)['norm'],
+                         cal._norm_signature())
 
     def test_back_keeps_the_earlier_captures(self):
         """Stepping back cancels a pending capture, not the retained ones."""
@@ -1118,8 +1143,6 @@ class NormalisationFallbackTest(unittest.TestCase):
     R_FREQS = NormalisationTest.R_FREQS
     context = NormalisationTest.context
     sweep_captures = NormalisationTest.sweep_captures
-    capture = NormalisationTest.capture
-    noise_pass = NormalisationTest.noise_pass
 
     def fleet(self, api_levels):
         ctx, nodes, cal = self.context(count=len(api_levels))
@@ -1149,14 +1172,14 @@ class NormalisationFallbackTest(unittest.TestCase):
         ctx, _, cal = self.fleet([38, 35])
         ctx.interface.set_normalisation.return_value = False
         self.assertFalse(cal.hardware_set_all_normalisation())
-        self.assertIn('not accepted by node(s) 1;',
-                      ctx.rhui.emit_priority_message.call_args.args[0])
+        self.assertEqual(cal.norm_unresolved_nodes(), [1])
 
     def test_a_stored_fit_the_firmware_cannot_apply_blocks(self):
         """Its thresholds were converted for a correction the node is not on."""
         ctx, _, cal = self.fleet([38, 35])
         ctx.race.profile.norm_pivots = json.dumps({'v': [150, 150]})
         self.assertFalse(cal.hardware_set_all_normalisation())
+        self.assertEqual(cal.norm_unresolved_nodes(), [2])
         self.assertIn('reset calibration',
                       ctx.rhui.emit_priority_message.call_args.args[0])
 
@@ -1184,14 +1207,6 @@ class NormalisationFallbackTest(unittest.TestCase):
         written = [c.args[0] for c in ctx.interface.set_normalisation.call_args_list]
         self.assertNotIn(1, written)
         self.assertEqual(json.loads(ctx.race.profile.norm_pivots)['v'][1], 0)
-        self.assertFalse(cal.norm_state_is_unresolved())
-
-    def test_noise_levelling_leaves_unsupported_nodes_out(self):
-        ctx, nodes, cal = self.fleet([38, 35, 38])
-        self.noise_pass(cal, nodes, [90, 95, 68])
-        self.assertTrue(cal.norm_wizard_apply_noise())
-        written = [c.args[0] for c in ctx.interface.set_normalisation.call_args_list]
-        self.assertEqual(written, [0, 2])
         self.assertFalse(cal.norm_state_is_unresolved())
 
     def test_reset_skips_unsupported_nodes(self):

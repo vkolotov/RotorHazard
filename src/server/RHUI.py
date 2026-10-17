@@ -768,6 +768,7 @@ class RHUI():
         """Emits the normalisation wizard position and what it has captured."""
         emit_payload = self._racecontext.calibration.norm_wizard_state()
         emit_payload['captured'] = self._racecontext.calibration.norm_captured_table()
+        emit_payload['normalised_channels'] = self._racecontext.calibration.norm_normalised_channels()
         # Nodes whose firmware has no normalisation run uncorrected; the UI can
         #  say so instead of the wizard appearing to fail on them.
         emit_payload['unsupported_nodes'] = self._racecontext.calibration.norm_unsupported_nodes()

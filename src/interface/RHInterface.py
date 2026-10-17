@@ -646,10 +646,19 @@ class RHInterface(BaseHardwareInterface):
         it with whatever the node still holds.
         """
         node = self.nodes[node_index]
-        if node.api_valid_flag and node.api_level >= 37:
+        if node.supports_extremums_reset():
             self.set_value_8(node, RESET_NODE_EXTREMUMS, 0)
+            # Mirror what the node clears, or the stale server-side copies keep
+            #  being drawn until the next pass replaces them.
+            #  Zero, not max_rssi_value: the node uses MAX_RSSI internally to
+            #  mean "no nadir seen yet" and the read path filters that sentinel
+            #  out via is_valid_rssi(), but these fields go straight to the UI,
+            #  where it would show up as a bare 255.
             node.node_peak_rssi = 0
-            node.node_nadir_rssi = node.max_rssi_value
+            node.node_nadir_rssi = 0
+            node.pass_peak_rssi = 0
+            node.pass_nadir_rssi = 0
+            node.debug_pass_count = 0
 
     def force_end_crossing(self, node_index):
         node = self.nodes[node_index]
