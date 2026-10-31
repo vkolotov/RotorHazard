@@ -166,12 +166,22 @@ class StreamToLogger:
         if buf.lstrip().startswith("PYDEV DEBUGGER WARNING"):
             lvl = logging.DEBUG  # don't treat expected debugger warning as error
             buf = buf.lstrip()
+        elif 'Invalid HTTP method:' in buf:
+            lvl = logging.WARNING  # don't treat a non-HTTP request (such as an HTTPS attempt) as error
         for line in buf.rstrip().splitlines():
             self.logger.log(lvl, line.rstrip())
 
     def flush(self):
         pass  # ensure compatibility with file-like objects
 
+
+class _InvalidSessionFilter(logging.Filter):
+    '''Logs engineio.server's 'Invalid session' (a client reconnecting with a stale session id) at WARNING.'''
+    def filter(self, record):
+        if record.levelno == logging.ERROR and str(record.msg).startswith('Invalid session '):
+            record.levelno = logging.WARNING
+            record.levelname = logging.getLevelName(logging.WARNING)
+        return True
 
 def early_stage_setup():
     logging.addLevelName(LEVEL_NONE_VALUE, LEVEL_NONE_STR)
@@ -196,6 +206,7 @@ def early_stage_setup():
         "Adafruit_I2C.Device.Bus"
     ]:
         logging.getLogger(name).setLevel(logging.WARN)
+    logging.getLogger("engineio.server").addFilter(_InvalidSessionFilter())
 
 def get_logging_level_value(lvl_name):
     try:

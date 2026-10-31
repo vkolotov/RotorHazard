@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.exc import NoSuchTableError
 from datetime import datetime
 import os
+import re
 import traceback
 import shutil
 import json
@@ -18,8 +19,10 @@ import glob
 import bisect
 import numbers
 import RHUtils
+import RHTimeFns
 import Database
 import Results
+import frequencies
 from time import monotonic
 from eventmanager import Evt
 from filtermanager import Flt
@@ -41,6 +44,7 @@ class RHData():
         self._SERVER_API = SERVER_API
         self._DB_FILE_NAME = DB_FILE_NAME
         self._DB_BKP_DIR_NAME = DB_BKP_DIR_NAME
+        self._has_deleted_races = None  # whether deleted races are kept; None until checked
         self._filters = RaceContext.filters
 
     def __(self, *args, **kwargs):
@@ -440,6 +444,7 @@ class RHData():
             raceClassAttribute_query_data = self.get_legacy_table_data(engine, metadata, 'race_class_attribute')
             savedRaceAttribute_query_data = self.get_legacy_table_data(engine, metadata, 'saved_race_meta_attribute')
             raceFormatAttribute_query_data = self.get_legacy_table_data(engine, metadata, 'race_format_attribute')
+            deletedRace_query_data = self.get_legacy_table_data(engine, metadata, 'deleted_race')
 
             engine.dispose() # close connection after loading
 
@@ -821,12 +826,20 @@ class RHData():
                             'value': None
                         })
 
+                        self.restore_table(Database.DeletedRace, deletedRace_query_data, defaults={
+                            'class_id': None,
+                            'format_id': None,
+                            'start_time_formatted': None
+                        })
+
                     recover_status['stage_2'] = True
                 except Exception as ex:
                     logger.warning('Error while writing data from previous database (stage 2):  ' + str(ex))
                     logger.debug(traceback.format_exc())
 
         self.commit()
+        self._has_deleted_races = None
+        self.fill_frequency_bands()
 
         self.primeCache() # refresh Options cache
 
@@ -2550,6 +2563,30 @@ class RHData():
 
         return new_profile
 
+    def fill_frequency_bands(self):
+        # fills in band and channel for seats, in every frequency set, whose frequency is a known channel;
+        #  failures are logged as warnings and never raised
+        changed = False
+        try:
+            for profile in self.get_profiles():
+                try:
+                    freqs = json.loads(profile.frequencies)
+                    before = json.dumps(freqs)
+                    for idx in frequencies.fill_missing_band_channels(freqs):
+                        logger.info("Filled in band/channel {}{} for seat {} of frequency set '{}'".format(
+                            freqs['b'][idx], freqs['c'][idx], idx + 1, profile.name))
+                    if json.dumps(freqs) != before:
+                        profile.frequencies = json.dumps(freqs)
+                        changed = True
+                except Exception:
+                    logger.warning("Unable to fill in frequency bands for frequency set '{}'".format(
+                        getattr(profile, 'name', '')), exc_info=True)
+            if changed:
+                self.commit()
+        except Exception:
+            logger.warning('Unable to fill in frequency bands', exc_info=True)
+        return changed
+
     def alter_profile(self, data):
         profile = Database.Profiles.query.get(data['profile_id'])
 
@@ -2558,7 +2595,13 @@ class RHData():
         if 'profile_description' in data:
             profile.description = data['profile_description']
         if 'frequencies' in data:
-            profile.frequencies = data['frequencies'] if isinstance(data['frequencies'], str) else json.dumps(data['frequencies'])
+            try:
+                freqs = json.loads(data['frequencies']) if isinstance(data['frequencies'], str) else data['frequencies']
+                frequencies.fill_missing_band_channels(freqs)
+                profile.frequencies = json.dumps(freqs)
+            except Exception:
+                logger.warning('Unable to fill in frequency bands; storing frequencies as given', exc_info=True)
+                profile.frequencies = data['frequencies'] if isinstance(data['frequencies'], str) else json.dumps(data['frequencies'])
         if 'enter_ats' in data:
             profile.enter_ats = data['enter_ats'] if isinstance(data['enter_ats'], str) else json.dumps(data['enter_ats'])
         if 'exit_ats' in data:
@@ -2583,16 +2626,19 @@ class RHData():
         logger.debug('Altered profile {0} to {1}'.format(profile.id, data))
 
         seat_minimum = self._racecontext.race.num_nodes
-        freqs = json.loads(profile.frequencies)
-        if seat_minimum > len(freqs["b"]) or seat_minimum > len(freqs["c"]) or \
-            seat_minimum > len(freqs["f"]):
-            while seat_minimum > len(freqs["b"]):
-                freqs["b"].append(RHUtils.FREQUENCY_ID_NONE)
-            while seat_minimum > len(freqs["c"]):
-                freqs["c"].append(RHUtils.FREQUENCY_ID_NONE)
-            while seat_minimum > len(freqs["f"]):
-                freqs["f"].append(RHUtils.FREQUENCY_ID_NONE)
-            profile.frequencies = json.dumps(freqs)
+        try:
+            freqs = json.loads(profile.frequencies)
+            if seat_minimum > len(freqs["b"]) or seat_minimum > len(freqs["c"]) or \
+                seat_minimum > len(freqs["f"]):
+                while seat_minimum > len(freqs["b"]):
+                    freqs["b"].append(RHUtils.FREQUENCY_ID_NONE)
+                while seat_minimum > len(freqs["c"]):
+                    freqs["c"].append(RHUtils.FREQUENCY_ID_NONE)
+                while seat_minimum > len(freqs["f"]):
+                    freqs["f"].append(RHUtils.FREQUENCY_ID_NONE)
+                profile.frequencies = json.dumps(freqs)
+        except Exception:
+            logger.warning('Unable to extend frequencies of profile {0} to {1} seats'.format(profile.id, seat_minimum), exc_info=True)
 
         return profile
 
@@ -3201,14 +3247,14 @@ class RHData():
         self.commit()
 
     def add_savedRaceMeta(self, data):
-        if int(data['class_id'] or 0) == 0:
+        if int(data.get('class_id') or 0) == 0:
             data['class_id'] = RHUtils.CLASS_ID_NONE
 
         new_race = Database.SavedRaceMeta(
             round_id=data['round_id'],
             heat_id=data['heat_id'],
             class_id=data['class_id'],
-            format_id=data['format_id'],
+            format_id=data.get('format_id'),
             start_time=data['start_time'],
             start_time_formatted=data['start_time_formatted'],
             _cache_status=json.dumps({
@@ -3254,7 +3300,7 @@ class RHData():
         heat_races = Database.SavedRaceMeta.query.filter_by(heat_id=new_heat_id).order_by(Database.SavedRaceMeta.round_id).all()
 
         # abort if assigning to a grouped heat with existing race
-        if heat_races and new_class.round_type == RoundType.GROUPED:
+        if heat_races and new_class and new_class.round_type == RoundType.GROUPED:
             return False, False
 
         race_meta.round_id = 0
@@ -3352,6 +3398,281 @@ class RHData():
         logger.info('Race {0} reassigned to heat {1}'.format(race_meta.id, new_heat_id))
 
         return race_meta, new_heat
+
+    def clear_results_for_race(self, heat_id, class_id, race_id=None):
+        # Invalidates the page cache and the race, heat, class and event result caches
+        self._racecontext.pagecache.set_valid(False)
+        if race_id is not None:
+            self.clear_results_savedRaceMeta(race_id)
+        self.clear_results_heat(heat_id)
+        self.clear_results_raceClass(class_id)
+        self.clear_results_event()
+
+    def get_savedRaceMeta_snapshot(self, savedRaceMeta_or_id):
+        # Plain-data copy of a saved race with its attributes, pilot runs, laps and splits
+        race_meta = self.resolve_savedRaceMeta_from_savedRaceMeta_or_id(savedRaceMeta_or_id)
+        if not race_meta:
+            return None
+
+        def columns(obj):
+            return {attr.key: getattr(obj, attr.key) for attr in inspect(obj).mapper.column_attrs
+                    if attr.key not in ('results', '_cache_status')}
+
+        pilotruns = []
+        for pilotrace in self.get_savedPilotRaces_by_savedRaceMeta(race_meta.id):
+            run_data = columns(pilotrace)
+            run_data['laps'] = [columns(lap) for lap in self.get_savedRaceLaps_by_savedPilotRace(pilotrace.id)]
+            run_data['splits'] = [columns(split) for split in self.get_savedRaceLapSplits_by_savedPilotRace(pilotrace.id)]
+            pilotruns.append(run_data)
+
+        return {
+            'race': columns(race_meta),
+            'attributes': {attr.name: attr.value for attr in
+                           Database.SavedRaceMetaAttribute.query.filter_by(id=race_meta.id).all()},
+            'pilotruns': pilotruns,
+            }
+
+    def begin_transaction(self):
+        # Starts an explicit transaction so the next commit or rollback covers every statement until then;
+        #  the SQLite connection otherwise commits each statement as it runs
+        dbapi_connection = Database.DB_session.connection().connection.dbapi_connection
+        if not dbapi_connection.in_transaction:
+            dbapi_connection.execute('BEGIN IMMEDIATE')
+
+    def set_grouped_heat_active(self, heat_id, active):
+        # Sets the active flag of a heat in a grouped (heat groups) class; other heats are unchanged
+        heat = self.get_heat(heat_id)
+        if heat and heat.class_id:
+            race_class = self.get_raceClass(heat.class_id)
+            if race_class and race_class.round_type == RoundType.GROUPED:
+                heat.active = active
+
+    def heat_race_in_progress(self, heat_id):
+        # True when the current race is in the heat and is staging, running or not yet saved or discarded
+        return heat_id == self._racecontext.race.current_heat and \
+            self._racecontext.race.race_status != RaceStatus.READY
+
+    def emit_next_round_if_changed(self, heat_id, prev_next_round):
+        # Sends the current heat and race status to clients when the next round of the current heat has changed
+        next_round = self.get_round_num_for_heat(heat_id)
+        if heat_id == self._racecontext.race.current_heat and next_round != prev_next_round:
+            self._racecontext.rhui.emit_current_heat()
+            self._racecontext.rhui.emit_race_status()
+        return next_round
+
+    def delete_savedRaceMeta(self, savedRaceMeta_or_id, keep_copy=True):
+        # Deletes a saved race with its pilot runs, laps, splits and attributes; other rounds are left as-is
+        race_meta = self.resolve_savedRaceMeta_from_savedRaceMeta_or_id(savedRaceMeta_or_id)
+        if not race_meta:
+            return False
+
+        if self.heat_race_in_progress(race_meta.heat_id):
+            logger.info('Race {0} not deleted; a race in its heat is in progress'.format(race_meta.id))
+            return False
+
+        race_id = race_meta.id
+        heat_id = race_meta.heat_id
+        round_id = race_meta.round_id
+        class_id = race_meta.class_id
+        snapshot = self.get_savedRaceMeta_snapshot(race_meta)
+        deleted_race = None
+        prev_next_round = self.get_round_num_for_heat(heat_id)
+
+        try:
+            self.begin_transaction()
+            if keep_copy:
+                deleted_race = Database.DeletedRace(
+                    race_id=race_id,
+                    round_id=round_id,
+                    heat_id=heat_id,
+                    class_id=class_id,
+                    format_id=race_meta.format_id,
+                    start_time_formatted=race_meta.start_time_formatted,
+                    deleted_time_formatted=RHTimeFns.datetimeToFormattedStr(datetime.now()),
+                    data=json.dumps(snapshot, default=str)
+                )
+                Database.DB_session.add(deleted_race)
+
+            heat_has_other_races = bool(Database.SavedRaceMeta.query.filter(
+                Database.SavedRaceMeta.heat_id == heat_id, Database.SavedRaceMeta.id != race_id).count())
+
+            Database.SavedRaceMetaAttribute.query.filter_by(id=race_id).delete()
+            Database.SavedRaceLapSplit.query.filter_by(race_id=race_id).delete()
+            Database.SavedRaceLap.query.filter_by(race_id=race_id).delete()
+            Database.SavedPilotRace.query.filter_by(race_id=race_id).delete()
+            Database.DB_session.delete(race_meta)
+
+            if not heat_has_other_races:
+                self.set_grouped_heat_active(heat_id, True)
+
+            Database.DB_session.commit()
+        except Exception:
+            logger.exception('Unable to delete race {0}'.format(race_id))
+            self.rollback()
+            return False
+        if deleted_race:
+            self._has_deleted_races = True
+
+        self.clear_results_for_race(heat_id, class_id)
+
+        if self._racecontext.race.prev_race_winner_race_id == race_id:
+            self._racecontext.race.clear_prev_race_winner()
+
+        last_race = self._racecontext.last_race
+        if last_race and last_race.db_id == race_id:
+            self._racecontext.last_race = None
+            self._racecontext.rhui.emit_current_laps()
+            self._racecontext.rhui.emit_current_leaderboard()
+
+        next_round = self.emit_next_round_if_changed(heat_id, prev_next_round)
+
+        logger.info('Race {0} deleted (heat {1} round {2})'.format(race_id, heat_id, round_id))
+
+        self._Events.trigger(Evt.RACE_DELETE, {
+            'race_id': race_id,
+            'heat_id': heat_id,
+            'round_id': round_id,
+            'class_id': class_id,
+            'deleted_race_id': deleted_race.id if deleted_race else None,
+            'race': snapshot,
+            'next_round': next_round,
+            })
+
+        return True
+
+    # Deleted races
+
+    def resolve_deletedRace_from_deletedRace_or_id(self, deletedRace_or_id):
+        if isinstance(deletedRace_or_id, Database.DeletedRace):
+            return deletedRace_or_id
+        else:
+            return Database.DeletedRace.query.get(deletedRace_or_id)
+
+    def get_deletedRace(self, deletedRace_id):
+        return Database.DeletedRace.query.get(deletedRace_id)
+
+    def get_deletedRaces(self):
+        return Database.DeletedRace.query.order_by(Database.DeletedRace.id.desc()).all()
+
+    def has_deletedRaces(self):
+        # checked in the database once, then kept up to date by the delete, restore, clear and recover functions
+        if self._has_deleted_races is None:
+            self._has_deleted_races = Database.DeletedRace.query.count() > 0
+        return self._has_deleted_races
+
+    def get_deletedRace_snapshot(self, deletedRace_or_id):
+        deleted_race = self.resolve_deletedRace_from_deletedRace_or_id(deletedRace_or_id)
+        if not deleted_race:
+            return None
+        return json.loads(deleted_race.data)
+
+    def get_deletedRace_conflicts(self, deletedRace_or_id):
+        # Returns the reasons a deleted race cannot be restored as it was; empty when it can be
+        deleted_race = self.resolve_deletedRace_from_deletedRace_or_id(deletedRace_or_id)
+        if not deleted_race:
+            return None
+
+        snapshot = json.loads(deleted_race.data)
+        reasons = []
+
+        heat = self.get_heat(deleted_race.heat_id)
+        if not heat:
+            reasons.append(self.__('its heat no longer exists'))
+        else:
+            if Database.SavedRaceMeta.query.filter_by(heat_id=heat.id, round_id=deleted_race.round_id).count():
+                reasons.append(self.__('round {0} of that heat already has a race').format(deleted_race.round_id))
+            if (heat.class_id or None) != (deleted_race.class_id or None):
+                reasons.append(self.__('its heat is now in a different class'))
+            if self.heat_race_in_progress(heat.id):
+                reasons.append(self.__('a race in that heat is in progress'))
+
+        if deleted_race.class_id and not self.get_raceClass(deleted_race.class_id):
+            reasons.append(self.__('its class no longer exists'))
+        if deleted_race.format_id and not self.get_raceFormat(deleted_race.format_id):
+            reasons.append(self.__('its race format no longer exists'))
+
+        pilot_ids = {run.get('pilot_id') for run in snapshot.get('pilotruns') or [] if run.get('pilot_id')}
+        missing_pilots = [pilot_id for pilot_id in pilot_ids if not self.get_pilot(pilot_id)]
+        if missing_pilots:
+            reasons.append(self.__('{0} of its pilots no longer exist').format(len(missing_pilots)))
+
+        return reasons
+
+    def restore_deletedRace(self, deletedRace_or_id):
+        # Recreates a deleted race from its copy and removes the copy; returns the race, or False if it cannot be restored
+        deleted_race = self.resolve_deletedRace_from_deletedRace_or_id(deletedRace_or_id)
+        if not deleted_race or self.get_deletedRace_conflicts(deleted_race):
+            return False
+
+        deleted_race_id = deleted_race.id
+        snapshot = json.loads(deleted_race.data)
+        prev_next_round = self.get_round_num_for_heat(deleted_race.heat_id)
+
+        def columns(model, values, exclude):
+            keys = {attr.key for attr in inspect(model).column_attrs}
+            return {key: value for key, value in values.items() if key in keys and key not in exclude}
+
+        try:
+            self.begin_transaction()
+            race_values = columns(Database.SavedRaceMeta, snapshot['race'], ('results', '_cache_status'))
+            if race_values.get('id') is None or Database.SavedRaceMeta.query.get(race_values['id']):
+                race_values.pop('id', None)  # original id taken by a newer race
+            race_meta = Database.SavedRaceMeta(**race_values)
+            race_meta.results = None
+            race_meta._cache_status = json.dumps({
+                'data_ver': monotonic(),
+                'build_ver': None
+            })
+            Database.DB_session.add(race_meta)
+            Database.DB_session.flush()
+
+            for name, value in (snapshot.get('attributes') or {}).items():
+                Database.DB_session.add(Database.SavedRaceMetaAttribute(id=race_meta.id, name=name, value=value))
+
+            for run in snapshot.get('pilotruns') or []:
+                pilotrace = Database.SavedPilotRace(**columns(Database.SavedPilotRace, run, ('id', 'race_id')))
+                pilotrace.race_id = race_meta.id
+                Database.DB_session.add(pilotrace)
+                Database.DB_session.flush()
+
+                for lap in run.get('laps') or []:
+                    lap_row = Database.SavedRaceLap(**columns(Database.SavedRaceLap, lap, ('id', 'race_id', 'pilotrace_id')))
+                    lap_row.race_id = race_meta.id
+                    lap_row.pilotrace_id = pilotrace.id
+                    Database.DB_session.add(lap_row)
+
+                for split in run.get('splits') or []:
+                    split_row = Database.SavedRaceLapSplit(**columns(Database.SavedRaceLapSplit, split, ('id', 'race_id', 'pilotrace_id')))
+                    split_row.race_id = race_meta.id
+                    split_row.pilotrace_id = pilotrace.id
+                    Database.DB_session.add(split_row)
+
+            self.set_grouped_heat_active(race_meta.heat_id, False)
+            Database.DB_session.delete(deleted_race)
+            Database.DB_session.commit()
+        except Exception:
+            logger.exception('Unable to restore deleted race {0}'.format(deleted_race_id))
+            self.rollback()
+            return False
+        self._has_deleted_races = None
+
+        self.clear_results_for_race(race_meta.heat_id, race_meta.class_id, race_meta.id)
+
+        next_round = self.emit_next_round_if_changed(race_meta.heat_id, prev_next_round)
+
+        logger.info('Deleted race {0} restored as race {1} (heat {2} round {3})'.format(
+            deleted_race_id, race_meta.id, race_meta.heat_id, race_meta.round_id))
+
+        self._Events.trigger(Evt.RACE_RESTORE, {
+            'race_id': race_meta.id,
+            'heat_id': race_meta.heat_id,
+            'round_id': race_meta.round_id,
+            'class_id': race_meta.class_id,
+            'deleted_race_id': deleted_race_id,
+            'next_round': next_round,
+            })
+
+        return race_meta
 
     def get_results_savedRaceMeta(self, savedRaceMeta_or_id, no_rebuild_flag=False):
         race = self.resolve_savedRaceMeta_from_savedRaceMeta_or_id(savedRaceMeta_or_id)
@@ -3462,8 +3783,15 @@ class RHData():
                 Database.SavedRaceMeta.round_id
             )).filter_by(heat_id=heat_id).scalar() or 0)
 
-    def get_round_num_for_heat(self, heat_id):
+    def get_round_num_for_heat(self, heat_id, heat=None, race_class=None):
         if heat_id and heat_id is not RHUtils.HEAT_ID_NONE:
+            if heat is None:
+                heat = self.get_heat(heat_id)
+            if heat and heat.class_id:
+                if race_class is None:
+                    race_class = self.get_raceClass(heat.class_id)
+                if race_class and race_class.round_type == RoundType.GROUPED:
+                    return heat.group_id + 1
             round_idx = self.get_max_round(heat_id)
             if type(round_idx) is int:
                 return round_idx + 1
@@ -3640,6 +3968,12 @@ class RHData():
                     lap_objs.append(lap_data)
 
                 last_race.node_laps[pilotrace.node_index] = lap_objs
+                last_race.clear_team_results()
+
+                race = self._racecontext.race
+                if last_race.recheck_win_status() and \
+                        getattr(last_race.format, 'id', None) == getattr(race.format, 'id', None):
+                    race.set_prev_race_winner_from(last_race)
 
                 self._racecontext.rhui.emit_current_leaderboard()
                 self._racecontext.rhui.emit_current_laps()
@@ -3651,13 +3985,13 @@ class RHData():
             new_pilotrace = Database.SavedPilotRace(
                 race_id=node_data['race_id'],
                 node_index=node_index,
-                pilot_id=node_data['pilot_id'],
-                history_values=node_data['history_values'],
-                history_times=node_data['history_times'],
+                pilot_id=node_data.get('pilot_id'),
+                history_values=node_data.get('history_values'),
+                history_times=node_data.get('history_times'),
                 penalty_time=0,
                 enter_at=node_data['enter_at'],
                 exit_at=node_data['exit_at'],
-                frequency=node_data['frequency'],
+                frequency=node_data.get('frequency'),
                 marshal_type=node_data.get('marshal_type', None)
             )
 
@@ -3665,12 +3999,12 @@ class RHData():
             Database.DB_session.flush()
             Database.DB_session.refresh(new_pilotrace)
 
-            for lap in node_data['laps']:
+            for lap in node_data.get('laps') or []:
                 Database.DB_session.add(Database.SavedRaceLap(
                     race_id=node_data['race_id'],
                     pilotrace_id=new_pilotrace.id,
                     node_index=node_index,
-                    pilot_id=node_data['pilot_id'],
+                    pilot_id=node_data.get('pilot_id'),
                     lap_time_stamp=lap.lap_time_stamp,
                     lap_time=lap.lap_time,
                     lap_time_formatted=lap.lap_time_formatted,
@@ -3684,7 +4018,7 @@ class RHData():
                     race_id=node_data['race_id'],
                     pilotrace_id=new_pilotrace.id,
                     node_index=node_index,
-                    pilot_id=node_data['pilot_id'],
+                    pilot_id=node_data.get('pilot_id'),
                     lap_id=split['lap_id'],
                     split_id=split['split_id'],
                     split_time_stamp=split['split_time_stamp'],
@@ -3704,9 +4038,11 @@ class RHData():
         Database.DB_session.query(Database.SavedRaceLap).delete()
         Database.DB_session.query(Database.SavedPilotRace).delete()
         Database.DB_session.query(Database.SavedRaceMeta).delete()
+        Database.DB_session.query(Database.DeletedRace).delete()
         for heat in self.get_heats():
             heat.active = True
         self.commit()
+        self._has_deleted_races = False
         self.reset_pilot_used_frequencies()
         self.reset_heat_plans()
         logger.info('Database saved races reset')
@@ -4010,10 +4346,61 @@ def getFastestSpeedStr(rhapi, spoken_flag, sel_pilot_id=None):
                         fastest_str = "{} {}".format(pilot_obj.callsign, fastest_split.split_speed)
     return fastest_str
 
+def hasRaceResultsData(race_results):
+    if not race_results:
+        return False
+    lboard_name = race_results.get('meta', {}).get('primary_leaderboard', '')
+    # a cleared race still lists the heat's pilots, so test for laps rather than rows
+    return any(entry.get('laps') for entry in (race_results.get(lboard_name) or []))
+
+def getPilotTimeStr(rhapi, result, key, spoken_flag):
+    # a pilot's time figure from a leaderboard row; zero means no laps, so no data
+    if not result.get(key + '_raw'):
+        return ''
+    if spoken_flag:
+        return RHUtils.format_phonetic_time_to_str(result[key + '_raw'],
+                                                  rhapi.config.get_item('UI', 'timeFormatPhonetic'))
+    return str(result.get(key, ''))
+
 # Text replacer
+# per-pilot tokens, filled only from the pilot's leaderboard row
+PILOT_CALL_TOKENS = ('%POSITION_CALL%', '%POSITION_PLACE_CALL%', '%TIME_BEHIND_CALL%',
+                     '%TIME_BEHIND_FINPLACE_CALL%', '%TIME_BEHIND_FINPOS_CALL%')
+PILOT_VALUE_TOKENS = ('%LAP_COUNT%', '%TOTAL_TIME%', '%TOTAL_TIME_LAPS%', '%FASTEST_LAP%',
+                      '%LAST_LAP%', '%AVERAGE_LAP%', '%FASTEST_SPEED%',
+                      '%POSITION%', '%POSITION_PLACE%', '%TIME_BEHIND%', '%CONSECUTIVE%')
+
+# tokens filled outside the per-pilot block; with the two lists above these cover every
+#  token 'doReplace' substitutes
+OTHER_TOKENS = ('%HEAT%', '%PILOT%', '%PILOTS%', '%LINEUP%', '%FREQS%',
+                '%ROUND%', '%ROUND_CALL%', '%RACE_FORMAT%', '%RACE_RESULT%',
+                '%WINNER%', '%WINNER_CALL%',
+                '%PREVIOUS_WINNER%', '%PREVIOUS_WINNER_CALL%',
+                '%LEADER%', '%LEADER_CALL%',
+                '%FASTEST_RACE_LAP%', '%FASTEST_RACE_LAP_CALL%',
+                '%FASTEST_RACE_SPEED%', '%FASTEST_RACE_SPEED_CALL%',
+                '%SPLIT_TIME%', '%SPLIT_SPEED%',
+                '%COOP_RACE_INFO%', '%COOP_RACE_LAP_TOTALS%',
+                '%CURRENT_TIME_AP%', '%CURRENT_TIME_24%',
+                '%CURRENT_TIME_SECS_AP%', '%CURRENT_TIME_SECS_24%')
+
+ALL_TOKENS = PILOT_CALL_TOKENS + PILOT_VALUE_TOKENS + OTHER_TOKENS
+
+def clearUnfilledTokens(text):
+    for token in ALL_TOKENS:
+        if token in text:
+            text = text.replace(token, '')
+    return text
+
 def doReplace(rhapi, text, args, spoken_flag=False, delay_sec_holder=None):
     if '%' in text:
         race_results = rhapi.race.results
+        # a saved race is cleared from the current-race object, so race-result tokens fall back
+        #  to the saved-off copy of it until the next race is staged
+        last_race_obj = None if hasRaceResultsData(race_results) else rhapi.race.last_race
+        callout_results = race_results
+        if last_race_obj and last_race_obj.results:
+            callout_results = last_race_obj.results
         heat_data = None
 
         # %HEAT% : Current heat name or ID value
@@ -4046,7 +4433,7 @@ def doReplace(rhapi, text, args, spoken_flag=False, delay_sec_holder=None):
                 text = text.replace('%PILOT%', pilot_name_str)
 
         if '%FASTEST_RACE_LAP' in text:
-            fastest_race_lap_data = race_results.get('meta', {}).get('fastest_race_lap_data')
+            fastest_race_lap_data = callout_results.get('meta', {}).get('fastest_race_lap_data')
             if fastest_race_lap_data:
                 if spoken_flag:
                     fastest_str = "{}, {}".format(fastest_race_lap_data['phonetic'][0],  # pilot name
@@ -4074,6 +4461,9 @@ def doReplace(rhapi, text, args, spoken_flag=False, delay_sec_holder=None):
 
         if '%WINNER' in text:
             winner_str = rhapi.race.race_winner_phonetic if spoken_flag else rhapi.race.race_winner_name
+            if not winner_str and last_race_obj:
+                winner_str = last_race_obj.race_winner_phonetic if spoken_flag \
+                                 else last_race_obj.race_winner_name
             # %WINNER% : Pilot callsign for winner of race
             text = text.replace('%WINNER%', winner_str)
             # %WINNER_CALL% : Pilot callsign for winner of race (with prompt)
@@ -4150,38 +4540,29 @@ def doReplace(rhapi, text, args, spoken_flag=False, delay_sec_holder=None):
         leaderboard = None
         node_idx_val = RHUtils.getNumericEntry(args, 'node_index', -1)
         if node_idx_val >= 0 and '%' in text:
-            lboard_name = race_results.get('meta', {}).get('primary_leaderboard', '')
-            leaderboard = race_results.get(lboard_name, [])
+            lboard_name = callout_results.get('meta', {}).get('primary_leaderboard', '')
+            # kept separate from 'leaderboard', which stays with the current race
+            pilot_leaderboard = callout_results.get(lboard_name, [])
 
-            for result in leaderboard:
+            for result in pilot_leaderboard:
                 if result.get('node') == node_idx_val:
                     # %LAP_COUNT% : Current lap number
                     text = text.replace('%LAP_COUNT%', str(result.get('laps')))
 
                     # %TOTAL_TIME% : Total time since start of race for pilot
-                    text = text.replace('%TOTAL_TIME%', RHUtils.format_phonetic_time_to_str( \
-                        result.get('total_time_raw'), rhapi.config.get_item('UI', 'timeFormatPhonetic')) \
-                                            if spoken_flag else str(result.get('total_time', '')))
+                    text = text.replace('%TOTAL_TIME%', getPilotTimeStr(rhapi, result, 'total_time', spoken_flag))
 
                     # %TOTAL_TIME_LAPS%: Total time since start of first lap for pilot
-                    text = text.replace('%TOTAL_TIME_LAPS%', RHUtils.format_phonetic_time_to_str( \
-                        result.get('total_time_laps_raw'), rhapi.config.get_item('UI', 'timeFormatPhonetic')) \
-                                            if spoken_flag else str(result.get('total_time_laps', '')))
+                    text = text.replace('%TOTAL_TIME_LAPS%', getPilotTimeStr(rhapi, result, 'total_time_laps', spoken_flag))
 
                     # %LAST_LAP% : Last lap time for pilot
-                    text = text.replace('%LAST_LAP%', RHUtils.format_phonetic_time_to_str( \
-                        result.get('last_lap_raw'), rhapi.config.get_item('UI', 'timeFormatPhonetic')) \
-                                            if spoken_flag else str(result.get('last_lap', '')))
+                    text = text.replace('%LAST_LAP%', getPilotTimeStr(rhapi, result, 'last_lap', spoken_flag))
 
                     # %AVERAGE_LAP% : Average lap time for pilot
-                    text = text.replace('%AVERAGE_LAP%', RHUtils.format_phonetic_time_to_str( \
-                        result.get('average_lap_raw'), rhapi.config.get_item('UI', 'timeFormatPhonetic')) \
-                                            if spoken_flag else str(result.get('average_lap', '')))
+                    text = text.replace('%AVERAGE_LAP%', getPilotTimeStr(rhapi, result, 'average_lap', spoken_flag))
 
                     # %FASTEST_LAP% : Fastest lap time
-                    text = text.replace('%FASTEST_LAP%', RHUtils.format_phonetic_time_to_str( \
-                        result.get('fastest_lap_raw'), rhapi.config.get_item('UI', 'timeFormatPhonetic')) \
-                                            if spoken_flag else str(result.get('fastest_lap', '')))
+                    text = text.replace('%FASTEST_LAP%', getPilotTimeStr(rhapi, result, 'fastest_lap', spoken_flag))
 
                     if '%TIME_BEHIND' in text:
                         behind_str = RHUtils.format_phonetic_time_to_str( \
@@ -4322,15 +4703,18 @@ def doReplace(rhapi, text, args, spoken_flag=False, delay_sec_holder=None):
             format_obj = rhapi.race.raceformat
             totals_str = ''
             if format_obj and format_obj.team_racing_mode == RacingMode.COOP_ENABLED:
-                if not leaderboard:
-                    lboard_name = race_results.get('meta', {}).get('primary_leaderboard', '')
-                    leaderboard = race_results.get(lboard_name, [])
-                totals_str = getPilotLapsStr(rhapi, ' , ', spoken_flag, leaderboard)
+                # not the shared 'leaderboard', which '%LEADER%' keeps on the current race
+                lboard_name = callout_results.get('meta', {}).get('primary_leaderboard', '')
+                totals_str = getPilotLapsStr(rhapi, ' , ', spoken_flag,
+                                             callout_results.get(lboard_name, []))
             text = text.replace('%COOP_RACE_LAP_TOTALS%', totals_str)
 
         # %RACE_RESULT% : Race result status message (race winner or co-op result)
         if '%RACE_RESULT%' in text:
             result_str = rhapi.race.phonetic_status_msg if spoken_flag else rhapi.race.status_message
+            if not result_str and last_race_obj:
+                result_str = last_race_obj.phonetic_status_msg if spoken_flag \
+                                 else last_race_obj.status_message
             text = text.replace('%RACE_RESULT%', result_str if result_str else '')
 
         # %PILOTS_INTERVAL_#_SECS% : List of pilot callsigns separated by an interval of given number of seconds
@@ -4349,6 +4733,13 @@ def doReplace(rhapi, text, args, spoken_flag=False, delay_sec_holder=None):
                         delay_sec_holder.clear()
                         delay_sec_holder.append(float(num_str))
                         text = getPilotsListStr(rhapi, ' . ', spoken_flag).split(' . ')
+
+        # tokens left unfilled (no data) are removed so they are never spoken as raw text
+        if isinstance(text, str) and '%' in text:
+            text = clearUnfilledTokens(text)
+            leftover = re.findall(r'%[A-Z_0-9]+%', text)
+            if leftover:
+                logger.warning("Unrecognised callout token(s): {}".format(leftover))
 
     return text
 
@@ -4384,9 +4775,27 @@ def getPilotFreqsStr(rhapi, sep_str, spoken_flag):
         if pilot:
             text = pilot.spoken_callsign if spoken_flag else pilot.display_callsign
             if text:
-                profile_freqs = json.loads(rhapi.race.frequencyset.frequencies)
-                if profile_freqs:
-                    freq = str(profile_freqs["b"][heat_node.node_index]) + str(profile_freqs["c"][heat_node.node_index])
+                try:
+                    profile_freqs = json.loads(rhapi.race.frequencyset.frequencies)
+                except Exception:
+                    profile_freqs = None
+                if isinstance(profile_freqs, dict):
+                    # band and channel when both are set, else the frequency; empty for a disabled seat
+                    idx = heat_node.node_index
+                    seat_ok = isinstance(idx, int)
+                    bands = profile_freqs.get("b") if isinstance(profile_freqs.get("b"), list) else []
+                    channels = profile_freqs.get("c") if isinstance(profile_freqs.get("c"), list) else []
+                    freq_vals = profile_freqs.get("f") if isinstance(profile_freqs.get("f"), list) else []
+                    band = bands[idx] if seat_ok and 0 <= idx < len(bands) else None
+                    channel = channels[idx] if seat_ok and 0 <= idx < len(channels) else None
+                    frequency = freq_vals[idx] if seat_ok and 0 <= idx < len(freq_vals) else None
+                    if band and channel is not None:  # channel 0 is valid ('U0')
+                        freq = str(band) + str(channel)
+                    elif frequency:
+                        # spoken digit by digit ("5 6 5 8") rather than as a number
+                        freq = ' '.join(str(frequency)) if spoken_flag else str(frequency)
+                    else:
+                        freq = ''
                     if freq:
                         if first_flag:
                             first_flag = False
