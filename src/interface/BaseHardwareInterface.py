@@ -57,7 +57,10 @@ class BaseHardwareInterface(object):
             if source_idx >= 0 and source_idx < len(BaseHardwareInterface.LAP_SOURCE_LABEL_STRS) \
             else "unknown ({})".format(source_idx)
 
-    def process_lap_stats(self, node, readtime, lap_id, ms_val, cross_flag, pn_history, cross_list, upd_list):
+    def process_lap_stats(self, node, readtime, lap_id, ms_val, cross_flag, pn_history, cross_list, upd_list,
+                          history_readtime=None):
+        '''readtime dates the lap stats (ms_val); history_readtime dates pn_history when the
+        extremums came from a separate read (defaults to readtime).'''
         if node.scan_interval == 0:
             if cross_flag is not None and cross_flag != node.crossing_flag:  # if 'crossing' status changed
                 node.crossing_flag = cross_flag
@@ -103,7 +106,7 @@ class BaseHardwareInterface(object):
                     if callable(self.new_enter_or_exit_at_callback):
                         gevent.spawn(self.new_enter_or_exit_at_callback, node, False)
 
-        self.process_history(node, readtime, pn_history)
+        self.process_history(node, readtime if history_readtime is None else history_readtime, pn_history)
 
     def process_history(self, node, readtime, pn_history):
         # prune history data if race is not running (keep last 60s)
