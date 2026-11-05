@@ -127,6 +127,10 @@ def validate_checksum(data):
     checksum = calculate_checksum(data[:-1])
     return checksum == data[-1]
 
+def io_readtime(node):
+    '''Host time at which the node handled the last read: the midpoint of its request and response.'''
+    return node.io_response - (node.io_response - node.io_request) / 2
+
 def unpack_rssi(node, data):
     if node.has_wide_rssi():
         return unpack_16(data)
@@ -241,16 +245,27 @@ class RHInterface(BaseHardwareInterface):
         startThreshLowerNode = None
         for node in self.nodes:
             if node.frequency:
+                history_readtime = None  # set when the extremums come from a separate read
+                have_extremums = True
                 if node.api_valid_flag or node.api_level >= 5:
-                    if node.has_wide_rssi():
-                        # 16-bit RSSI widens both payloads to 11 bytes
-                        data = node.read_block(self, READ_LAP_PASS_STATS, 11)
+                    if node.has_wide_rssi() or node.api_level >= 32:
+                        # API 32+: lap stats and extremums are two reads; 16-bit RSSI widens both to 11 bytes
+                        block_size = 11 if node.has_wide_rssi() else 8
+                        data = node.read_block(self, READ_LAP_PASS_STATS, block_size)
                         if data != None:
-                            data.extend(node.read_block(self, READ_LAP_EXTREMUMS, 11))
-                    elif node.api_level >= 32:
-                        data = node.read_block(self, READ_LAP_PASS_STATS, 8)
-                        if data != None:
-                            data.extend(node.read_block(self, READ_LAP_EXTREMUMS, 8))
+                            # The node computes 'ms since lap' when it handles this command,
+                            # so the lap must be dated by this read, not by the next one:
+                            # a retry of READ_LAP_EXTREMUMS would otherwise shift the lap by
+                            # the serial timeout (~0.28 s) on a lossy link.
+                            readtime = io_readtime(node)
+                            extremums = node.read_block(self, READ_LAP_EXTREMUMS, block_size)
+                            if extremums != None:
+                                data.extend(extremums)
+                                history_readtime = io_readtime(node)  # extremum times are relative to this read
+                            else:
+                                have_extremums = False  # lap stats are still valid; skip extremum fields
+                        else:
+                            readtime = 0  # no lap stats to date
                     elif node.api_level >= 21:
                         data = node.read_block(self, READ_LAP_STATS, 16)
                     elif node.api_level >= 18:
@@ -261,9 +276,8 @@ class RHInterface(BaseHardwareInterface):
                         data = node.read_block(self, READ_LAP_STATS, 20)
                     else:
                         data = node.read_block(self, READ_LAP_STATS, 18)
-                    server_roundtrip = node.io_response - node.io_request
-                    server_oneway = server_roundtrip / 2
-                    readtime = node.io_response - server_oneway
+                    if not (node.has_wide_rssi() or node.api_level >= 32):
+                        readtime = io_readtime(node)  # single read carries both lap stats and extremums
                 else:
                     data = node.read_block(self, READ_LAP_STATS, 17)
                     readtime = 0
@@ -338,7 +352,9 @@ class RHInterface(BaseHardwareInterface):
                             if node.api_level >= 18:
                                 ms_val = unpack_16(data[1:])
                                 pn_history = PeakNadirHistory(node.index)
-                                if node.api_level >= 21:
+                                if not have_extremums:
+                                    pass  # READ_LAP_EXTREMUMS failed: no history this cycle
+                                elif node.api_level >= 21:
                                     if data[offset_lapStatsFlags] & LAPSTATS_FLAG_PEAK:
                                         rssi_val = unpack_rssi(node, data[offset_peakRssi:])
                                         if node.is_valid_rssi(rssi_val):
@@ -382,18 +398,19 @@ class RHInterface(BaseHardwareInterface):
                             if node.is_valid_rssi(rssi_val):
                                 node.pass_peak_rssi = rssi_val
                             node.loop_time = unpack_16(data[offset_loopTime:])
-                            if data[offset_lapStatsFlags] & LAPSTATS_FLAG_CROSSING:
-                                cross_flag = True
-                            else:
-                                cross_flag = False
-                            rssi_val = unpack_rssi(node, data[offset_passNadirRssi:])
-                            if node.is_valid_rssi(rssi_val):
-                                node.pass_nadir_rssi = rssi_val
-
-                            if node.api_level >= 13:
-                                rssi_val = unpack_rssi(node, data[offset_nodeNadirRssi:])
+                            if have_extremums:  # crossing flag and nadirs come from READ_LAP_EXTREMUMS
+                                if data[offset_lapStatsFlags] & LAPSTATS_FLAG_CROSSING:
+                                    cross_flag = True
+                                else:
+                                    cross_flag = False
+                                rssi_val = unpack_rssi(node, data[offset_passNadirRssi:])
                                 if node.is_valid_rssi(rssi_val):
-                                    node.node_nadir_rssi = rssi_val
+                                    node.pass_nadir_rssi = rssi_val
+
+                                if node.api_level >= 13:
+                                    rssi_val = unpack_rssi(node, data[offset_nodeNadirRssi:])
+                                    if node.is_valid_rssi(rssi_val):
+                                        node.node_nadir_rssi = rssi_val
 
                             if node.api_level >= 18:
                                 if node.index in self.data_loggers:
@@ -405,7 +422,8 @@ class RHInterface(BaseHardwareInterface):
                             node.pass_peak_rssi = unpack_rssi(node, data[11:])
                             node.loop_time = unpack_32(data[13:])
 
-                        self.process_lap_stats(node, readtime, lap_id, ms_val, cross_flag, pn_history, cross_list, upd_list)
+                        self.process_lap_stats(node, readtime, lap_id, ms_val, cross_flag, pn_history, cross_list, upd_list,
+                                               history_readtime=history_readtime)
 
                     else:
                         node.bad_rssi_count += 1
