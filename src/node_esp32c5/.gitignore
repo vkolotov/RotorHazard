@@ -1,0 +1,7 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+test/test_c5
+test/pty_node
+build-*/

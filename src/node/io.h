@@ -84,7 +84,7 @@ class Buffer {
         }
 };
 
-#ifdef STM32_CORE_VERSION
+#if RHNODE_WIDE_RSSI
 #define ioBufferReadRssi(buf) (buf.read16())
 #define ioBufferWriteRssi(buf, rssi) (buf.write16(rssi))
 #else

@@ -245,6 +245,12 @@ class NodeCapabilityTest(unittest.TestCase):
         self.assertTrue(self.node(38).supports_adc_resolution())
         self.assertFalse(self.node(38, proctype='ATmega328P').supports_adc_resolution())
 
+    def test_esp32c5_nodes_are_wide(self):
+        # the ESP32-C5 node firmware (src/node_esp32c5) is built with 16-bit RSSI
+        self.assertTrue(self.node(38, proctype='ESP32C5').has_wide_rssi())
+        self.assertTrue(self.node(38, proctype='ESP32C5').supports_adc_resolution())
+        self.assertFalse(self.node(37, proctype='ESP32C5').has_wide_rssi())
+
     def test_unsupported_nodes_are_not_sent_the_commands(self):
         intf = RHInterface.RHInterface.__new__(RHInterface.RHInterface)
         intf.nodes = [self.node(35)]

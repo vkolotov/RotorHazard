@@ -47,7 +47,7 @@
 struct Settings
 {
     uint16_t volatile vtxFreq = 5800;
-#ifdef STM32_CORE_VERSION
+#if RHNODE_WIDE_RSSI
     // Reading the ADC at its full 12-bit width changes the meaning of every
     //  stored RSSI value - saved race traces, thresholds, peak_rssi - so it is
     //  opt-in. The server sends the resolution at startup and defaults to the
@@ -171,7 +171,7 @@ class RssiNode
     }
 
     static uint16_t freqMhzToRegVal(uint16_t freqInMhz);
-#if STM32_MODE_FLAG
+#if STM32_MODE_FLAG && !RHNODE_RADIO_BACKEND
     static int rx5808SelPinForNodeIndex(int nIdx);
     static int rssiInputPinForNodeIndex(int nIdx);
 #endif
@@ -187,7 +187,12 @@ public:
     void setRxModuleToFreq(uint16_t vtxFreq);
     bool testRxModuleRegister();
 
-    rssi_t rssiRead();
+    // One raw receiver reading on the scale the ADC resolution selects
+    //  (0-255 legacy, 0-4095 full); provided by the receiver backend.
+    int rssiReadRaw();
+    // Apply this node's normalisation to a raw reading.
+    rssi_t rssiNormalise(int raw);
+    rssi_t rssiRead() { return rssiNormalise(rssiReadRaw()); }
     void rssiSetFilter(Filter<rssi_t> *f);
     void rssiSetSendBuffers(SendBuffer<Extremum> *peak, SendBuffer<Extremum> *nadir);
     void rssiInit();
@@ -220,7 +225,7 @@ public:
     }
     uint16_t getNormScale() { return settings.normScale; }
     void setNormScale(uint16_t val) { settings.normScale = val; }
-#ifdef STM32_CORE_VERSION
+#if RHNODE_WIDE_RSSI
     uint8_t getAdcResolution() { return settings.adcResolution; }
     void setAdcResolution(uint8_t bits);
 #endif

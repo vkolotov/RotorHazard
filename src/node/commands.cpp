@@ -187,7 +187,7 @@ void Message::handleWriteCommand(bool serialFlag)
 
         case WRITE_ADC_RESOLUTION:  // ADC width in bits
             u8val = buffer.read8();
-#ifdef STM32_CORE_VERSION
+#if RHNODE_WIDE_RSSI
             cmdRssiNodePtr->setAdcResolution(u8val);
 #endif
             break;
@@ -293,7 +293,7 @@ void Message::handleReadCommand(bool serialFlag)
             break;
 
         case READ_ADC_RESOLUTION:  // ADC width in bits
-#ifdef STM32_CORE_VERSION
+#if RHNODE_WIDE_RSSI
             buffer.write8(cmdRssiNodePtr->getAdcResolution());
 #else
             buffer.write8((uint8_t) LEGACY_ADC_BITS);

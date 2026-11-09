@@ -1,0 +1,20 @@
+import sys; sys.path.insert(0, '/home/meccup/rh-c5-work')
+from bench import *
+sen, sim = setup()
+def show(label, r):
+    print('%-34s R3 %6.1f  R4 %6.1f   others max %5.1f' % (label, r[5732][0], r[5769][0],
+          max(r[f][0] for f in RB if f not in (5732, 5769))), flush=True)
+sim.cmd('level 5750 0')
+show('tone1 offset 0 (PLL 5750)', scan(sen, 150))
+print(sim.cmd('tone2 1 %d 0 1' % (4096 - 310)))
+show('tone1 -> R3 only', scan(sen, 150))
+print(sim.cmd('tone2 2 325 0 1'))
+show('tone1 -> R3 + tone2 -> R4', scan(sen, 150))
+print(sim.cmd('tone2 1 %d 0 0' % (4096 - 310)))
+show('tone2 -> R4 only (tone1 off)', scan(sen, 150))
+print(sim.cmd('tone2 2 325 24 1'))
+show('tone2 -> R4, -6 dB', scan(sen, 150))
+print(sim.cmd('tone2 1 %d 24 1' % (4096 - 310)))
+show('both, both -6 dB', scan(sen, 150))
+sim.cmd('tone2 2 0 0 0'); sim.cmd('off')
+show('off', scan(sen, 150))

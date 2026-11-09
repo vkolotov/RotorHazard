@@ -14,6 +14,12 @@ RssiNode::RssiNode()
                 {MAX_RSSI, 0, 0}, false, &defaultNadirSendBuffer, 0 };
 }
 
+#if !RHNODE_RADIO_BACKEND
+// RX5808 modules on GPIO. A build with RHNODE_RADIO_BACKEND (e.g. ESP32-C5,
+//  which measures every seat with its own radio) supplies initRx5808Pins(),
+//  initRxModule(), setRxModuleToFreq(), testRxModuleRegister() and
+//  rssiReadRaw() itself; everything from rssiNormalise() on is shared.
+
 void RssiNode::initRx5808Pins(int nIdx)
 {
     nodeIndex = nIdx;
@@ -168,8 +174,8 @@ bool RssiNode::testRxModuleRegister()
     return vtxHexVerify == freqMhzToRegVal(settings.vtxFreq);
 }
 
-// Read the RSSI value for the current channel
-rssi_t RssiNode::rssiRead()
+// Read the raw RSSI value for the current channel
+int RssiNode::rssiReadRaw()
 {
     if (recentSetFreqFlag)
     {  // check if RSSI is stable after tune
@@ -188,7 +194,13 @@ rssi_t RssiNode::rssiRead()
             raw = 0x01FF;
         raw >>= 1;
     }
+    return raw;
+}
 
+#endif  // !RHNODE_RADIO_BACKEND
+
+rssi_t RssiNode::rssiNormalise(int raw)
+{
     if (!settings.normPivot)
         return (rssi_t) raw;  // no calibration applied
 
@@ -216,6 +228,8 @@ rssi_t RssiNode::rssiRead()
         adj = MAX_NORM_RSSI;  // one below MAX_RSSI, which is the nadir sentinel
     return (rssi_t) adj;
 }
+
+#if !RHNODE_RADIO_BACKEND
 
 void RssiNode::rx5808SerialSendBit1()
 {
@@ -323,14 +337,18 @@ uint16_t RssiNode::freqMhzToRegVal(uint16_t freqInMhz)
     return (N << (uint16_t)7) + A;
 }
 
+#endif  // !RHNODE_RADIO_BACKEND
 
-#ifdef STM32_CORE_VERSION
+
+#if RHNODE_WIDE_RSSI
 // Apply an ADC width to the hardware. Anything other than the full width falls
 //  back to legacy, so a bad value cannot silently change the scale.
 void RssiNode::setAdcResolution(uint8_t bits)
 {
     settings.adcResolution = (bits == FULL_ADC_BITS) ? FULL_ADC_BITS : LEGACY_ADC_BITS;
+#ifdef STM32_CORE_VERSION
     analogReadResolution(settings.adcResolution);
+#endif
 }
 #endif
 
@@ -573,7 +591,7 @@ void RssiNode::rssiEndCrossing()
 }
 
 
-#if STM32_MODE_FLAG
+#if STM32_MODE_FLAG && !RHNODE_RADIO_BACKEND
 
 int RssiNode::rx5808SelPinForNodeIndex(int nIdx)
 {

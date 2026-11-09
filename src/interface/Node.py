@@ -6,7 +6,11 @@
 #  be treated as one that failed.
 NODE_API_NORMALISATION = 37   # WRITE/READ_NORM_* coefficients
 NODE_API_EXTREMUMS_RESET = 37  # RESET_NODE_EXTREMUMS
-NODE_API_WIDE_RSSI = 38        # 16-bit RSSI fields and WRITE/READ_ADC_RESOLUTION (STM32 only)
+NODE_API_WIDE_RSSI = 38        # 16-bit RSSI fields and WRITE/READ_ADC_RESOLUTION (32-bit nodes)
+
+# Node processors whose firmware is built with 16-bit RSSI (RHNODE_WIDE_RSSI
+#  in src/node/util/rhtypes.h): S32_BPill STM32 boards and the ESP32-C5.
+WIDE_RSSI_PROCTYPES = ('STM32', 'ESP32')
 
 class Node:
     '''Node class represents the arduino/rx pair.'''
@@ -129,14 +133,14 @@ class Node:
     def has_wide_rssi(self):
         '''True if this node sends RSSI as 16 bits rather than 8.
 
-        The width is compiled into the node firmware - STM32 builds widen
-        rssi_t, AVR builds cannot - so it follows from what the node is, not
-        from any server setting. Both ends have to agree or every reading is
-        parsed wrong.
+        The width is compiled into the node firmware - STM32 and ESP32-C5
+        builds widen rssi_t, AVR builds cannot - so it follows from what the
+        node is, not from any server setting. Both ends have to agree or every
+        reading is parsed wrong.
         '''
         return self.api_level >= NODE_API_WIDE_RSSI and \
                bool(self.firmware_proctype_str) and \
-               self.firmware_proctype_str.upper().startswith('STM32')
+               self.firmware_proctype_str.upper().startswith(WIDE_RSSI_PROCTYPES)
 
     def supports_normalisation(self):
         '''True if the node firmware applies RSSI normalisation coefficients.
