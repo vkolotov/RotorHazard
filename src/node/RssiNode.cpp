@@ -14,6 +14,8 @@ RssiNode::RssiNode()
                 {MAX_RSSI, 0, 0}, false, &defaultNadirSendBuffer, 0 };
 }
 
+#if !RHNODE_RADIO_BACKEND
+
 void RssiNode::initRx5808Pins(int nIdx)
 {
     nodeIndex = nIdx;
@@ -294,6 +296,8 @@ uint16_t RssiNode::freqMhzToRegVal(uint16_t freqInMhz)
     return (N << (uint16_t)7) + A;
 }
 
+#endif  // !RHNODE_RADIO_BACKEND
+
 
 void RssiNode::rssiSetFilter(Filter<rssi_t> *f)
 {
@@ -534,7 +538,7 @@ void RssiNode::rssiEndCrossing()
 }
 
 
-#if STM32_MODE_FLAG
+#if STM32_MODE_FLAG && !RHNODE_RADIO_BACKEND
 
 int RssiNode::rx5808SelPinForNodeIndex(int nIdx)
 {

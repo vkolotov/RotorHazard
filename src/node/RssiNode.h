@@ -126,7 +126,7 @@ class RssiNode
     void initExtremum(Extremum *e);
 
     static uint16_t freqMhzToRegVal(uint16_t freqInMhz);
-#if STM32_MODE_FLAG
+#if STM32_MODE_FLAG && !RHNODE_RADIO_BACKEND
     static int rx5808SelPinForNodeIndex(int nIdx);
     static int rssiInputPinForNodeIndex(int nIdx);
 #endif

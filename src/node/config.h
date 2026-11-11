@@ -4,10 +4,18 @@
 #include <Arduino.h>
 #include "util/rhtypes.h"
 
-#ifdef STM32_CORE_VERSION
-#define STM32_MODE_FLAG 1  // 1 for STM 32-bit processor running multiple nodes
+#if defined(STM32_CORE_VERSION) || defined(RHNODE_ESP32C5)
+#define STM32_MODE_FLAG 1  // 1 for a processor running multiple nodes
 #else
 #define STM32_MODE_FLAG 0  // 0 for Arduino processor running single node
+#endif
+
+// A non-RX5808 target supplies the receiver-facing RssiNode methods itself.
+// False for every existing Blue Pill and Arduino build.
+#ifdef RHNODE_ESP32C5
+#define RHNODE_RADIO_BACKEND 1
+#else
+#define RHNODE_RADIO_BACKEND 0
 #endif
 
 #if !STM32_MODE_FLAG
@@ -25,9 +33,17 @@
 #define RHFEAT_STM32_MODE ((uint16_t)0x0004)      // STM 32-bit processor running multiple nodes
 #define RHFEAT_JUMPTO_BOOTLDR ((uint16_t)0x0008)  // JUMP_TO_BOOTLOADER command supported
 #define RHFEAT_IAP_FIRMWARE ((uint16_t)0x0010)    // in-application programming of firmware supported
+#define RHFEAT_C5_DETECTION_CONFIG ((uint16_t)0x0020)  // C5 runtime detection config extension
+#define RHFEAT_C5_CALIBRATION_CONFIG ((uint16_t)0x0040)  // C5 calibration trims (protocol v2)
 #define RHFEAT_NONE ((uint16_t)0)
 
-#if STM32_MODE_FLAG
+#if RHNODE_RADIO_BACKEND
+#define RHFEAT_FLAGS_VALUE (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG)
+
+#define SERIAL_BAUD_RATE 921600
+#define MULTI_RHNODE_MAX 8
+
+#elif STM32_MODE_FLAG
 // value returned by READ_RHFEAT_FLAGS command
 #define RHFEAT_FLAGS_VALUE (RHFEAT_STM32_MODE | RHFEAT_JUMPTO_BOOTLDR | RHFEAT_IAP_FIRMWARE)
 
@@ -89,6 +105,14 @@
 #define LEGACY_HARDWARE_SELECT_PIN_4 7
 #define LEGACY_HARDWARE_SELECT_PIN_5 8
 
+#define MODULE_LED_ONSTATE HIGH
+#define MODULE_LED_OFFSTATE LOW
+
+#elif RHNODE_RADIO_BACKEND
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN (-1)
+#endif
 #define MODULE_LED_ONSTATE HIGH
 #define MODULE_LED_OFFSTATE LOW
 
