@@ -41,6 +41,16 @@ FPVTrackside) and `docs/browser-relay-design.md` (the mach1 protocol).
   receiver forgets it at power-off. Race settings (`race_settings`: minimum
   lap, ignore after start) are kept in NVS too and on the club's gate in
   mach1. `hello` lists these in `features`.
+- **The node is the timer.** With a C5 node on 1.2.0-c5.13 or later (it
+  reports an id and a name), the relay is that node's timer in mach1
+  (`c5-<node id>`, route `relay`, its own `relay-<mac>` as `relay_uid`): the
+  same timer a laptop is when it drives the node directly. It reconnects as
+  the node when it meets one, remembers it in NVS (`nodeid`), and steps off
+  mach1 while a USB host drives the node through it (pass-through), coming
+  back when the host lets go. The timer's name is the node's: a rename from
+  mach1 (`set_name`), the console (`name <text>`, live) or the setup page is
+  written to the node, or kept (`namepend`) and written when the node next
+  connects. A node without an id leaves the relay as itself.
 - `relay_main.cpp` (ESP-IDF): UART1 link, Wi-Fi STA, SNTP, WebSocket client
   (TLS with the CA bundle), USB console or serial pass-through, settings
   in NVS.
