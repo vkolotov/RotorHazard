@@ -33,7 +33,8 @@ FPVTrackside) and `docs/browser-relay-design.md` (the mach1 protocol).
   the levels saved in mach1. Because its source is not `browser`, mission
   control treats it like a RotorHazard timer (saves are pushed to it).
 - `relay_main.cpp` (ESP-IDF): UART1 link, Wi-Fi STA, SNTP, WebSocket client
-  (TLS with the CA bundle), USB console, settings in NVS.
+  (TLS with the CA bundle), USB console or serial pass-through, settings
+  in NVS.
 
 Not yet: the FPVTrackside Socket.IO server (phase 2), OSD via a Timer
 Backpack, keeping unacked race messages across a reboot (RAM only, 400 max).
@@ -67,6 +68,30 @@ The `feed` URL is the club feed URL with the source segment of your choice
 with its own uid (`relay-<mac>`). `minlap <ms>` sets the minimum lap,
 `log` shows recent events. A start needs the wall clock (SNTP) and a
 running node; otherwise mach1 gets a failed `command_result` saying why.
+
+## Wi-Fi or serial (one USB port)
+
+The relay is a timer on its own over Wi-Fi. Plug it into a laptop instead
+and mach1's **browser timer** can drive the gate through it over Web Serial
+(pick the relay's port; it is the C5's native USB, `303a:1001`):
+
+- A line starting with a letter is a console command. Anything else is the
+  node protocol (RotorHazard never starts with a letter: the browser opens
+  with `READ_REVISION_CODE` 0x22, and C5 node settings are `!` lines), and
+  the relay hands the host its node link: bytes are forwarded both ways
+  between USB and the radio UART, its own polling stops (mach1 sees the
+  gate down) and its logs are silenced so they cannot corrupt the stream.
+- After 3 s without a byte from the host (browser stopped, cable out) the
+  relay takes the node back and reconnects (`Serial ended` in `log`).
+- Wi-Fi and the mach1 connection stay up throughout.
+- Opening the port resets the C5 (USB-serial DTR/RTS); the browser's
+  start-up retries cover the reboot. Its leftover boot text is discarded
+  (the browser clears its input before each request).
+
+Bench (2026-11-12, a script with the browser's timings): first contact on
+the second try, then ~160-300 round trips/s with 0 bad in 812-1598; the
+relay back at 11 sweeps/s about 1 s after the host went quiet. Not yet
+tried from Chrome.
 
 ## Wiring
 

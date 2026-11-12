@@ -8,8 +8,14 @@
 //           its event queue.
 //   sender  sends what the timer queues for mach1, so a slow network never
 //           holds up the node sweep.
-//   console the ESP-IDF REPL on the native USB port: settings in NVS, status.
+//   usb     the native USB port: the console (settings in NVS, status), or
+//           serial pass-through, where a USB host (mach1's browser timer over
+//           Web Serial) drives the node through the relay's radio link
+//           instead of the relay. Wi-Fi and mach1 stay up meanwhile.
 //   websocket client (esp_websocket_client) and Wi-Fi run their own tasks.
+#include <atomic>
+#include <cctype>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -18,6 +24,8 @@
 #include <sys/time.h>
 
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_console.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
@@ -51,6 +59,15 @@ constexpr uart_port_t LINK_UART = UART_NUM_1;
 constexpr int LINK_BAUD = 921600;  // the node's fixed rate (S32_BPill, C5, AirPort)
 constexpr int64_t GATE_RETRY_MS = 3000;
 constexpr int LOG_LINES = 40;
+// Serial pass-through ends after this long without a byte from the USB host;
+// the browser timer polls continuously while it drives the node.
+constexpr int64_t SERIAL_IDLE_MS = 3000;
+
+// Who drives the node link. The USB task asks (Requested); the timer task
+// stops polling and hands the UART over (Granted); the USB task gives it back
+// (Off) and the timer task reconnects to the node.
+enum SerialMode : int { SerialOff = 0, SerialRequested = 1, SerialGranted = 2 };
+static std::atomic<int> g_serialMode{SerialOff};
 
 // ---------------------------------------------------------------------------
 // Settings (NVS namespace "relay")
@@ -473,21 +490,9 @@ static void timerTask(void* arg)
     };
 
     bool gateRunning = false;
+    bool handedOver = false;  // the USB task has the link (serial pass-through)
     int64_t nextGateTry = 0;
-    for (;;) {
-        Event e;
-        while (xQueueReceive(g_events, &e, 0) == pdTRUE) {
-            const int64_t now = esp_timer_get_time() / 1000;
-            switch (e.kind) {
-            case QueueKind::SocketOpen: timer.socketOpen(now); break;
-            case QueueKind::SocketClosed: timer.socketClosed(); break;
-            case QueueKind::SocketText: timer.message(e.text, now); break;
-            case QueueKind::Refused: addLog("mach1 refused the club key: check the feed URL"); break;
-            case QueueKind::Console: consoleCommand(e.text, *ctx, driver, timer); break;
-            }
-            free(e.text);
-        }
-        const int64_t now = esp_timer_get_time() / 1000;
+    auto gateStep = [&](int64_t now) {
         if (gateRunning && driver.status() != NodeStatus::Running) {
             gateRunning = false;
             addLog("Gate link lost: " + driver.detail() + "; reconnecting");
@@ -513,6 +518,40 @@ static void timerTask(void* arg)
         } else {
             vTaskDelay(pdMS_TO_TICKS(20));
         }
+    };
+    for (;;) {
+        Event e;
+        while (xQueueReceive(g_events, &e, 0) == pdTRUE) {
+            const int64_t now = esp_timer_get_time() / 1000;
+            switch (e.kind) {
+            case QueueKind::SocketOpen: timer.socketOpen(now); break;
+            case QueueKind::SocketClosed: timer.socketClosed(); break;
+            case QueueKind::SocketText: timer.message(e.text, now); break;
+            case QueueKind::Refused: addLog("mach1 refused the club key: check the feed URL"); break;
+            case QueueKind::Console: consoleCommand(e.text, *ctx, driver, timer); break;
+            }
+            free(e.text);
+        }
+        const int64_t now = esp_timer_get_time() / 1000;
+        // Serial pass-through: stop using the link and hand it to the USB task.
+        const int serial = g_serialMode.load();
+        if (serial == SerialRequested) {
+            if (gateRunning) {
+                gateRunning = false;
+                timer.gateDown(now);
+            }
+            handedOver = true;
+            addLog("Serial: a USB host drives the node");
+            g_serialMode.store(SerialGranted);
+        } else if (serial == SerialOff && handedOver) {
+            handedOver = false;
+            addLog("Serial ended; reconnecting to the node");
+            nextGateTry = now;
+        }
+        if (handedOver)
+            vTaskDelay(pdMS_TO_TICKS(20));
+        else
+            gateStep(now);
         timer.tick(esp_timer_get_time() / 1000);
         static int64_t nextStatus = 0;
         if (esp_timer_get_time() / 1000 >= nextStatus) {
@@ -603,27 +642,128 @@ static int cmdReboot(int, char**)
     return 0;
 }
 
-static void startConsole()
+static const esp_console_cmd_t kCommands[] = {
+    {.command = "status", .help = "Wi-Fi, mach1, node link, race and every seat", .hint = nullptr, .func = cmdStatus, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "log", .help = "Recent events", .hint = nullptr, .func = cmdLog, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "wifi", .help = "wifi <ssid> [password]: the network to join", .hint = nullptr, .func = cmdWifi, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "feed", .help = "feed <url>: the club feed URL from mach1 (source segment e.g. relay)", .hint = nullptr, .func = cmdFeed, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "name", .help = "name <text>: what mach1 calls this timer", .hint = nullptr, .func = cmdName, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "minlap", .help = "minlap <ms>: minimum lap time", .hint = nullptr, .func = cmdMinLap, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "reboot", .help = "Restart (applies saved settings)", .hint = nullptr, .func = cmdReboot, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+};
+
+// Logs must not reach the USB host while it speaks the node protocol.
+static int quietVprintf(const char* fmt, va_list args)
 {
-    esp_console_repl_t* repl = nullptr;
-    esp_console_repl_config_t replConfig = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    replConfig.prompt = "relay> ";
-    replConfig.max_cmdline_length = 256;
-    esp_console_dev_usb_serial_jtag_config_t hw = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw, &replConfig, &repl));
+    if (g_serialMode.load() != SerialOff)
+        return 0;
+    return vprintf(fmt, args);
+}
+
+static void runConsoleLine(const std::string& line)
+{
+    if (!line.empty()) {
+        int ret = 0;
+        const esp_err_t err = esp_console_run(line.c_str(), &ret);
+        if (err == ESP_ERR_NOT_FOUND)
+            printf("Unknown command; `help` lists them.\n");
+    }
+    printf("relay> ");
+    fflush(stdout);
+}
+
+// The native USB port. A line starting with a letter is a console command.
+// Anything else is a USB host speaking RotorHazard's node protocol (it never
+// starts with a letter: mach1's browser timer opens with READ_REVISION_CODE
+// 0x22, and its C5 settings are '!' lines): the relay hands it the node link
+// and forwards bytes both ways until the host has been quiet for
+// SERIAL_IDLE_MS.
+static void usbTask(void*)
+{
+    uint8_t in[256];
+    uint8_t out[256];
+    std::string line;
+    std::string pending;     // bytes from the host while the link is handed over
+    int64_t lineStarted = 0;
+    int64_t lastHostByte = 0;
+    for (;;) {
+        const int mode = g_serialMode.load();
+        // 1 ms turnaround while forwarding; the console can wait longer, which
+        // keeps this task (above the timer task) from stealing its sweep time.
+        const int n = usb_serial_jtag_read_bytes(in, sizeof in, pdMS_TO_TICKS(mode == SerialOff ? 20 : 1));
+        const int64_t nowMs = esp_timer_get_time() / 1000;
+        if (mode == SerialOff) {
+            for (int i = 0; i < n; i++) {
+                const uint8_t b = in[i];
+                if (line.empty() && b != '\r' && b != '\n' && !isalpha(b)) {
+                    // The node protocol: hand over the link, keep the rest.
+                    pending.assign((const char*)in + i, n - i);
+                    lastHostByte = nowMs;
+                    g_serialMode.store(SerialRequested);
+                    break;
+                }
+                if (b == '\r' || b == '\n') {
+                    if (!line.empty() || b == '\r') {
+                        printf("\n");
+                        runConsoleLine(line);
+                    }
+                    line.clear();
+                } else if (b == 0x08 || b == 0x7f) {
+                    if (!line.empty())
+                        line.pop_back();
+                } else if (line.size() < 255) {
+                    if (line.empty())
+                        lineStarted = nowMs;
+                    line += (char)b;
+                }
+            }
+            // A stray letter must not hold the port as console for ever.
+            if (!line.empty() && nowMs - lineStarted > 30000)
+                line.clear();
+            continue;
+        }
+        if (n > 0) {
+            lastHostByte = nowMs;
+            if (mode == SerialGranted)
+                uart_write_bytes(LINK_UART, in, n);
+            else if (pending.size() + n < 4096)
+                pending.append((const char*)in, n);
+        }
+        if (mode == SerialGranted) {
+            if (!pending.empty()) {
+                uart_flush_input(LINK_UART);
+                uart_write_bytes(LINK_UART, pending.data(), pending.size());
+                pending.clear();
+            }
+            const int r = uart_read_bytes(LINK_UART, out, sizeof out, 0);
+            if (r > 0)
+                usb_serial_jtag_write_bytes(out, r, pdMS_TO_TICKS(20));
+        }
+        if (nowMs - lastHostByte > SERIAL_IDLE_MS) {
+            pending.clear();
+            line.clear();
+            g_serialMode.store(SerialOff);
+        }
+    }
+}
+
+static void startUsb()
+{
+    usb_serial_jtag_driver_config_t usb = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    usb.rx_buffer_size = 4096;
+    usb.tx_buffer_size = 4096;
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb));
+    usb_serial_jtag_vfs_use_driver();
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    esp_log_set_vprintf(quietVprintf);
+
+    esp_console_config_t console = ESP_CONSOLE_CONFIG_DEFAULT();
+    console.max_cmdline_length = 256;
+    ESP_ERROR_CHECK(esp_console_init(&console));
     esp_console_register_help_command();
-    const esp_console_cmd_t commands[] = {
-        {.command = "status", .help = "Wi-Fi, mach1, node link, race and every seat", .hint = nullptr, .func = cmdStatus, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-        {.command = "log", .help = "Recent events", .hint = nullptr, .func = cmdLog, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-        {.command = "wifi", .help = "wifi <ssid> [password]: the network to join", .hint = nullptr, .func = cmdWifi, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-        {.command = "feed", .help = "feed <url>: the club feed URL from mach1 (source segment e.g. relay)", .hint = nullptr, .func = cmdFeed, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-        {.command = "name", .help = "name <text>: what mach1 calls this timer", .hint = nullptr, .func = cmdName, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-        {.command = "minlap", .help = "minlap <ms>: minimum lap time", .hint = nullptr, .func = cmdMinLap, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-        {.command = "reboot", .help = "Restart (applies saved settings)", .hint = nullptr, .func = cmdReboot, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
-    };
-    for (const auto& c : commands)
+    for (const auto& c : kCommands)
         ESP_ERROR_CHECK(esp_console_cmd_register(&c));
-    ESP_ERROR_CHECK(esp_console_start_repl(repl));
+    xTaskCreate(usbTask, "usb", 6144, nullptr, 7, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +804,7 @@ extern "C" void app_main(void)
     // a heartbeat, to see which step stops the board.
     xTaskCreate(diagBeat, "diag", 3072, nullptr, 10, nullptr);
     g_diagStage = 1; printf("diag: stage 1 console\n");
-    startConsole();
+    startUsb();
     vTaskDelay(pdMS_TO_TICKS(8000));
     g_diagStage = 2; printf("diag: stage 2 sender+timer (UART link)\n");
     xTaskCreate(senderTask, "sender", 4096, nullptr, 5, nullptr);
@@ -677,13 +817,15 @@ extern "C" void app_main(void)
         startSocket(ctx.socketUrl);
     g_diagStage = 5;
 #else
+    // USB first: a browser opening the port resets the C5 and starts probing
+    // for the node within ~2.5 s.
+    startUsb();
+    xTaskCreate(timerTask, "timer", 8192, &ctx, 6, nullptr);
     // Always: with no network saved it opens the setup hotspot.
     startNetwork(ctx.settings, ctx.uid);
     if (!ctx.settings.ssid.empty() && !ctx.socketUrl.empty())
         startSocket(ctx.socketUrl);
     xTaskCreate(senderTask, "sender", 4096, nullptr, 5, nullptr);
-    xTaskCreate(timerTask, "timer", 8192, &ctx, 6, nullptr);
-    startConsole();
 #endif
     if (ctx.settings.ssid.empty())
         printf("\nNo Wi-Fi set: join hotspot %s (open) and open http://192.168.4.1,\n"
