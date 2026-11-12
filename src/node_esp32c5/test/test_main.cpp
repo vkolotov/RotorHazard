@@ -317,7 +317,19 @@ static void testRhProtocol()
           "revision %02x%02x", d.size() > 1 ? d[0] : 0, d.size() > 1 ? d[1] : 0);
     CHECK(readCmd(link, out, READ_MULTINODE_COUNT, 1, &d) && d[0] == 8, "multinode");
     CHECK(readCmd(link, out, READ_RHFEAT_FLAGS, 2, &d) &&
-          be16(d, 0) == (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG), "features");
+          be16(d, 0) == (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID), "features");
+    // The node's identity: whatever it was given (the factory MAC on the C5).
+    const uint8_t id[6] = {0x3c, 0x84, 0x27, 0x0a, 0x1b, 0x2c};
+    rhSetNodeId(id);
+    CHECK(readCmd(link, out, c5::kReadNodeId, 6, &d) && !memcmp(d.data(), id, 6), "node id");
+    // Its name: written over the link, kept by the store, read back zero padded.
+    static std::string stored;
+    rhSetNameStore([](const char* name) { stored = name; });
+    std::vector<uint8_t> name(c5::kNodeNameSize, 0);
+    memcpy(name.data(), "Start gate", 10);
+    writeCmd(link, c5::kWriteNodeName, name);
+    CHECK(stored == "Start gate" && std::string(rhNodeName()) == "Start gate", "name stored '%s'", stored.c_str());
+    CHECK(readCmd(link, out, c5::kReadNodeName, c5::kNodeNameSize, &d) && d == name, "name read back");
     CHECK(readCmd(link, out, READ_FW_PROCTYPE, 16, &d) && !memcmp(d.data(), "ESP32C5", 7), "proctype");
 
     // C5 detection configuration v3: one input, the shortest pass (ms); the

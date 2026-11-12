@@ -20,6 +20,17 @@ constexpr uint8_t kReadDetectionConfig = 0x41;
 constexpr uint8_t kReadCalibrationConfig = 0x42;
 constexpr uint8_t kWriteDetectionConfig = 0x73;
 constexpr uint8_t kWriteCalibrationConfig = 0x74;
+// The node's identity (read 0x43, 6 bytes): the chip's factory MAC, so a
+// timer is known as the same gate however it is reached (a laptop over USB or
+// the AirPort link, or a C5 relay over Wi-Fi). Read-only, never changes.
+constexpr uint8_t kReadNodeId = 0x43;
+constexpr uint8_t kNodeIdSize = 6;
+// The node's name (read 0x44 / write 0x75, 32 bytes of UTF-8, zero padded):
+// what mach1 and the relay call this timer. Saved on the node, so a rename
+// through mach1 or the relay follows the node wherever it is plugged in.
+constexpr uint8_t kReadNodeName = 0x44;
+constexpr uint8_t kWriteNodeName = 0x75;
+constexpr uint8_t kNodeNameSize = 32;
 constexpr uint8_t kDetectionConfigVersion = 3;
 constexpr uint8_t kDetectionConfigWriteSize = 3;  // version, minimum pass ms BE16
 constexpr uint8_t kDetectionConfigReadSize = 86;   // 14 + 12 curve points x 6; see writeDetectionConfig
@@ -86,6 +97,12 @@ void rhSetCalibrationStore(void (*store)());
 
 // Set up the node array for this many seats and attach the scanner.
 void rhBegin(Scanner& scanner, int seats);
+// The identity READ 0x43 answers (the factory MAC on the C5; tests set their own).
+void rhSetNodeId(const uint8_t id[kNodeIdSize]);
+// The name READ 0x44 answers; a WRITE 0x75 replaces it and calls the store (NVS on the C5).
+void rhSetNodeName(const char* name);
+const char* rhNodeName();
+void rhSetNameStore(void (*store)(const char* name));
 // After any command: the bookkeeping rhnode.cpp's loop() does.
 void rhAfterCommands();
 // Seat readings from the scanner (a SeatSink).
