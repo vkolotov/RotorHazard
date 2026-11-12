@@ -111,6 +111,8 @@ public:
 
     // Exposed for tests and the console.
     bool read(uint8_t command, size_t size, int retries, Reply* out);
+    // A framed write (command, data, checksum), for settings the caller owns (C5).
+    void writeRaw(uint8_t command, const std::vector<uint8_t>& data) { write(command, data); }
 
 private:
     bool readOnce(uint8_t command, size_t size, Reply* out, bool* gotSomething);

@@ -5,6 +5,9 @@
 struct Settings {
     std::string ssid, password, feed, name = "C5 relay";
     int minLapMs = 4000;
+    int ignoreAfterStartMs = 500;
+    // Kept from mission control: the last C5 detection write (hex) and its geometry (JSON).
+    std::string c5Detection, c5Input;
 };
 
 Settings loadSettings();

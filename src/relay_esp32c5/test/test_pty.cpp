@@ -172,6 +172,23 @@ int main(int argc, char** argv)
                     relayLapMs - trueLapMs);
         EXPECT(std::fabs(relayLapMs - trueLapMs) < 10, "lap error %.1f ms", relayLapMs - trueLapMs);
     }
+    // The C5 settings mission control reaches through the relay (node_io):
+    // features, detection v3 (write, then read back), calibration.
+    Reply features, detection, calibration;
+    EXPECT(driver.read(0x11, 2, MAX_RETRIES, &features) && (features.data[1] & 0x60) == 0x60,
+           "C5 detection and calibration features");
+    driver.writeRaw(0x73, {3, 0, 61});
+    EXPECT(driver.read(0x41, 86, MAX_RETRIES, &detection), "detection read (86 bytes)");
+    if (detection.data.size() == 86) {
+        const int ms = (detection.data[2] << 8) | detection.data[3];
+        EXPECT(detection.data[0] == 3 && detection.data[13] == 0 && ms == 61 && (detection.data[1] & 4),
+               "detection v%d status %d %d ms flags %02x", detection.data[0], detection.data[13], ms, detection.data[1]);
+        std::printf("c5: detection %d ms, %d samples, average of %d\n", ms, (detection.data[4] << 8) | detection.data[5],
+                    detection.data[6]);
+    }
+    EXPECT(driver.read(0x42, 36, MAX_RETRIES, &calibration) && calibration.data[0] == 2, "calibration v2 read");
+    sweep(300);  // still timing after the settings traffic
+
     const LinkCounters& c = driver.counters();
     std::printf("link: %u reads, %u writes, %u timeouts, %u checksum errors\n", c.reads, c.writes, c.timeouts,
                 c.checksumErrors);

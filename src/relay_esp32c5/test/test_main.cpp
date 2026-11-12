@@ -702,12 +702,95 @@ static void timerTests()
     });
 }
 
+static void settingsTests()
+{
+    test("timer: hello says what mission control may ask, and the race settings", [] {
+        Rig r;
+        r.timer.c5Input = R"({"speed":200,"distance":1,"angle":90})";
+        r.up();
+        cJSON* hello = r.last("hello");
+        cJSON* features = cJSON_GetObjectItem(hello, "features");
+        CHECK(cJSON_GetArraySize(features) == 3 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io");
+        CHECK(num(cJSON_GetObjectItem(hello, "c5_input"), "angle") == 90);
+        CHECK(num(cJSON_GetObjectItem(hello, "race_settings"), "minLapMs") == 4000);
+    });
+    test("timer: node_io carries C5 settings reads and writes, keeps the detection, and nothing else", [] {
+        Rig r;
+        std::map<std::string, std::string> saved;
+        r.timer.saveSetting = [&](const std::string& k, const std::string& v) { saved[k] = v; };
+        r.up();
+        r.command(R"({"type":"command","id":"n1","action":"node_io","ops":[{"r":17,"n":2},{"w":115,"d":[3,0,61]},{"r":65,"n":86}]})");
+        cJSON* result = r.last("command_result");
+        CHECK(str(result, "id") == "n1" && cJSON_IsTrue(cJSON_GetObjectItem(result, "ok")));
+        cJSON* data = cJSON_GetObjectItem(result, "data");
+        CHECK(cJSON_GetArraySize(data) == 2);
+        CHECK(std::string(cJSON_GetArrayItem(data, 0)->valuestring) == "0060");
+        CHECK(std::string(cJSON_GetArrayItem(data, 1)->valuestring).substr(0, 8) == "0307003d");
+        CHECK(r.node.minPassMs == 61);
+        CHECK(saved["c5det"] == "03003d" && r.timer.c5Detection == std::vector<uint8_t>({3, 0, 61}));
+        // Only the C5 settings: not a frequency, not a seat's levels.
+        const int before = r.node.seats[0].frequency;
+        r.command(R"({"type":"command","id":"n2","action":"node_io","ops":[{"w":81,"d":[22,98]}]})");
+        result = r.last("command_result");
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(result, "ok")) && str(result, "error").find("Only the C5") == 0);
+        CHECK(r.node.seats[0].frequency == before);
+        r.command(R"({"type":"command","id":"n3","action":"node_io","ops":[{"r":65,"n":10}]})");
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(r.last("command_result"), "ok")));
+        // Never during a race.
+        r.command(START_CMD);
+        r.command(R"({"type":"command","id":"n4","action":"node_io","ops":[{"r":66,"n":36}]})");
+        CHECK(str(r.last("command_result"), "error") == "C5 settings cannot change during staging or racing.");
+    });
+    test("timer: the kept detection is written again whenever the node (re)connects", [] {
+        Rig r;
+        r.timer.c5Detection = {3, 0, 61};
+        r.up();
+        CHECK(r.node.minPassMs == 61);
+        r.node.minPassMs = 0;  // the receiver was power-cycled
+        r.timer.gateDown(r.now());
+        r.driver.start(nullptr);
+        r.timer.gateUp(&r.driver, r.now());
+        CHECK(r.node.minPassMs == 61);
+        bool restored = false;
+        for (const auto& l : r.lines)
+            restored = restored || l.find("C5 detection 61 ms restored") != std::string::npos;
+        CHECK(restored);
+        // A node that is not a C5 is left alone.
+        Rig other;
+        other.node.proc = "STM32F1";
+        other.node.c5 = false;
+        other.timer.c5Detection = {3, 0, 61};
+        other.up();
+        CHECK(other.node.writes.empty() || other.node.writes.back()[0] != 0x73);
+    });
+    test("timer: race settings from mission control apply, are kept, and go on the gate", [] {
+        Rig r;
+        std::map<std::string, std::string> saved;
+        r.timer.saveSetting = [&](const std::string& k, const std::string& v) { saved[k] = v; };
+        r.up();
+        r.command(R"({"type":"command","id":"s1","action":"race_settings","settings":{"minLapMs":6000,"ignoreAfterStartMs":800}})");
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(r.last("command_result"), "ok")));
+        CHECK(r.timer.engine.settings.minLapMs == 6000 && r.timer.engine.settings.ignoreAfterStartMs == 800);
+        CHECK(saved["minlap"] == "6000" && saved["ignorems"] == "800");
+        cJSON* gate = r.last("gate_settings");
+        CHECK(num(cJSON_GetObjectItem(cJSON_GetObjectItem(gate, "settings"), "race"), "minLapMs") == 6000);
+        // Saved on the club's setup: applied from gate_config.
+        r.command(R"({"type":"gate_config","levels":[],"nodes":[],"setup":{"gate":"start","confirm":false,"settings":{"race":{"minLapMs":5000}}}})");
+        CHECK(r.timer.engine.settings.minLapMs == 5000);
+        // The geometry mission control applied a detection with.
+        r.command(R"({"type":"command","id":"s2","action":"c5_input","input":{"speed":180,"distance":1,"angle":90}})");
+        CHECK(saved["c5in"] == R"({"speed":180,"distance":1,"angle":90})");
+        CHECK(num(cJSON_GetObjectItem(r.last("hello"), "c5_input"), "speed") == 180);
+    });
+}
+
 int main()
 {
     CHECK(relayConstantsChecked() == 1);
     engineTests();
     driverTests();
     timerTests();
+    settingsTests();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

@@ -32,6 +32,15 @@ FPVTrackside) and `docs/browser-relay-design.md` (the mach1 protocol).
   processor (`hardware: "ESP32C5"`) like the browser timer, so both share
   the levels saved in mach1. Because its source is not `browser`, mission
   control treats it like a RotorHazard timer (saves are pushed to it).
+- **C5 settings from mission control** (any device, over mach1): mission
+  control runs the C5 settings logic (`c5Control.ts`) and the relay carries
+  its node-protocol reads and writes (`node_io`): only the C5 settings
+  commands (features 0x11, detection 0x41/0x73, calibration 0x42/0x74), never
+  during a race. The last detection written is kept in NVS (`c5det`, with its
+  geometry `c5in`) and written again whenever the node (re)connects, as the
+  receiver forgets it at power-off. Race settings (`race_settings`: minimum
+  lap, ignore after start) are kept in NVS too and on the club's gate in
+  mach1. `hello` lists these in `features`.
 - `relay_main.cpp` (ESP-IDF): UART1 link, Wi-Fi STA, SNTP, WebSocket client
   (TLS with the CA bundle), USB console or serial pass-through, settings
   in NVS.

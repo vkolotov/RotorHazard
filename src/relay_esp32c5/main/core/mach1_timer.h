@@ -9,7 +9,16 @@
 //                   laps_discard, nodes (while mission control watches)
 //   mach1 -> relay: welcome, pong, ack {session, seq}, gate_config,
 //                   command {id, action: start/stop/discard/set_levels/
-//                            set_channel/watch/unwatch, ...}
+//                            set_channel/watch/unwatch/node_io/c5_input/
+//                            race_settings, ...}
+//
+// C5 settings from mission control (anywhere, over mach1): mission control
+// runs the C5 settings logic itself (c5Control.ts) and the relay carries its
+// node-protocol reads and writes (`node_io`), only the C5 settings commands
+// (features, detection, calibration), never during a race. The last
+// detection written is kept (NVS on the relay) and written again whenever the
+// node (re)connects: the receiver forgets it at power-off. `features` in
+// hello says what the relay takes.
 //
 // Race messages are numbered per boot (`session`, `seq`) and kept until mach1
 // acknowledges them, then resent on a reconnect; mach1 stores a resend once.
@@ -87,6 +96,15 @@ public:
     std::function<bool(int64_t monoMs, int64_t* epochMs)> toEpoch;
     // A line for the console log.
     std::function<void(const std::string& line)> log;
+    // Keep a setting across reboots (NVS on the relay): "c5det" (hex), "c5in"
+    // (JSON), "minlap", "ignorems" (decimal).
+    std::function<void(const std::string& key, const std::string& value)> saveSetting;
+
+    // Loaded at boot from the saved settings.
+    // The last C5 detection write (WRITE 0x73 payload), written again on every (re)connect.
+    std::vector<uint8_t> c5Detection;
+    // The detection geometry mission control applied it with (JSON), shown there again.
+    std::string c5Input;
 
     std::string uid;
     std::string session;
@@ -146,6 +164,11 @@ private:
     std::string discard(int64_t now);
     std::string setLevels(cJSON* command);
     std::string setChannel(cJSON* command);
+    std::string nodeIo(cJSON* command, cJSON* result);
+    std::string rememberC5Input(cJSON* command);
+    std::string raceSettings(cJSON* command);
+    void applyRaceSettings(const cJSON* race, bool save);
+    void restoreC5Detection();
     void gateConfig(cJSON* message, int64_t now);
     void applyLevels(int seat, int pilotId, const StartPilot* given);
     void applyIdle();
@@ -185,5 +208,8 @@ private:
 // The pilots by seat, as mach1 seated them (`seat` on each). A start from an
 // older mach1, or with seats that do not fit this gate, puts pilot n on node n.
 std::vector<std::optional<StartPilot>> seatsFromCommand(const std::vector<StartPilot>& pilots, int seats);
+
+// Hex text (as the relay keeps the C5 detection in NVS) to bytes; empty if not hex.
+std::vector<uint8_t> fromHex(const std::string& hex);
 
 }  // namespace relay

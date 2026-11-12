@@ -113,7 +113,57 @@ RaceFormat parseFormat(const cJSON* f)
     return format;
 }
 
+// C5 settings mission control may read and write through the relay
+// (frontend/src/lib/browserTimer/c5Config.ts): command -> exact size. Nothing
+// else: the timing commands stay the relay's own.
+constexpr uint8_t C5_FEATURES = 0x11, C5_READ_DETECTION = 0x41, C5_READ_CALIBRATION = 0x42;
+constexpr uint8_t C5_WRITE_DETECTION = 0x73, C5_WRITE_CALIBRATION = 0x74;
+constexpr size_t C5_DETECTION_SIZE = 86, C5_CALIBRATION_SIZE = 36;
+
+size_t c5ReadSize(int command)
+{
+    switch (command) {
+    case C5_FEATURES: return 2;
+    case C5_READ_DETECTION: return C5_DETECTION_SIZE;
+    case C5_READ_CALIBRATION: return C5_CALIBRATION_SIZE;
+    default: return 0;
+    }
+}
+
+size_t c5WriteSize(int command)
+{
+    switch (command) {
+    case C5_WRITE_DETECTION: return 3;
+    case C5_WRITE_CALIBRATION: return C5_CALIBRATION_SIZE;
+    default: return 0;
+    }
+}
+
+std::string toHex(const std::vector<uint8_t>& bytes)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    for (uint8_t b : bytes) {
+        out += digits[b >> 4];
+        out += digits[b & 15];
+    }
+    return out;
+}
+
 }  // namespace
+
+std::vector<uint8_t> fromHex(const std::string& hex)
+{
+    std::vector<uint8_t> out;
+    auto value = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        const int hi = value(hex[i]), lo = value(hex[i + 1]);
+        if (hi < 0 || lo < 0)
+            return {};
+        out.push_back((uint8_t)(hi * 16 + lo));
+    }
+    return out;
+}
 
 std::vector<std::optional<StartPilot>> seatsFromCommand(const std::vector<StartPilot>& pilots, int seats)
 {
@@ -203,6 +253,21 @@ std::string Mach1Timer::hello() const
     cJSON_AddStringToObject(m, "rh_version", (std::string("c5-relay ") + RELAY_VERSION).c_str());
     cJSON_AddNumberToObject(m, "node_count", driver_ ? driver_->info().seats : 0);
     cJSON_AddStringToObject(m, "plugin_version", PLUGIN_PROTOCOL_VERSION);
+    // What mission control may ask of it beyond the plugin's protocol.
+    cJSON* features = cJSON_AddArrayToObject(m, "features");
+    cJSON_AddItemToArray(features, cJSON_CreateString("node_io"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("c5_input"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("race_settings"));
+    if (!c5Input.empty()) {
+        cJSON* input = cJSON_Parse(c5Input.c_str());
+        if (cJSON_IsObject(input))
+            cJSON_AddItemToObject(m, "c5_input", input);
+        else
+            cJSON_Delete(input);
+    }
+    cJSON* race = cJSON_AddObjectToObject(m, "race_settings");
+    cJSON_AddNumberToObject(race, "minLapMs", (double)engine.settings.minLapMs);
+    cJSON_AddNumberToObject(race, "ignoreAfterStartMs", (double)engine.settings.ignoreAfterStartMs);
     // Levels and channels are saved per gate; a C5 gate is named by its
     // processor, as the browser timer names it, so both share them.
     if (driver_ && !driver_->info().procType.empty())
@@ -379,6 +444,7 @@ void Mach1Timer::gateUp(NodeDriver* driver, int64_t now)
          info.firmware + ", API " + std::to_string(info.apiLevel));
     if (watching(now))
         driver_->readExtremums = true;
+    restoreC5Detection();
     // mach1 answers hello with gate_config, which sets the nodes up.
     if (send && connected_)
         send(hello());
@@ -483,7 +549,14 @@ void Mach1Timer::runCommand(cJSON* command, int64_t now)
         return;
     }
     std::string error;
-    if (action == "start")
+    cJSON* result = cJSON_CreateObject();
+    if (action == "node_io")
+        error = nodeIo(command, result);
+    else if (action == "c5_input")
+        error = rememberC5Input(command);
+    else if (action == "race_settings")
+        error = raceSettings(command);
+    else if (action == "start")
         error = start(command, now);
     else if (action == "stop")
         error = stopRace(now);
@@ -495,7 +568,6 @@ void Mach1Timer::runCommand(cJSON* command, int64_t now)
         error = setChannel(command);
     else
         error = "Unknown command " + action;
-    cJSON* result = cJSON_CreateObject();
     cJSON_AddStringToObject(result, "type", "command_result");
     cJSON_AddStringToObject(result, "id", getStr(command, "id").c_str());
     cJSON_AddBoolToObject(result, "ok", error.empty());
@@ -782,10 +854,164 @@ void Mach1Timer::gateConfig(cJSON* m, int64_t now)
         node.channel = getStr(item, "channel");
         gateNodes_[seat] = node;
     }
+    // The settings saved on the gate this relay serves in the club's setup (race: minimum lap, ...).
+    const cJSON* setup = cJSON_GetObjectItemCaseSensitive(m, "setup");
+    const cJSON* settings = cJSON_GetObjectItemCaseSensitive(setup, "settings");
+    const cJSON* race = cJSON_GetObjectItemCaseSensitive(settings, "race");
+    if (cJSON_IsObject(race))
+        applyRaceSettings(race, true);
     if (setUpOnConfig_) {
         setUpOnConfig_ = false;
         applyIdle();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Settings from mission control
+
+std::string Mach1Timer::nodeIo(cJSON* command, cJSON* result)
+{
+    if (!driver_ || driver_->status() != NodeStatus::Running)
+        return "The gate node is not connected to the relay.";
+    if (engine.status == RaceStatus::Staging || engine.status == RaceStatus::Racing)
+        return "C5 settings cannot change during staging or racing.";
+    const cJSON* ops = cJSON_GetObjectItemCaseSensitive(command, "ops");
+    if (!cJSON_IsArray(ops) || cJSON_GetArraySize(ops) < 1 || cJSON_GetArraySize(ops) > 8)
+        return "node_io needs 1 to 8 operations.";
+    // Check everything before touching the node.
+    const cJSON* op;
+    cJSON_ArrayForEach(op, ops)
+    {
+        const cJSON* w = cJSON_GetObjectItemCaseSensitive(op, "w");
+        const cJSON* r = cJSON_GetObjectItemCaseSensitive(op, "r");
+        if (isInt(w)) {
+            const cJSON* d = cJSON_GetObjectItemCaseSensitive(op, "d");
+            const size_t size = c5WriteSize((int)w->valuedouble);
+            if (!size || !cJSON_IsArray(d) || (size_t)cJSON_GetArraySize(d) != size)
+                return "Only the C5 settings can be written through the relay.";
+            const cJSON* b;
+            cJSON_ArrayForEach(b, d)
+            {
+                if (!isInt(b) || b->valuedouble < 0 || b->valuedouble > 255)
+                    return "Bad bytes in node_io.";
+            }
+        } else if (isInt(r)) {
+            const size_t size = c5ReadSize((int)r->valuedouble);
+            if (!size || getInt(op, "n", -1) != (int64_t)size)
+                return "Only the C5 settings can be read through the relay.";
+        } else {
+            return "Bad node_io operation.";
+        }
+    }
+    cJSON* data = cJSON_AddArrayToObject(result, "data");
+    std::vector<uint8_t> detectionWritten;
+    cJSON_ArrayForEach(op, ops)
+    {
+        const cJSON* w = cJSON_GetObjectItemCaseSensitive(op, "w");
+        if (isInt(w)) {
+            std::vector<uint8_t> bytes;
+            const cJSON* b;
+            cJSON_ArrayForEach(b, cJSON_GetObjectItemCaseSensitive(op, "d"))
+                bytes.push_back((uint8_t)b->valuedouble);
+            driver_->writeRaw((uint8_t)w->valuedouble, bytes);
+            if ((uint8_t)w->valuedouble == C5_WRITE_DETECTION)
+                detectionWritten = bytes;
+            continue;
+        }
+        const uint8_t r = (uint8_t)getInt(op, "r", 0);
+        Reply reply;
+        if (driver_->read(r, c5ReadSize(r), MAX_RETRIES, &reply)) {
+            cJSON_AddItemToArray(data, cJSON_CreateString(toHex(reply.data).c_str()));
+            // A detection setting read back as applied: keep it, to write again after a reconnect.
+            if (r == C5_READ_DETECTION && !detectionWritten.empty() && reply.data.size() == C5_DETECTION_SIZE &&
+                reply.data[0] == 3 && reply.data[13] == 0 && reply.data[2] == detectionWritten[1] &&
+                reply.data[3] == detectionWritten[2] && detectionWritten != c5Detection) {
+                c5Detection = detectionWritten;
+                if (saveSetting)
+                    saveSetting("c5det", toHex(c5Detection));
+                note("C5 detection " + std::to_string(detectionWritten[1] * 256 + detectionWritten[2]) + " ms from mach1, kept");
+            }
+        } else {
+            cJSON_AddItemToArray(data, cJSON_CreateNull());
+        }
+    }
+    return "";
+}
+
+std::string Mach1Timer::rememberC5Input(cJSON* command)
+{
+    const cJSON* input = cJSON_GetObjectItemCaseSensitive(command, "input");
+    if (!cJSON_IsObject(input))
+        return "c5_input needs the detection geometry.";
+    cJSON* copy = cJSON_CreateObject();
+    for (const char* key : {"speed", "distance", "angle"}) {
+        const cJSON* value = cJSON_GetObjectItemCaseSensitive(input, key);
+        if (!cJSON_IsNumber(value)) {
+            cJSON_Delete(copy);
+            return "c5_input needs speed, distance and angle.";
+        }
+        cJSON_AddNumberToObject(copy, key, value->valuedouble);
+    }
+    char* text = cJSON_PrintUnformatted(copy);
+    cJSON_Delete(copy);
+    c5Input = text ? text : "";
+    cJSON_free(text);
+    if (saveSetting)
+        saveSetting("c5in", c5Input);
+    if (send && connected_)
+        send(hello());
+    return "";
+}
+
+std::string Mach1Timer::raceSettings(cJSON* command)
+{
+    const cJSON* settings = cJSON_GetObjectItemCaseSensitive(command, "settings");
+    if (!cJSON_IsObject(settings))
+        return "race_settings needs settings.";
+    applyRaceSettings(settings, true);
+    // Kept on the gate this relay serves too, so the club's setup shows them.
+    cJSON* m = cJSON_CreateObject();
+    cJSON_AddStringToObject(m, "type", "gate_settings");
+    cJSON* s = cJSON_AddObjectToObject(m, "settings");
+    cJSON* race = cJSON_AddObjectToObject(s, "race");
+    cJSON_AddNumberToObject(race, "minLapMs", (double)engine.settings.minLapMs);
+    cJSON_AddNumberToObject(race, "ignoreAfterStartMs", (double)engine.settings.ignoreAfterStartMs);
+    sendJson(m);
+    if (send && connected_)
+        send(hello());
+    return "";
+}
+
+void Mach1Timer::applyRaceSettings(const cJSON* race, bool save)
+{
+    const cJSON* minLap = cJSON_GetObjectItemCaseSensitive(race, "minLapMs");
+    const cJSON* ignore = cJSON_GetObjectItemCaseSensitive(race, "ignoreAfterStartMs");
+    if (cJSON_IsNumber(minLap) && minLap->valuedouble >= 0 && minLap->valuedouble <= 120000 &&
+        (int64_t)minLap->valuedouble != engine.settings.minLapMs) {
+        engine.settings.minLapMs = (int64_t)minLap->valuedouble;
+        if (save && saveSetting)
+            saveSetting("minlap", std::to_string(engine.settings.minLapMs));
+    }
+    if (cJSON_IsNumber(ignore) && ignore->valuedouble >= 0 && ignore->valuedouble <= 60000 &&
+        (int64_t)ignore->valuedouble != engine.settings.ignoreAfterStartMs) {
+        engine.settings.ignoreAfterStartMs = (int64_t)ignore->valuedouble;
+        if (save && saveSetting)
+            saveSetting("ignorems", std::to_string(engine.settings.ignoreAfterStartMs));
+    }
+}
+
+void Mach1Timer::restoreC5Detection()
+{
+    // The receiver forgets its detection at power-off: write the kept one again.
+    if (!driver_ || c5Detection.size() != 3 || driver_->info().procType != "ESP32C5")
+        return;
+    driver_->writeRaw(C5_WRITE_DETECTION, c5Detection);
+    Reply reply;
+    const bool ok = driver_->read(C5_READ_DETECTION, C5_DETECTION_SIZE, MAX_RETRIES, &reply) &&
+                    reply.data.size() == C5_DETECTION_SIZE && reply.data[0] == 3 && reply.data[13] == 0 &&
+                    reply.data[2] == c5Detection[1] && reply.data[3] == c5Detection[2];
+    note(std::string("C5 detection ") + std::to_string(c5Detection[1] * 256 + c5Detection[2]) + " ms " +
+         (ok ? "restored" : "not confirmed by the node"));
 }
 
 std::optional<Levels> Mach1Timer::resolveLevels(int seat, int pilotId, std::string* from) const

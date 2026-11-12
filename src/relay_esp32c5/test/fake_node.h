@@ -38,6 +38,10 @@ public:
     int garbageNext = 0;          // replies replaced by all zeros
     std::map<uint8_t, int> dropCommands;
     std::vector<std::vector<uint8_t>> writes;  // every write frame received
+    // C5 settings (c5Config.ts): detection (runtime only) and calibration (36 bytes).
+    bool c5 = true;
+    int minPassMs = 0;  // 0: detection not set (the receiver forgets it at power-off)
+    std::vector<uint8_t> calibration = std::vector<uint8_t>(36, 0);
 
     bool wide() const { return relay::hasWideRssi(api, proc); }
 
@@ -90,6 +94,8 @@ private:
         case relay::WRITE_ENTER_AT_LEVEL:
         case relay::WRITE_EXIT_AT_LEVEL: return wide() ? 2 : 1;
         case relay::WRITE_CURNODE_INDEX: return 1;
+        case 0x73: return c5 ? 3 : 0;   // C5 detection
+        case 0x74: return c5 ? 36 : 0;  // C5 calibration
         default: return 0;
         }
     }
@@ -141,6 +147,15 @@ private:
                 if (relay::checksum(frame.data() + 1, size) != frame[size + 1])
                     continue;
                 const int value = size == 2 ? (frame[1] << 8) | frame[2] : frame[1];
+                if (command == 0x73) {
+                    if (frame[1] == 3)
+                        minPassMs = (frame[2] << 8) | frame[3];
+                    continue;
+                }
+                if (command == 0x74) {
+                    calibration.assign(frame.begin() + 1, frame.begin() + 37);
+                    continue;
+                }
                 if (command == relay::WRITE_CURNODE_INDEX) {
                     if (value < (int)seats.size())
                         current_ = value;
@@ -195,6 +210,25 @@ private:
             putRssi(d, s.rssi);
             while (d.size() < relay::lapStatsSize(wide()))
                 d.push_back(0);
+            break;
+        case 0x11:  // feature flags: C5 detection and calibration
+            if (!c5)
+                return;
+            d = {0x00, 0x60};
+            break;
+        case 0x41:  // C5 detection v3, 86 bytes
+            if (!c5)
+                return;
+            d.assign(86, 0);
+            d[0] = 3;
+            d[1] = minPassMs ? 0x07 : 0x03;  // writable, volatile, managed once set
+            d[2] = (uint8_t)(minPassMs >> 8);
+            d[3] = (uint8_t)minPassMs;
+            break;
+        case 0x42:
+            if (!c5)
+                return;
+            d = calibration;
             break;
         default: return;  // the node ignores what it does not know
         }

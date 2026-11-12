@@ -96,6 +96,11 @@ Settings loadSettings()
     int32_t minLap;
     if (nvs_get_i32(h, "minlap", &minLap) == ESP_OK)
         s.minLapMs = minLap;
+    int32_t ignore;
+    if (nvs_get_i32(h, "ignorems", &ignore) == ESP_OK)
+        s.ignoreAfterStartMs = ignore;
+    s.c5Detection = nvsString(h, "c5det", "");
+    s.c5Input = nvsString(h, "c5in", "");
     nvs_close(h);
     return s;
 }
@@ -472,8 +477,23 @@ static void timerTask(void* arg)
     timer.session = hexId(16);
     timer.name = ctx->settings.name;
     timer.engine.settings.minLapMs = ctx->settings.minLapMs;
+    timer.engine.settings.ignoreAfterStartMs = ctx->settings.ignoreAfterStartMs;
+    timer.c5Detection = fromHex(ctx->settings.c5Detection);
+    timer.c5Input = ctx->settings.c5Input;
     timer.toEpoch = toEpoch;
     timer.log = addLog;
+    // Settings from mission control, kept across reboots.
+    timer.saveSetting = [ctx](const std::string& key, const std::string& value) {
+        if (key == "minlap" || key == "ignorems") {
+            saveInt(key.c_str(), atoi(value.c_str()));
+            if (key == "minlap")
+                ctx->settings.minLapMs = atoi(value.c_str());
+            else
+                ctx->settings.ignoreAfterStartMs = atoi(value.c_str());
+        } else if (key == "c5det" || key == "c5in") {
+            saveString(key.c_str(), value);
+        }
+    };
     timer.send = [](const std::string& text) {
         char* copy = strdup(text.c_str());
         if (copy && xQueueSend(g_outbox, &copy, 0) != pdTRUE)

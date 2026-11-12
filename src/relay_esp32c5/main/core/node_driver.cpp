@@ -26,7 +26,8 @@ static std::vector<uint8_t> pack16(int v) { return {(uint8_t)((v >> 8) & 0xFF), 
 
 bool NodeDriver::readOnce(uint8_t command, size_t size, Reply* out, bool* gotSomething)
 {
-    uint8_t buf[64];
+    // The largest reply is the C5 detection read (86 bytes and the checksum).
+    uint8_t buf[128];
     if (size + 1 > sizeof buf)
         return false;
     // Some USB-UART adapters and a radio link that rebooted leave stale bytes.
