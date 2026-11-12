@@ -35,10 +35,11 @@
 #define RHFEAT_IAP_FIRMWARE ((uint16_t)0x0010)    // in-application programming of firmware supported
 #define RHFEAT_C5_DETECTION_CONFIG ((uint16_t)0x0020)  // C5 runtime detection config extension
 #define RHFEAT_C5_CALIBRATION_CONFIG ((uint16_t)0x0040)  // C5 calibration trims (protocol v2)
+#define RHFEAT_C5_NODE_ID ((uint16_t)0x0080)  // C5 node identity: READ 0x43 id (factory MAC), 0x44/0x75 name
 #define RHFEAT_NONE ((uint16_t)0)
 
 #if RHNODE_RADIO_BACKEND
-#define RHFEAT_FLAGS_VALUE (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG)
+#define RHFEAT_FLAGS_VALUE (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID)
 
 #define SERIAL_BAUD_RATE 921600
 #define MULTI_RHNODE_MAX 8

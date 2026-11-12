@@ -3,6 +3,8 @@
 // (RotorHazard, MIT License, Copyright (c) 2019 Michael Niggel and other
 // contributors).
 #include "c5_rhglue.h"
+
+#include <string.h>
 #include "c5_filter.h"
 #include "c5_policy.h"
 
@@ -11,7 +13,7 @@
 #include "commands.h"
 
 #ifndef RHNODE_C5_VERSION
-#define RHNODE_C5_VERSION "1.2.0-c5.12-cal-trim"
+#define RHNODE_C5_VERSION "1.2.0-c5.13-node-id"
 #endif
 
 // informational strings read by RH (prefixes let them be found in the .bin)
@@ -72,6 +74,54 @@ static void (*g_storeCalibration)() = nullptr;
 void rhSetCalibrationStore(void (*store)())
 {
     g_storeCalibration = store;
+}
+
+static uint8_t g_nodeId[kNodeIdSize] = {};
+
+void rhSetNodeId(const uint8_t id[kNodeIdSize])
+{
+    memcpy(g_nodeId, id, kNodeIdSize);
+}
+
+static char g_nodeName[kNodeNameSize + 1] = {};
+static void (*g_nameStore)(const char*) = nullptr;
+
+void rhSetNodeName(const char* name)
+{
+    memset(g_nodeName, 0, sizeof(g_nodeName));
+    if (name)
+        memcpy(g_nodeName, name, strnlen(name, kNodeNameSize));
+}
+
+const char* rhNodeName() { return g_nodeName; }
+
+void rhSetNameStore(void (*store)(const char*)) { g_nameStore = store; }
+
+static void writeNodeName(Transport& out)
+{
+    uint8_t d[kNodeNameSize + 1] = {};
+    memcpy(d, g_nodeName, kNodeNameSize);
+    for (int i = 0; i < kNodeNameSize; ++i)
+        d[kNodeNameSize] += d[i];
+    out.write(d, sizeof(d));
+}
+
+static void applyNodeName(const uint8_t* d)
+{
+    char name[kNodeNameSize + 1] = {};
+    memcpy(name, d, kNodeNameSize);
+    rhSetNodeName(name);
+    if (g_nameStore)
+        g_nameStore(g_nodeName);
+}
+
+static void writeNodeId(Transport& out)
+{
+    uint8_t d[kNodeIdSize + 1] = {};
+    memcpy(d, g_nodeId, kNodeIdSize);
+    for (int i = 0; i < kNodeIdSize; ++i)
+        d[kNodeIdSize] += d[i];
+    out.write(d, sizeof(d));
 }
 
 static void writeCalibrationConfig(Transport& out)
@@ -384,12 +434,26 @@ void RhLink::byte(uint8_t b)
             rhAfterCommands();
             return;
         }
+        if (cmd_ == kReadNodeName) {
+            writeNodeName(out_);
+            ++commands_;
+            rhAfterCommands();
+            return;
+        }
+        if (cmd_ == kReadNodeId) {
+            writeNodeId(out_);
+            ++commands_;
+            rhAfterCommands();
+            return;
+        }
         if (cmd_ > 0x50) {   // writes to the node carry a payload and a checksum
             int size;
             if (cmd_ == kWriteDetectionConfig)
                 size = kDetectionConfigWriteSize;
             else if (cmd_ == kWriteCalibrationConfig)
                 size = kCalibrationConfigDataSize;
+            else if (cmd_ == kWriteNodeName)
+                size = kNodeNameSize;
             else {
                 g_message.command = cmd_;
                 size = (int8_t)g_message.getPayloadSize();
@@ -423,6 +487,8 @@ void RhLink::byte(uint8_t b)
             applyDetectionConfig(buf_);
         } else if (cmd_ == kWriteCalibrationConfig) {
             applyCalibrationConfig(buf_);
+        } else if (cmd_ == kWriteNodeName) {
+            applyNodeName(buf_);
         } else {
             g_message.command = cmd_;
             g_message.buffer.size = size;

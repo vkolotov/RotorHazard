@@ -23,6 +23,9 @@
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+
+#include <string>
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -198,6 +201,31 @@ struct StoredTrims {
     uint8_t enabled;
     int16_t adjDbQ8[kTrimPoints];
 };
+
+// The node's name: saved, else "C5 " and the end of its MAC, so a new board has one.
+static std::string loadNodeName(const uint8_t mac[6])
+{
+    char fallback[16];
+    snprintf(fallback, sizeof fallback, "C5 %02X%02X", mac[4], mac[5]);
+    nvs_handle_t h;
+    if (nvs_open("rhc5", NVS_READONLY, &h) != ESP_OK)
+        return fallback;
+    char name[40] = {};
+    size_t len = sizeof name;
+    const bool ok = nvs_get_str(h, "name", name, &len) == ESP_OK && name[0];
+    nvs_close(h);
+    return ok ? name : fallback;
+}
+
+static void saveNodeName(const char* name)
+{
+    nvs_handle_t h;
+    if (nvs_open("rhc5", NVS_READWRITE, &h) != ESP_OK)
+        return;
+    nvs_set_str(h, "name", name);
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 void loadSettings()
 {
@@ -857,6 +885,13 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "radio boot check failed: captures are not live");
     rhBegin(g_scanner, g_seats);
     rhSetCalibrationStore(saveTrims);
+    // The node's identity for mach1: the same gate however it is reached, by
+    // its id and the name it keeps (set from mach1 or the relay).
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_BASE);
+    rhSetNodeId(mac);
+    rhSetNodeName(loadNodeName(mac).c_str());
+    rhSetNameStore(saveNodeName);
     for (int capacity = 1024; capacity >= 128; capacity /= 2) {
         if (esp_get_free_heap_size() < sizeof(Observation) * capacity + 16384) continue;
         g_record = (Observation*)malloc(sizeof(Observation) * capacity);
