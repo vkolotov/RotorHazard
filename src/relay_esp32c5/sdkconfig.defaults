@@ -1,0 +1,26 @@
+CONFIG_IDF_TARGET="esp32c5"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Wi-Fi, TLS and the app need more than the default 1 MB app partition;
+# the table is single-app-large plus a core dump partition.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# A crash or watchdog leaves an ELF core dump in flash (a board once hung
+# with no console and no way to see why).
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# The console (and logs) on the native USB port: UART0's pads are the node link.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# 1 ms ticks: the node link waits in milliseconds.
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# mach1 is reached over wss:// with the usual public CAs.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

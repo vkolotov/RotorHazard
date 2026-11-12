@@ -1,0 +1,693 @@
+// The C5 relay: drives a RotorHazard node over a UART (the AirPort radio link
+// or a wire) and is a mach1 timer over Wi-Fi. No Raspberry Pi, no RotorHazard
+// server, no laptop.
+//
+// Tasks:
+//   timer   owns the node link, the node driver and the mach1 timer core
+//           (core/), all single-threaded. Everything else reaches it through
+//           its event queue.
+//   sender  sends what the timer queues for mach1, so a slow network never
+//           holds up the node sweep.
+//   console the ESP-IDF REPL on the native USB port: settings in NVS, status.
+//   websocket client (esp_websocket_client) and Wi-Fi run their own tasks.
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <deque>
+#include <string>
+#include <sys/time.h>
+
+#include "driver/uart.h"
+#include "esp_console.h"
+#include "esp_crt_bundle.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_random.h"
+#include "esp_system.h"
+#include "hal/uart_ll.h"
+#include "esp_timer.h"
+#include "esp_websocket_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "cJSON.h"
+#include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+#include "feed_url.h"
+#include "relay.h"
+#include "mach1_timer.h"
+#include "node_driver.h"
+#include "node_protocol.h"
+
+using namespace relay;
+
+static const char* TAG = "relay";
+
+constexpr uart_port_t LINK_UART = UART_NUM_1;
+constexpr int LINK_BAUD = 921600;  // the node's fixed rate (S32_BPill, C5, AirPort)
+constexpr int64_t GATE_RETRY_MS = 3000;
+constexpr int LOG_LINES = 40;
+
+// ---------------------------------------------------------------------------
+// Settings (NVS namespace "relay")
+
+static std::string nvsString(nvs_handle_t h, const char* key, const std::string& fallback)
+{
+    size_t len = 0;
+    if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len == 0)
+        return fallback;
+    std::string value(len, '\0');
+    nvs_get_str(h, key, value.data(), &len);
+    value.resize(len - 1);
+    return value;
+}
+
+Settings loadSettings()
+{
+    Settings s;
+    nvs_handle_t h;
+    if (nvs_open("relay", NVS_READONLY, &h) != ESP_OK)
+        return s;
+    s.ssid = nvsString(h, "ssid", "");
+    s.password = nvsString(h, "password", "");
+    s.feed = nvsString(h, "feed", "");
+    s.name = nvsString(h, "name", s.name);
+    int32_t minLap;
+    if (nvs_get_i32(h, "minlap", &minLap) == ESP_OK)
+        s.minLapMs = minLap;
+    nvs_close(h);
+    return s;
+}
+
+static bool saveString(const char* key, const std::string& value)
+{
+    nvs_handle_t h;
+    if (nvs_open("relay", NVS_READWRITE, &h) != ESP_OK)
+        return false;
+    const bool ok = nvs_set_str(h, key, value.c_str()) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
+static bool saveInt(const char* key, int32_t value)
+{
+    nvs_handle_t h;
+    if (nvs_open("relay", NVS_READWRITE, &h) != ESP_OK)
+        return false;
+    const bool ok = nvs_set_i32(h, key, value) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
+bool saveSettings(const Settings& s)
+{
+    return saveString("ssid", s.ssid) && saveString("password", s.password) && saveString("feed", s.feed) &&
+           saveString("name", s.name) && saveInt("minlap", s.minLapMs);
+}
+
+static SemaphoreHandle_t g_statusLock;
+static std::string g_statusJson = "{}";
+
+void setStatusJson(const std::string& json)
+{
+    xSemaphoreTake(g_statusLock, portMAX_DELAY);
+    g_statusJson = json;
+    xSemaphoreGive(g_statusLock);
+}
+
+std::string statusJson()
+{
+    xSemaphoreTake(g_statusLock, portMAX_DELAY);
+    std::string copy = g_statusJson;
+    xSemaphoreGive(g_statusLock);
+    return copy;
+}
+
+// ---------------------------------------------------------------------------
+// The node link: a UART
+
+class UartLink : public NodeLink {
+public:
+    void begin()
+    {
+        uart_config_t config = {};
+        config.baud_rate = LINK_BAUD;
+        config.data_bits = UART_DATA_8_BITS;
+        config.parity = UART_PARITY_DISABLE;
+        config.stop_bits = UART_STOP_BITS_1;
+        config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+        config.source_clk = UART_SCLK_DEFAULT;
+        // ESP-IDF's order: parameters (which start the UART's clock), pins,
+        // then the driver. Installing first hung in uart_ll_update() after a
+        // software restart (interrupt watchdog, boot loop).
+        ESP_ERROR_CHECK(uart_param_config(LINK_UART, &config));
+        ESP_ERROR_CHECK(uart_set_pin(LINK_UART, RELAY_LINK_TX, RELAY_LINK_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+        ESP_ERROR_CHECK(uart_driver_install(LINK_UART, 2048, 0, 0, nullptr, 0));
+    }
+    void flushInput() override { uart_flush_input(LINK_UART); }
+    void write(const uint8_t* data, size_t n) override { uart_write_bytes(LINK_UART, data, n); }
+    size_t read(uint8_t* data, size_t n, uint32_t timeoutMs) override
+    {
+        const int64_t deadline = esp_timer_get_time() + (int64_t)timeoutMs * 1000;
+        size_t got = 0;
+        while (got < n) {
+            const int64_t left = deadline - esp_timer_get_time();
+            if (left <= 0)
+                break;
+            const TickType_t ticks = pdMS_TO_TICKS((left + 999) / 1000);
+            const int r = uart_read_bytes(LINK_UART, data + got, n - got, ticks ? ticks : 1);
+            if (r > 0)
+                got += r;
+        }
+        return got;
+    }
+    int64_t nowUs() override { return esp_timer_get_time(); }
+    void sleepMs(uint32_t ms) override { vTaskDelay(pdMS_TO_TICKS(ms ? ms : 1)); }
+};
+
+// ---------------------------------------------------------------------------
+// Queues between the tasks
+
+enum class QueueKind : uint8_t { SocketOpen, SocketClosed, SocketText, Console, Refused };
+struct Event {
+    QueueKind kind;
+    char* text;  // malloc'd or null; the timer task frees it
+};
+
+static QueueHandle_t g_events;  // -> timer task
+static QueueHandle_t g_outbox;  // timer task -> sender task (malloc'd strings)
+static esp_websocket_client_handle_t g_ws;
+static volatile bool g_wsConnected;
+
+static void post(QueueKind kind, const char* text, size_t len)
+{
+    Event e{kind, nullptr};
+    if (text) {
+        e.text = (char*)malloc(len + 1);
+        if (!e.text)
+            return;
+        memcpy(e.text, text, len);
+        e.text[len] = 0;
+    }
+    if (xQueueSend(g_events, &e, pdMS_TO_TICKS(100)) != pdTRUE)
+        free(e.text);
+}
+
+static void postText(QueueKind kind, const char* text) { post(kind, text, text ? strlen(text) : 0); }
+
+// ---------------------------------------------------------------------------
+// mach1 socket
+
+static std::string g_frame;  // a text message arriving in pieces
+
+static void wsEvent(void*, esp_event_base_t, int32_t id, void* data)
+{
+    auto* d = (esp_websocket_event_data_t*)data;
+    switch (id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        g_wsConnected = true;
+        post(QueueKind::SocketOpen, nullptr, 0);
+        break;
+    case WEBSOCKET_EVENT_DISCONNECTED:
+    case WEBSOCKET_EVENT_CLOSED:
+        if (g_wsConnected) {
+            g_wsConnected = false;
+            post(QueueKind::SocketClosed, nullptr, 0);
+        }
+        break;
+    case WEBSOCKET_EVENT_DATA:
+        if (d->op_code == 0x08 && d->data_len >= 2) {
+            // Close: 4403 is mach1 refusing the club key.
+            const int code = ((uint8_t)d->data_ptr[0] << 8) | (uint8_t)d->data_ptr[1];
+            if (code == 4403)
+                post(QueueKind::Refused, nullptr, 0);
+        } else if (d->op_code == 0x01 || d->op_code == 0x00) {
+            if (d->payload_offset == 0)
+                g_frame.clear();
+            g_frame.append(d->data_ptr, d->data_len);
+            if (d->payload_offset + d->data_len >= d->payload_len) {
+                post(QueueKind::SocketText, g_frame.data(), g_frame.size());
+                g_frame.clear();
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void senderTask(void*)
+{
+    for (;;) {
+        char* text;
+        if (xQueueReceive(g_outbox, &text, portMAX_DELAY) != pdTRUE)
+            continue;
+        // Dropped while mach1 is away: race messages are resent from `pending`
+        // on the next connect, everything else is sent afresh.
+        if (g_ws && g_wsConnected && esp_websocket_client_is_connected(g_ws))
+            esp_websocket_client_send_text(g_ws, text, strlen(text), pdMS_TO_TICKS(5000));
+        free(text);
+    }
+}
+
+static void startSocket(const std::string& url)
+{
+    esp_websocket_client_config_t config = {};
+    config.uri = url.c_str();
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.buffer_size = 4096;
+    config.reconnect_timeout_ms = 3000;
+    config.network_timeout_ms = 10000;
+    config.task_stack = 6144;
+    g_ws = esp_websocket_client_init(&config);
+    esp_websocket_register_events(g_ws, WEBSOCKET_EVENT_ANY, wsEvent, nullptr);
+    esp_websocket_client_start(g_ws);
+}
+
+// ---------------------------------------------------------------------------
+// Wi-Fi and the wall clock
+
+static bool clockValid() { return time(nullptr) > 1700000000; }
+
+static bool toEpoch(int64_t monoMs, int64_t* epochMs)
+{
+    if (!clockValid())
+        return false;
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    const int64_t nowEpoch = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    *epochMs = nowEpoch - (esp_timer_get_time() / 1000 - monoMs);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// The timer task
+
+static std::deque<std::string> g_log;  // timer task only
+
+static void addLog(const std::string& line)
+{
+    ESP_LOGI(TAG, "%s", line.c_str());
+    char stamp[16] = "--:--:--";
+    if (clockValid()) {
+        time_t t = time(nullptr);
+        struct tm tm;
+        gmtime_r(&t, &tm);
+        strftime(stamp, sizeof stamp, "%H:%M:%SZ", &tm);
+    }
+    g_log.push_front(std::string(stamp) + " " + line);
+    while (g_log.size() > LOG_LINES)
+        g_log.pop_back();
+}
+
+static std::string hexId(int bytes)
+{
+    std::string out;
+    for (int i = 0; i < bytes; i++) {
+        char b[3];
+        snprintf(b, sizeof b, "%02x", (unsigned)(esp_random() & 0xFF));
+        out += b;
+    }
+    return out;
+}
+
+struct TimerContext {
+    Settings settings;
+    std::string uid;
+    std::string socketUrl;
+};
+
+static void printStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer& timer)
+{
+    const int64_t now = esp_timer_get_time() / 1000;
+    printf("c5-relay %s  uid %s  name \"%s\"\n", RELAY_VERSION, ctx.uid.c_str(), ctx.settings.name.c_str());
+    printf("link     UART1 tx %d rx %d @ %d\n", RELAY_LINK_TX, RELAY_LINK_RX, LINK_BAUD);
+    printf("wifi     %s %s  ssid \"%s\"%s   clock %s\n", networkUp() ? "up" : "down", networkIp().c_str(), ctx.settings.ssid.c_str(), hotspotOn() ? ("  hotspot " + hotspotSsid()).c_str() : "",
+           clockValid() ? "synced" : "not synced");
+    printf("mach1    %s  %s  pending %u%s\n", timer.socketConnected() ? "connected" : "not connected",
+           timer.club().c_str(), (unsigned)timer.pendingCount(), timer.watching(now) ? "  (watched)" : "");
+    printf("         %s\n", ctx.socketUrl.empty() ? "no feed URL: set one with `feed`" : ctx.socketUrl.c_str());
+    const NodeInfo& info = driver.info();
+    printf("node     %s %s  %s %s API %d, %d seats  %.1f sweeps/s  rtt %.1f ms\n", nodeStatusName(driver.status()),
+           driver.detail().c_str(), info.procType.c_str(), info.firmware.c_str(), info.apiLevel, info.seats,
+           driver.sweepsPerSecond(), driver.minRttUs() / 1000.0);
+    const LinkCounters& c = driver.counters();
+    printf("         reads %lu writes %lu timeouts %lu checksum %lu\n", (unsigned long)c.reads, (unsigned long)c.writes,
+           (unsigned long)c.timeouts, (unsigned long)c.checksumErrors);
+    printf("race     %s  %s  min lap %lld ms\n", raceStatusName(timer.engine.status),
+           timer.engine.hasFormat ? timer.engine.format.name.c_str() : "", (long long)timer.engine.settings.minLapMs);
+    for (size_t i = 0; i < driver.seats().size(); i++) {
+        const SeatState& s = driver.seats()[i];
+        const std::string callsign = timer.seatCallsign((int)i);
+        printf("  node %u  %4d MHz  enter %4d exit %4d  rssi %4d  peak %4d%s  %s  laps %u\n", (unsigned)i + 1,
+               s.frequency, s.enter, s.exit, s.rssi, s.passPeak, s.crossing ? " X" : "  ", callsign.c_str(),
+               (unsigned)timer.engine.laps((int)i).size());
+    }
+}
+
+// What the setup page shows (`/status.json`).
+static void publishStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer& timer)
+{
+    const int64_t now = esp_timer_get_time() / 1000;
+    cJSON* m = cJSON_CreateObject();
+    cJSON_AddStringToObject(m, "version", RELAY_VERSION);
+    cJSON_AddStringToObject(m, "uid", ctx.uid.c_str());
+    cJSON_AddStringToObject(m, "name", ctx.settings.name.c_str());
+    cJSON* wifi = cJSON_AddObjectToObject(m, "wifi");
+    cJSON_AddBoolToObject(wifi, "up", networkUp());
+    cJSON_AddStringToObject(wifi, "ip", networkIp().c_str());
+    cJSON_AddStringToObject(wifi, "ssid", ctx.settings.ssid.c_str());
+    cJSON_AddBoolToObject(wifi, "hotspot", hotspotOn());
+    cJSON_AddStringToObject(wifi, "hotspot_ssid", hotspotSsid().c_str());
+    cJSON_AddBoolToObject(m, "clock", clockValid());
+    cJSON* mach1 = cJSON_AddObjectToObject(m, "mach1");
+    cJSON_AddBoolToObject(mach1, "configured", !ctx.socketUrl.empty());
+    cJSON_AddBoolToObject(mach1, "connected", timer.socketConnected());
+    cJSON_AddStringToObject(mach1, "club", timer.club().c_str());
+    cJSON_AddNumberToObject(mach1, "pending", (double)timer.pendingCount());
+    cJSON_AddBoolToObject(mach1, "watched", timer.watching(now));
+    const NodeInfo& info = driver.info();
+    const LinkCounters& c = driver.counters();
+    cJSON* node = cJSON_AddObjectToObject(m, "node");
+    cJSON_AddStringToObject(node, "status", nodeStatusName(driver.status()));
+    cJSON_AddStringToObject(node, "detail", driver.detail().c_str());
+    cJSON_AddStringToObject(node, "proc", info.procType.c_str());
+    cJSON_AddStringToObject(node, "firmware", info.firmware.c_str());
+    cJSON_AddNumberToObject(node, "api", info.apiLevel);
+    cJSON_AddNumberToObject(node, "sweeps", driver.sweepsPerSecond());
+    cJSON_AddNumberToObject(node, "rtt_ms", driver.minRttUs() / 1000.0);
+    cJSON_AddNumberToObject(node, "reads", c.reads);
+    cJSON_AddNumberToObject(node, "timeouts", c.timeouts);
+    cJSON_AddNumberToObject(node, "checksum", c.checksumErrors);
+    cJSON* race = cJSON_AddObjectToObject(m, "race");
+    cJSON_AddStringToObject(race, "status", raceStatusName(timer.engine.status));
+    cJSON_AddStringToObject(race, "format", timer.engine.hasFormat ? timer.engine.format.name.c_str() : "");
+    cJSON_AddNumberToObject(race, "min_lap_ms", (double)timer.engine.settings.minLapMs);
+    cJSON* seats = cJSON_AddArrayToObject(m, "seats");
+    if (driver.status() == NodeStatus::Running) {
+        for (size_t i = 0; i < driver.seats().size(); i++) {
+            const SeatState& s = driver.seats()[i];
+            cJSON* seat = cJSON_CreateObject();
+            cJSON_AddNumberToObject(seat, "frequency", s.frequency);
+            cJSON_AddNumberToObject(seat, "rssi", s.rssi);
+            cJSON_AddNumberToObject(seat, "enter", s.enter);
+            cJSON_AddNumberToObject(seat, "exit", s.exit);
+            cJSON_AddStringToObject(seat, "callsign", timer.seatCallsign((int)i).c_str());
+            cJSON_AddNumberToObject(seat, "laps", (double)timer.engine.laps((int)i).size());
+            cJSON_AddItemToArray(seats, seat);
+        }
+    }
+    cJSON* log = cJSON_AddArrayToObject(m, "log");
+    for (const std::string& line : g_log)
+        cJSON_AddItemToArray(log, cJSON_CreateString(line.c_str()));
+    char* text = cJSON_PrintUnformatted(m);
+    cJSON_Delete(m);
+    if (text) {
+        setStatusJson(text);
+        cJSON_free(text);
+    }
+}
+
+static void consoleCommand(const std::string& line, TimerContext& ctx, NodeDriver& driver, Mach1Timer& timer)
+{
+    if (line == "status") {
+        printStatus(ctx, driver, timer);
+    } else if (line == "log") {
+        for (auto it = g_log.rbegin(); it != g_log.rend(); ++it)
+            printf("%s\n", it->c_str());
+    } else if (line.rfind("minlap ", 0) == 0) {
+        const int ms = atoi(line.c_str() + 7);
+        timer.engine.settings.minLapMs = ms;
+        ctx.settings.minLapMs = ms;
+        printf("minimum lap %d ms\n", ms);
+    }
+}
+
+#ifdef RELAY_DIAG
+static volatile int g_diagStage = 0;
+static void diagBeat(void*)
+{
+    for (int n = 0;; n++) {
+        printf("hb %d stage %d heap %u\n", n, g_diagStage, (unsigned)esp_get_free_heap_size());
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+#endif
+
+static void timerTask(void* arg)
+{
+    auto* ctx = (TimerContext*)arg;
+    static UartLink link;
+#ifdef RELAY_DIAG
+    printf("diag: link.begin()\n");
+#endif
+    link.begin();
+#ifdef RELAY_DIAG
+    printf("diag: link up\n");
+#endif
+    static NodeDriver driver(link);
+    static Mach1Timer timer;
+    timer.uid = ctx->uid;
+    timer.session = hexId(16);
+    timer.name = ctx->settings.name;
+    timer.engine.settings.minLapMs = ctx->settings.minLapMs;
+    timer.toEpoch = toEpoch;
+    timer.log = addLog;
+    timer.send = [](const std::string& text) {
+        char* copy = strdup(text.c_str());
+        if (copy && xQueueSend(g_outbox, &copy, 0) != pdTRUE)
+            free(copy);
+    };
+    timer.reconnect = [] {
+        if (g_ws) {
+            esp_websocket_client_stop(g_ws);
+            esp_websocket_client_start(g_ws);
+        }
+    };
+    driver.onCrossing = [](int seat, int64_t atUs, int) {
+        timer.crossing(seat, atUs / 1000, esp_timer_get_time() / 1000);
+    };
+
+    bool gateRunning = false;
+    int64_t nextGateTry = 0;
+    for (;;) {
+        Event e;
+        while (xQueueReceive(g_events, &e, 0) == pdTRUE) {
+            const int64_t now = esp_timer_get_time() / 1000;
+            switch (e.kind) {
+            case QueueKind::SocketOpen: timer.socketOpen(now); break;
+            case QueueKind::SocketClosed: timer.socketClosed(); break;
+            case QueueKind::SocketText: timer.message(e.text, now); break;
+            case QueueKind::Refused: addLog("mach1 refused the club key: check the feed URL"); break;
+            case QueueKind::Console: consoleCommand(e.text, *ctx, driver, timer); break;
+            }
+            free(e.text);
+        }
+        const int64_t now = esp_timer_get_time() / 1000;
+        if (gateRunning && driver.status() != NodeStatus::Running) {
+            gateRunning = false;
+            addLog("Gate link lost: " + driver.detail() + "; reconnecting");
+            timer.gateDown(now);
+            nextGateTry = now + GATE_RETRY_MS;
+        }
+        if (!gateRunning && now >= nextGateTry) {
+            std::string error;
+            if (driver.start(&error)) {
+                gateRunning = true;
+                timer.gateUp(&driver, esp_timer_get_time() / 1000);
+            } else {
+                static std::string lastError;
+                if (error != lastError)
+                    addLog("Gate: " + error);
+                lastError = error;
+                nextGateTry = esp_timer_get_time() / 1000 + GATE_RETRY_MS;
+            }
+        }
+        if (gateRunning) {
+            if (!driver.poll())
+                vTaskDelay(pdMS_TO_TICKS(10));  // every seat off
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        timer.tick(esp_timer_get_time() / 1000);
+        static int64_t nextStatus = 0;
+        if (esp_timer_get_time() / 1000 >= nextStatus) {
+            nextStatus = esp_timer_get_time() / 1000 + 500;
+            publishStatus(*ctx, driver, timer);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Console
+
+static std::string joinArgs(int argc, char** argv, int from)
+{
+    std::string out;
+    for (int i = from; i < argc; i++)
+        out += (i > from ? " " : "") + std::string(argv[i]);
+    return out;
+}
+
+static int cmdStatus(int, char**)
+{
+    postText(QueueKind::Console, "status");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return 0;
+}
+
+static int cmdLog(int, char**)
+{
+    postText(QueueKind::Console, "log");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return 0;
+}
+
+static int cmdWifi(int argc, char** argv)
+{
+    if (argc < 2) {
+        printf("wifi <ssid> [password]\n");
+        return 1;
+    }
+    const bool ok = saveString("ssid", argv[1]) && saveString("password", argc > 2 ? argv[2] : "");
+    printf(ok ? "Saved; `reboot` to use it.\n" : "Could not save.\n");
+    return ok ? 0 : 1;
+}
+
+static int cmdFeed(int argc, char** argv)
+{
+    if (argc != 2) {
+        printf("feed <club feed URL from mach1, e.g. https://mach1.org.nz/<club>/feed/relay/?key=...>\n");
+        return 1;
+    }
+    if (socketUrl(argv[1], "x").empty()) {
+        printf("Not a mach1 feed URL: it needs /<club>/feed/<source>/ and ?key=.\n");
+        return 1;
+    }
+    const bool ok = saveString("feed", argv[1]);
+    printf(ok ? "Saved; `reboot` to use it.\n" : "Could not save.\n");
+    return ok ? 0 : 1;
+}
+
+static int cmdName(int argc, char** argv)
+{
+    if (argc < 2) {
+        printf("name <text>\n");
+        return 1;
+    }
+    const bool ok = saveString("name", joinArgs(argc, argv, 1).substr(0, 100));
+    printf(ok ? "Saved; `reboot` to use it.\n" : "Could not save.\n");
+    return ok ? 0 : 1;
+}
+
+static int cmdMinLap(int argc, char** argv)
+{
+    const int ms = argc == 2 ? atoi(argv[1]) : -1;
+    if (ms < 0 || ms > 120000) {
+        printf("minlap <ms>: crossings sooner than this after a pilot's last one are dropped\n");
+        return 1;
+    }
+    saveInt("minlap", ms);
+    postText(QueueKind::Console, ("minlap " + std::to_string(ms)).c_str());
+    vTaskDelay(pdMS_TO_TICKS(50));
+    return 0;
+}
+
+static int cmdReboot(int, char**)
+{
+    esp_restart();
+    return 0;
+}
+
+static void startConsole()
+{
+    esp_console_repl_t* repl = nullptr;
+    esp_console_repl_config_t replConfig = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    replConfig.prompt = "relay> ";
+    replConfig.max_cmdline_length = 256;
+    esp_console_dev_usb_serial_jtag_config_t hw = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw, &replConfig, &repl));
+    esp_console_register_help_command();
+    const esp_console_cmd_t commands[] = {
+        {.command = "status", .help = "Wi-Fi, mach1, node link, race and every seat", .hint = nullptr, .func = cmdStatus, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+        {.command = "log", .help = "Recent events", .hint = nullptr, .func = cmdLog, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+        {.command = "wifi", .help = "wifi <ssid> [password]: the network to join", .hint = nullptr, .func = cmdWifi, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+        {.command = "feed", .help = "feed <url>: the club feed URL from mach1 (source segment e.g. relay)", .hint = nullptr, .func = cmdFeed, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+        {.command = "name", .help = "name <text>: what mach1 calls this timer", .hint = nullptr, .func = cmdName, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+        {.command = "minlap", .help = "minlap <ms>: minimum lap time", .hint = nullptr, .func = cmdMinLap, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+        {.command = "reboot", .help = "Restart (applies saved settings)", .hint = nullptr, .func = cmdReboot, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    };
+    for (const auto& c : commands)
+        ESP_ERROR_CHECK(esp_console_cmd_register(&c));
+    ESP_ERROR_CHECK(esp_console_start_repl(repl));
+}
+
+// ---------------------------------------------------------------------------
+
+extern "C" void app_main(void)
+{
+    // Keep UART0's clocks on. With the console on USB, ESP-IDF's start-up
+    // (esp_perip_clk_init) turns them off, and the C5's ROM then hangs on every
+    // later non-power-on reset (watchdog, panic, esp_restart, a USB-serial
+    // reset), polling PCR_UART0_CONF for a UART0 that has no clock: the board
+    // looks dead until it is power-cycled. Seen on two boards on 2026-11-12;
+    // switching the clock on over JTAG let the stuck ROM boot at once.
+    uart_ll_enable_bus_clock(UART_NUM_0, true);
+    uart_ll_sclk_enable(&UART0);
+    printf("relay boot: reset reason %d\n", (int)esp_reset_reason());
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    static TimerContext ctx;
+    ctx.settings = loadSettings();
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char uid[32];
+    snprintf(uid, sizeof uid, "relay-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ctx.uid = uid;
+    ctx.socketUrl = socketUrl(ctx.settings.feed, ctx.uid);
+
+    g_events = xQueueCreate(64, sizeof(Event));
+    g_outbox = xQueueCreate(64, sizeof(char*));
+
+    g_statusLock = xSemaphoreCreateMutex();
+#ifdef RELAY_DIAG
+    // Staged start: console, then the node UART, then Wi-Fi, 8 s apart, with
+    // a heartbeat, to see which step stops the board.
+    xTaskCreate(diagBeat, "diag", 3072, nullptr, 10, nullptr);
+    g_diagStage = 1; printf("diag: stage 1 console\n");
+    startConsole();
+    vTaskDelay(pdMS_TO_TICKS(8000));
+    g_diagStage = 2; printf("diag: stage 2 sender+timer (UART link)\n");
+    xTaskCreate(senderTask, "sender", 4096, nullptr, 5, nullptr);
+    xTaskCreate(timerTask, "timer", 8192, &ctx, 6, nullptr);
+    vTaskDelay(pdMS_TO_TICKS(8000));
+    g_diagStage = 3; printf("diag: stage 3 network\n");
+    startNetwork(ctx.settings, ctx.uid);
+    g_diagStage = 4; printf("diag: stage 4 network started\n");
+    if (!ctx.settings.ssid.empty() && !ctx.socketUrl.empty())
+        startSocket(ctx.socketUrl);
+    g_diagStage = 5;
+#else
+    // Always: with no network saved it opens the setup hotspot.
+    startNetwork(ctx.settings, ctx.uid);
+    if (!ctx.settings.ssid.empty() && !ctx.socketUrl.empty())
+        startSocket(ctx.socketUrl);
+    xTaskCreate(senderTask, "sender", 4096, nullptr, 5, nullptr);
+    xTaskCreate(timerTask, "timer", 8192, &ctx, 6, nullptr);
+    startConsole();
+#endif
+    if (ctx.settings.ssid.empty())
+        printf("\nNo Wi-Fi set: join hotspot %s (open) and open http://192.168.4.1,\n"
+               "or `wifi <ssid> <password>`, `feed <url>`, then `reboot`.\n", hotspotSsid().c_str());
+    else if (ctx.socketUrl.empty())
+        printf("\nNo mach1 feed URL: `feed <url>`, then `reboot`.\n");
+}

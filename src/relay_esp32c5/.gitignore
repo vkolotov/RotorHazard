@@ -1,0 +1,8 @@
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+test/test_relay
+test/test_pty
+test/*.o
+build-*/
