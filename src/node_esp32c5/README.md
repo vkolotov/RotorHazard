@@ -67,6 +67,23 @@ The firmware sends nothing until asked. Opening the port resets the C5, and
 RotorHazard waits 2 s before its first request, which boot has to fit in.
 Logs go to UART0 only.
 
+## Identity and name (1.2.0-c5.13)
+
+A node is a timer in mach1, however it is reached (a laptop over USB or the
+AirPort link, or a C5 relay), so it says who it is:
+
+- `READ 0x43`: its id, 6 bytes, the chip's factory MAC (read-only).
+- `READ 0x44` / `WRITE 0x75`: its name, 32 bytes of UTF-8, zero padded,
+  kept in NVS (`rhc5`/`name`). A new board answers "C5 " and the end of its
+  MAC, e.g. `C5 26A8`.
+- Feature flag `0x0080` (`RHFEAT_C5_NODE_ID`) says it has both.
+
+mach1 knows the node as `c5-<id>`; renaming it in mach1 or on its relay
+writes the name here. Variants in use: `build-c5zero-node` (USB only) and
+`build-c5zero-node-link` (AirPort UART link, TX 11 / RX 12); a board must be
+flashed with the variant it runs, or it loses its link. See mach1's
+`doc/c5-timers-field-guide.md` for the boards and flashing through a laptop.
+
 ## Console
 
 On the USB port, start a line with `!` (RotorHazard never sends 0x21). On
