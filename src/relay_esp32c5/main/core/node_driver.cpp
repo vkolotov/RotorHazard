@@ -129,6 +129,20 @@ bool NodeDriver::start(std::string* error)
     info_.firmware = haveFw ? fwText(firmware.data.data(), firmware.data.size()) : "";
     info_.procType = haveProc ? fwText(proc.data.data(), proc.data.size()) : "";
     info_.wide = hasWideRssi(apiLevel, info_.procType);
+    // A C5 node says who it is (firmware 1.2.0-c5.13 on): the node is the timer.
+    if (info_.procType == "ESP32C5") {
+        Reply features, id, name;
+        if (read(READ_RHFEAT_FLAGS, 2, 2, &features) && (((features.data[0] << 8) | features.data[1]) & RHFEAT_C5_NODE_ID) &&
+            read(READ_NODE_ID, 6, MAX_RETRIES, &id)) {
+            static const char* digits = "0123456789abcdef";
+            for (uint8_t b : id.data) {
+                info_.nodeId += digits[b >> 4];
+                info_.nodeId += digits[b & 15];
+            }
+            if (read(READ_NODE_NAME, NODE_NAME_SIZE, MAX_RETRIES, &name))
+                info_.nodeName = fwText(name.data.data(), name.data.size());
+        }
+    }
     seats_.assign(seats, SeatState());
     lapIds_.assign(seats, -1);
     pending_.assign(seats, Pending());
@@ -263,6 +277,24 @@ bool NodeDriver::setSeatFrequency(int seat, int frequency)
     const bool ok = selectSeat(seat) && setFrequency(seat, frequency);
     resetLapTracking(seat);
     return ok;
+}
+
+bool NodeDriver::setNodeName(const std::string& name)
+{
+    if (info_.nodeId.empty())
+        return false;
+    // At most 32 bytes, not cutting a UTF-8 character in two.
+    size_t n = std::min(name.size(), NODE_NAME_SIZE);
+    while (n > 0 && n < name.size() && ((uint8_t)name[n] & 0xC0) == 0x80)
+        n--;
+    std::vector<uint8_t> data(NODE_NAME_SIZE, 0);
+    std::copy(name.begin(), name.begin() + n, data.begin());
+    write(WRITE_NODE_NAME, data);
+    Reply reply;
+    if (!read(READ_NODE_NAME, NODE_NAME_SIZE, MAX_RETRIES, &reply) || reply.data != data)
+        return false;
+    info_.nodeName = std::string(name.begin(), name.begin() + n);
+    return true;
 }
 
 bool NodeDriver::setThresholds(int seat, int enter, int exit)

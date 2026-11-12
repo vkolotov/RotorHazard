@@ -8,6 +8,10 @@ struct Settings {
     int ignoreAfterStartMs = 500;
     // Kept from mission control: the last C5 detection write (hex) and its geometry (JSON).
     std::string c5Detection, c5Input;
+    // The C5 node last driven (hex id): mach1 knows this relay as that node's timer.
+    std::string nodeId;
+    // The name was changed here while the node was away: written to the node when it connects.
+    bool namePending = false;
 };
 
 Settings loadSettings();

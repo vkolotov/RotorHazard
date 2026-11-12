@@ -258,6 +258,15 @@ std::string Mach1Timer::hello() const
     cJSON_AddItemToArray(features, cJSON_CreateString("node_io"));
     cJSON_AddItemToArray(features, cJSON_CreateString("c5_input"));
     cJSON_AddItemToArray(features, cJSON_CreateString("race_settings"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("set_name"));
+    // The node this timer is (its id), and the relay reaching it.
+    if (driver_ && !driver_->info().nodeId.empty())
+        cJSON_AddStringToObject(m, "node_id", driver_->info().nodeId.c_str());
+    else if (uid.rfind("c5-", 0) == 0)
+        cJSON_AddStringToObject(m, "node_id", uid.c_str() + 3);
+    if (!relayUid.empty())
+        cJSON_AddStringToObject(m, "relay_uid", relayUid.c_str());
+    cJSON_AddStringToObject(m, "route", "relay");
     if (!c5Input.empty()) {
         cJSON* input = cJSON_Parse(c5Input.c_str());
         if (cJSON_IsObject(input))
@@ -445,9 +454,71 @@ void Mach1Timer::gateUp(NodeDriver* driver, int64_t now)
     if (watching(now))
         driver_->readExtremums = true;
     restoreC5Detection();
-    // mach1 answers hello with gate_config, which sets the nodes up.
+    const std::string before = uid;
+    adoptNode();
+    // A new identity reconnects (and says hello there); otherwise mach1 answers
+    // hello with gate_config, which sets the nodes up.
+    if ((uid == before || !identity) && send && connected_)
+        send(hello());
+}
+
+void Mach1Timer::adoptNode()
+{
+    const NodeInfo& info = driver_->info();
+    if (info.nodeId.empty())
+        return;
+    // A name given here while the node was away goes to the node; else the node's name is the timer's.
+    if (namePending && !name.empty()) {
+        if (driver_->setNodeName(name)) {
+            namePending = false;
+            if (saveSetting)
+                saveSetting("namepend", "0");
+            note("Name \"" + name + "\" written to the node");
+        }
+    } else if (!info.nodeName.empty() && info.nodeName != name) {
+        name = info.nodeName;
+        if (saveSetting)
+            saveSetting("name", name);
+    }
+    const std::string want = "c5-" + info.nodeId;
+    if (want != uid) {
+        note("Node " + info.nodeId + " (" + name + "): this relay is that timer in mach1");
+        uid = want;
+        if (saveSetting)
+            saveSetting("nodeid", info.nodeId);
+        if (identity)
+            identity(uid);
+    }
+}
+
+std::string Mach1Timer::rename(const std::string& next)
+{
+    std::string trimmed = next;
+    while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
+        trimmed.pop_back();
+    if (trimmed.empty())
+        return "A name is needed.";
+    name = trimmed.substr(0, 100);
+    std::string error;
+    if (driver_ && driver_->status() == NodeStatus::Running && !driver_->info().nodeId.empty()) {
+        if (driver_->setNodeName(name)) {
+            name = driver_->info().nodeName;  // as the node keeps it (32 bytes)
+            namePending = false;
+        } else {
+            namePending = true;
+            error = "The node did not confirm the name; it is written again when the node reconnects.";
+        }
+    } else {
+        namePending = true;  // written to the node when it connects
+    }
+    if (saveSetting) {
+        saveSetting("name", name);
+        saveSetting("namepend", namePending ? "1" : "0");
+    }
+    note("Name: " + name + (namePending ? " (for the node when it connects)" : ""));
     if (send && connected_)
         send(hello());
+    return error;
 }
 
 void Mach1Timer::gateDown(int64_t now)
@@ -550,7 +621,9 @@ void Mach1Timer::runCommand(cJSON* command, int64_t now)
     }
     std::string error;
     cJSON* result = cJSON_CreateObject();
-    if (action == "node_io")
+    if (action == "set_name")
+        error = rename(getStr(command, "name"));
+    else if (action == "node_io")
         error = nodeIo(command, result);
     else if (action == "c5_input")
         error = rememberC5Input(command);

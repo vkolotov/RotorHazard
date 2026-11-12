@@ -101,6 +101,10 @@ Settings loadSettings()
         s.ignoreAfterStartMs = ignore;
     s.c5Detection = nvsString(h, "c5det", "");
     s.c5Input = nvsString(h, "c5in", "");
+    s.nodeId = nvsString(h, "nodeid", "");
+    int32_t pending;
+    if (nvs_get_i32(h, "namepend", &pending) == ESP_OK)
+        s.namePending = pending != 0;
     nvs_close(h);
     return s;
 }
@@ -128,7 +132,7 @@ static bool saveInt(const char* key, int32_t value)
 bool saveSettings(const Settings& s)
 {
     return saveString("ssid", s.ssid) && saveString("password", s.password) && saveString("feed", s.feed) &&
-           saveString("name", s.name) && saveInt("minlap", s.minLapMs);
+           saveString("name", s.name) && saveInt("minlap", s.minLapMs) && saveInt("namepend", s.namePending ? 1 : 0);
 }
 
 static SemaphoreHandle_t g_statusLock;
@@ -441,6 +445,9 @@ static void consoleCommand(const std::string& line, TimerContext& ctx, NodeDrive
     } else if (line == "log") {
         for (auto it = g_log.rbegin(); it != g_log.rend(); ++it)
             printf("%s\n", it->c_str());
+    } else if (line.rfind("name ", 0) == 0) {
+        const std::string error = timer.rename(line.substr(5));
+        printf("%s\n", error.empty() ? ("name \"" + timer.name + "\"").c_str() : error.c_str());
     } else if (line.rfind("minlap ", 0) == 0) {
         const int ms = atoi(line.c_str() + 7);
         timer.engine.settings.minLapMs = ms;
@@ -479,12 +486,33 @@ static void timerTask(void* arg)
     timer.engine.settings.minLapMs = ctx->settings.minLapMs;
     timer.engine.settings.ignoreAfterStartMs = ctx->settings.ignoreAfterStartMs;
     timer.c5Detection = fromHex(ctx->settings.c5Detection);
+    // mach1 knows the relay as the node it drives (c5-<node id>), else as itself.
+    timer.relayUid = ctx->uid;
+    timer.uid = ctx->settings.nodeId.empty() ? ctx->uid : "c5-" + ctx->settings.nodeId;
+    timer.namePending = ctx->settings.namePending;
+    timer.identity = [ctx](const std::string& uid) {
+        // Another node: reconnect to mach1 as that node's timer.
+        ctx->socketUrl = socketUrl(ctx->settings.feed, uid);
+        if (g_ws && !ctx->socketUrl.empty()) {
+            esp_websocket_client_stop(g_ws);
+            esp_websocket_client_set_uri(g_ws, ctx->socketUrl.c_str());
+            esp_websocket_client_start(g_ws);
+        }
+    };
     timer.c5Input = ctx->settings.c5Input;
     timer.toEpoch = toEpoch;
     timer.log = addLog;
     // Settings from mission control, kept across reboots.
     timer.saveSetting = [ctx](const std::string& key, const std::string& value) {
-        if (key == "minlap" || key == "ignorems") {
+        if (key == "namepend") {
+            saveInt("namepend", atoi(value.c_str()));
+        } else if (key == "name" || key == "nodeid") {
+            saveString(key.c_str(), value);
+            if (key == "name")
+                ctx->settings.name = value;
+            else
+                ctx->settings.nodeId = value;
+        } else if (key == "minlap" || key == "ignorems") {
             saveInt(key.c_str(), atoi(value.c_str()));
             if (key == "minlap")
                 ctx->settings.minLapMs = atoi(value.c_str());
@@ -562,11 +590,19 @@ static void timerTask(void* arg)
             }
             handedOver = true;
             addLog("Serial: a USB host drives the node");
+            // The host (mach1 in a browser) is now this node's timer in mach1: step aside.
+            if (g_ws && timer.uid.rfind("c5-", 0) == 0) {
+                esp_websocket_client_stop(g_ws);
+                timer.socketClosed();
+                addLog("mach1: the USB host is the timer now; reconnecting when it lets go");
+            }
             g_serialMode.store(SerialGranted);
         } else if (serial == SerialOff && handedOver) {
             handedOver = false;
             addLog("Serial ended; reconnecting to the node");
             nextGateTry = now;
+            if (g_ws && !esp_websocket_client_is_connected(g_ws))
+                esp_websocket_client_start(g_ws);
         }
         if (handedOver)
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -638,9 +674,10 @@ static int cmdName(int argc, char** argv)
         printf("name <text>\n");
         return 1;
     }
-    const bool ok = saveString("name", joinArgs(argc, argv, 1).substr(0, 100));
-    printf(ok ? "Saved; `reboot` to use it.\n" : "Could not save.\n");
-    return ok ? 0 : 1;
+    // The node keeps it too (and mach1 shows it): applied now, no reboot.
+    postText(QueueKind::Console, ("name " + joinArgs(argc, argv, 1)).c_str());
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return 0;
 }
 
 static int cmdMinLap(int argc, char** argv)
@@ -813,7 +850,8 @@ extern "C" void app_main(void)
     char uid[32];
     snprintf(uid, sizeof uid, "relay-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ctx.uid = uid;
-    ctx.socketUrl = socketUrl(ctx.settings.feed, ctx.uid);
+    // mach1 knows the relay as the node it last drove; the timer task reconnects if that changes.
+    ctx.socketUrl = socketUrl(ctx.settings.feed, ctx.settings.nodeId.empty() ? ctx.uid : "c5-" + ctx.settings.nodeId);
 
     g_events = xQueueCreate(64, sizeof(Event));
     g_outbox = xQueueCreate(64, sizeof(char*));

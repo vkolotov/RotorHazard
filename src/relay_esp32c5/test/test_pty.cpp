@@ -187,6 +187,11 @@ int main(int argc, char** argv)
                     detection.data[6]);
     }
     EXPECT(driver.read(0x42, 36, MAX_RETRIES, &calibration) && calibration.data[0] == 2, "calibration v2 read");
+    // The node's identity and the name it keeps (1.2.0-c5.13).
+    EXPECT(driver.info().nodeId.size() == 12, "node id '%s'", driver.info().nodeId.c_str());
+    EXPECT(driver.setNodeName("Start gate") && driver.info().nodeName == "Start gate", "name '%s'",
+           driver.info().nodeName.c_str());
+    std::printf("node id %s, name '%s'\n", driver.info().nodeId.c_str(), driver.info().nodeName.c_str());
     sweep(300);  // still timing after the settings traffic
 
     const LinkCounters& c = driver.counters();

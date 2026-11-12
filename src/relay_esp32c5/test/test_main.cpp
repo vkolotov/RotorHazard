@@ -710,7 +710,7 @@ static void settingsTests()
         r.up();
         cJSON* hello = r.last("hello");
         cJSON* features = cJSON_GetObjectItem(hello, "features");
-        CHECK(cJSON_GetArraySize(features) == 3 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io");
+        CHECK(cJSON_GetArraySize(features) == 4 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io");
         CHECK(num(cJSON_GetObjectItem(hello, "c5_input"), "angle") == 90);
         CHECK(num(cJSON_GetObjectItem(hello, "race_settings"), "minLapMs") == 4000);
     });
@@ -724,7 +724,7 @@ static void settingsTests()
         CHECK(str(result, "id") == "n1" && cJSON_IsTrue(cJSON_GetObjectItem(result, "ok")));
         cJSON* data = cJSON_GetObjectItem(result, "data");
         CHECK(cJSON_GetArraySize(data) == 2);
-        CHECK(std::string(cJSON_GetArrayItem(data, 0)->valuestring) == "0060");
+        CHECK(std::string(cJSON_GetArrayItem(data, 0)->valuestring) == "00e0");
         CHECK(std::string(cJSON_GetArrayItem(data, 1)->valuestring).substr(0, 8) == "0307003d");
         CHECK(r.node.minPassMs == 61);
         CHECK(saved["c5det"] == "03003d" && r.timer.c5Detection == std::vector<uint8_t>({3, 0, 61}));
@@ -784,6 +784,55 @@ static void settingsTests()
     });
 }
 
+static void identityTests()
+{
+    test("identity: the relay is the node's timer in mach1, under the node's name", [] {
+        Rig r;
+        r.timer.relayUid = "relay-aabbccddeeff";
+        std::string reconnectedAs;
+        std::map<std::string, std::string> saved;
+        r.timer.identity = [&](const std::string& uid) { reconnectedAs = uid; };
+        r.timer.saveSetting = [&](const std::string& k, const std::string& v) { saved[k] = v; };
+        r.up();
+        CHECK(r.driver.info().nodeId == "3c84270a1b2c" && r.driver.info().nodeName == "Start gate");
+        CHECK(r.timer.uid == "c5-3c84270a1b2c" && reconnectedAs == "c5-3c84270a1b2c");
+        CHECK(r.timer.name == "Start gate" && saved["name"] == "Start gate" && saved["nodeid"] == "3c84270a1b2c");
+        cJSON* hello = cJSON_Parse(r.timer.hello().c_str());
+        CHECK(str(hello, "node_id") == "3c84270a1b2c" && str(hello, "relay_uid") == "relay-aabbccddeeff");
+        CHECK(str(hello, "name") == "Start gate" && str(hello, "route") == "relay");
+        cJSON_Delete(hello);
+    });
+    test("identity: a rename from mach1 goes to the node and back in hello", [] {
+        Rig r;
+        r.up();
+        r.command(R"({"type":"command","id":"n1","action":"set_name","name":"Finish gate"})");
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(r.last("command_result"), "ok")));
+        CHECK(r.node.nodeName == "Finish gate" && r.timer.name == "Finish gate");
+        CHECK(str(r.last("hello"), "name") == "Finish gate");
+        // The node keeps 32 bytes; a longer name is cut there, never inside a character.
+        r.command(R"({"type":"command","id":"n2","action":"set_name","name":"A very long timer name that goes on and on"})");
+        CHECK(r.node.nodeName == "A very long timer name that goes" && r.timer.name == r.node.nodeName);
+        r.command(R"({"type":"command","id":"n3","action":"set_name","name":"  "})");
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(r.last("command_result"), "ok")));
+    });
+    test("identity: a rename on the relay while the node is away reaches the node when it connects", [] {
+        Rig r;
+        r.timer.socketOpen(r.now());
+        CHECK(r.timer.rename("Pit gate").empty() && r.timer.namePending);
+        r.driver.start(nullptr);
+        r.timer.gateUp(&r.driver, r.now());
+        CHECK(r.node.nodeName == "Pit gate" && !r.timer.namePending);
+    });
+    test("identity: a node without an id leaves the relay as itself", [] {
+        Rig r;
+        r.node.hasIdentity = false;
+        r.timer.uid = "relay-aabbccddeeff";
+        r.up();
+        CHECK(r.timer.uid == "relay-aabbccddeeff" && r.driver.info().nodeId.empty());
+        CHECK(str(r.last("hello"), "node_id").empty());
+    });
+}
+
 int main()
 {
     CHECK(relayConstantsChecked() == 1);
@@ -791,6 +840,7 @@ int main()
     driverTests();
     timerTests();
     settingsTests();
+    identityTests();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

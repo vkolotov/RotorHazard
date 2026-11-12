@@ -48,7 +48,20 @@ struct NodeInfo {
     std::string firmware;
     std::string procType;
     bool wide = false;  // 16-bit RSSI fields
+    // A C5 node's identity (firmware 1.2.0-c5.13 and later; empty before): its
+    // id (factory MAC, hex) and the name it keeps. The node is the timer, so
+    // mach1 knows it by these however it is reached.
+    std::string nodeId;
+    std::string nodeName;
 };
+
+// C5 node identity (READ 0x43 id, READ 0x44 / WRITE 0x75 name), behind feature flag 0x0080.
+constexpr uint8_t READ_RHFEAT_FLAGS = 0x11;
+constexpr uint8_t READ_NODE_ID = 0x43;
+constexpr uint8_t READ_NODE_NAME = 0x44;
+constexpr uint8_t WRITE_NODE_NAME = 0x75;
+constexpr size_t NODE_NAME_SIZE = 32;
+constexpr uint16_t RHFEAT_C5_NODE_ID = 0x0080;
 
 struct SeatState {
     int frequency = 0;  // 0: off
@@ -92,6 +105,8 @@ public:
     bool setSeatFrequency(int seat, int frequency);
     // New enter/exit levels for one seat (the node forgets them at power-off).
     bool setThresholds(int seat, int enter, int exit);
+    // A C5 node's name (kept on the node), confirmed by reading it back.
+    bool setNodeName(const std::string& name);
 
     // A completed crossing on `seat`, when it happened (link clock, µs).
     std::function<void(int seat, int64_t atUs, int peakRssi)> onCrossing;

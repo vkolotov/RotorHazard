@@ -219,7 +219,8 @@ static std::string page()
     h += "<label>mach1 feed URL</label><input name=feed value=\"" + htmlEscape(g_settings.feed) +
          "\" placeholder=\"https://mach1.org.nz/&lt;club&gt;/feed/relay/?key=…\">"
          "<small>The club feed URL from mach1, with the last part set to e.g. <b>relay</b>.</small>";
-    h += "<label>Timer name</label><input name=name maxlength=100 value=\"" + htmlEscape(g_settings.name) + "\">";
+    h += "<label>Timer name</label><input name=name maxlength=32 value=\"" + htmlEscape(g_settings.name) + "\">"
+         "<small>Kept on the C5 node too, so it follows the node; mach1 shows it.</small>";
     h += "<label>Minimum lap (ms)</label><input name=minlap inputmode=numeric value=\"" +
          std::to_string(g_settings.minLapMs) + "\">";
     h += "<button>Save and restart</button></form>";
@@ -284,7 +285,10 @@ static esp_err_t postSettings(httpd_req_t* req)
         error = "Minimum lap must be a whole number of milliseconds up to 120000.";
     if (error.empty()) {
         next.minLapMs = atoi(minlap.c_str());
-        next.name = next.name.substr(0, 100);
+        next.name = next.name.substr(0, 32);
+        // A new name goes to the node when it connects (after the restart).
+        if (next.name != g_settings.name)
+            next.namePending = true;
         if (!saveSettings(next))
             error = "Could not save the settings.";
     }

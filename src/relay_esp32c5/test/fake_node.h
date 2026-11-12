@@ -42,6 +42,10 @@ public:
     bool c5 = true;
     int minPassMs = 0;  // 0: detection not set (the receiver forgets it at power-off)
     std::vector<uint8_t> calibration = std::vector<uint8_t>(36, 0);
+    // Identity (1.2.0-c5.13): id and the name it keeps; an older C5 has neither.
+    bool hasIdentity = true;
+    std::vector<uint8_t> nodeId = {0x3c, 0x84, 0x27, 0x0a, 0x1b, 0x2c};
+    std::string nodeName = "Start gate";
 
     bool wide() const { return relay::hasWideRssi(api, proc); }
 
@@ -96,6 +100,7 @@ private:
         case relay::WRITE_CURNODE_INDEX: return 1;
         case 0x73: return c5 ? 3 : 0;   // C5 detection
         case 0x74: return c5 ? 36 : 0;  // C5 calibration
+        case 0x75: return c5 && hasIdentity ? 32 : 0;  // node name
         default: return 0;
         }
     }
@@ -150,6 +155,10 @@ private:
                 if (command == 0x73) {
                     if (frame[1] == 3)
                         minPassMs = (frame[2] << 8) | frame[3];
+                    continue;
+                }
+                if (command == 0x75) {
+                    nodeName.assign((const char*)&frame[1], strnlen((const char*)&frame[1], 32));
                     continue;
                 }
                 if (command == 0x74) {
@@ -214,7 +223,7 @@ private:
         case 0x11:  // feature flags: C5 detection and calibration
             if (!c5)
                 return;
-            d = {0x00, 0x60};
+            d = {0x00, (uint8_t)(hasIdentity ? 0xE0 : 0x60)};
             break;
         case 0x41:  // C5 detection v3, 86 bytes
             if (!c5)
@@ -229,6 +238,17 @@ private:
             if (!c5)
                 return;
             d = calibration;
+            break;
+        case 0x43:
+            if (!c5 || !hasIdentity)
+                return;
+            d = nodeId;
+            break;
+        case 0x44:
+            if (!c5 || !hasIdentity)
+                return;
+            d.assign(32, 0);
+            memcpy(d.data(), nodeName.data(), std::min<size_t>(nodeName.size(), 32));
             break;
         default: return;  // the node ignores what it does not know
         }

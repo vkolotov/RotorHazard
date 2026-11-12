@@ -97,7 +97,7 @@ public:
     // A line for the console log.
     std::function<void(const std::string& line)> log;
     // Keep a setting across reboots (NVS on the relay): "c5det" (hex), "c5in"
-    // (JSON), "minlap", "ignorems" (decimal).
+    // (JSON), "name", "nodeid" (hex), "minlap", "ignorems", "namepend" (decimal).
     std::function<void(const std::string& key, const std::string& value)> saveSetting;
 
     // Loaded at boot from the saved settings.
@@ -106,9 +106,22 @@ public:
     // The detection geometry mission control applied it with (JSON), shown there again.
     std::string c5Input;
 
+    // Who this is to mach1. With a C5 node that says who it is (1.2.0-c5.13 on),
+    // the node: "c5-<node id>", the same timer whether a laptop or this relay
+    // drives it. Otherwise the relay itself (relayUid).
     std::string uid;
     std::string session;
     std::string name = "C5 relay";
+    // The relay's own id ("relay-<mac>"), reported in hello.
+    std::string relayUid;
+    // The node is another (or the first) node with an id: be it in mach1. The
+    // caller reconnects the socket with the new uid.
+    std::function<void(const std::string& uid)> identity;
+    // A rename made while the node was away: written to the node when it connects.
+    bool namePending = false;
+    // A new name (relay console, setup page, or mach1's set_name): the node
+    // keeps it, so it follows the node. Returns an error, or "".
+    std::string rename(const std::string& next);
 
     RaceEngine engine;
 
@@ -167,6 +180,7 @@ private:
     std::string nodeIo(cJSON* command, cJSON* result);
     std::string rememberC5Input(cJSON* command);
     std::string raceSettings(cJSON* command);
+    void adoptNode();
     void applyRaceSettings(const cJSON* race, bool save);
     void restoreC5Detection();
     void gateConfig(cJSON* message, int64_t now);
