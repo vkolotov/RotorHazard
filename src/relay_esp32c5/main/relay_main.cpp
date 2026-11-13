@@ -77,8 +77,14 @@ static std::atomic<int> g_serialMode{SerialOff};
 constexpr size_t LINK_LINE_MAX = 16384;
 // mach1's messages go to the USB host (link_send) instead of the Wi-Fi socket.
 static std::atomic<bool> g_linkRoute{false};
-// A page is on the USB link: logs stay off the port.
+// A page is on the link: logs stay off the USB port while it is the USB one.
 static std::atomic<bool> g_linkAlive{false};
+// Which transport the page on the link uses: one page at a time, the first
+// to speak; another is told the relay is busy.
+enum LinkVia : int { ViaNone = 0, ViaUsb = 1, ViaLocal = 2 };
+static std::atomic<int> g_linkVia{ViaNone};
+// The local page carrying the relay (its WebSocket), when g_linkVia is ViaLocal.
+static std::atomic<int> g_linkFd{-1};
 static SemaphoreHandle_t g_usbLock;  // whole lines to the USB host
 // The probe's answer (link_info), kept current by the timer task: the USB task
 // answers 0x01 at once, even while the timer task is busy (a gate retry
@@ -223,23 +229,26 @@ public:
 // ---------------------------------------------------------------------------
 // Queues between the tasks
 
-enum class QueueKind : uint8_t { SocketOpen, SocketClosed, SocketText, Console, Refused, Link };
+enum class QueueKind : uint8_t { SocketOpen, SocketClosed, SocketText, Console, Refused, Link, LocalLink, LocalClosed };
 struct Event {
     QueueKind kind;
     char* text;  // malloc'd or null; the timer task frees it
+    int fd;      // the local link's client socket, -1 otherwise
 };
 
 static QueueHandle_t g_events;  // -> timer task
 // timer task -> sender task: malloc'd strings, the first byte says where to:
-// 'M' a message for mach1 (Wi-Fi socket or USB link, whichever is the route
-// when it is sent), 'U' a line for the USB host.
+// 'M' a message for mach1 (Wi-Fi socket or the page's link, whichever is the
+// route when it is sent), 'U' a line for the USB host, 'L' a message for the
+// page carrying the relay over the local network, 'P' "<fd>:text" for one
+// local client (a probe, or a page told the relay is busy).
 static QueueHandle_t g_outbox;
 static esp_websocket_client_handle_t g_ws;
 static volatile bool g_wsConnected;
 
-static void post(QueueKind kind, const char* text, size_t len)
+static void post(QueueKind kind, const char* text, size_t len, int fd = -1)
 {
-    Event e{kind, nullptr};
+    Event e{kind, nullptr, fd};
     if (text) {
         e.text = (char*)malloc(len + 1);
         if (!e.text)
@@ -325,8 +334,17 @@ static void senderTask(void*)
         const char* text = item + 1;
         if (item[0] == 'U') {
             usbLine(text);
+        } else if (item[0] == 'L') {
+            localLinkSend(g_linkFd.load(), text);
+        } else if (item[0] == 'P') {
+            const char* colon = strchr(text, ':');
+            if (colon)
+                localLinkSend(atoi(text), colon + 1);
         } else if (g_linkRoute.load()) {
-            usbLine(UsbLink::wrap(text));
+            if (g_linkVia.load() == ViaLocal)
+                localLinkSend(g_linkFd.load(), UsbLink::wrap(text));
+            else
+                usbLine(UsbLink::wrap(text));
         } else if (g_ws && g_wsConnected && esp_websocket_client_is_connected(g_ws)) {
             // Dropped while mach1 is away: race messages are resent from
             // `pending` on the next connect, everything else is sent afresh.
@@ -424,7 +442,7 @@ static void printStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer&
     printf("wifi     %s %s  ssid \"%s\"%s   clock %s\n", networkUp() ? "up" : "down", networkIp().c_str(), ctx.settings.ssid.c_str(), hotspotOn() ? ("  hotspot " + hotspotSsid()).c_str() : "",
            clockValid() ? "synced" : "not synced");
     printf("mach1    %s%s  %s  pending %u%s\n", timer.socketConnected() ? "connected" : "not connected",
-           g_linkRoute.load() ? " through USB" : "", timer.club().c_str(), (unsigned)timer.pendingCount(),
+           g_linkRoute.load() ? (g_linkVia.load() == ViaLocal ? " through a laptop (local network)" : " through USB") : "", timer.club().c_str(), (unsigned)timer.pendingCount(),
            timer.watching(now) ? "  (watched)" : "");
     printf("         %s\n", ctx.socketUrl.empty() ? "no feed URL: set one with `feed`" : ctx.socketUrl.c_str());
     const NodeInfo& info = driver.info();
@@ -463,7 +481,7 @@ static void publishStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Time
     cJSON* mach1 = cJSON_AddObjectToObject(m, "mach1");
     cJSON_AddBoolToObject(mach1, "configured", !ctx.socketUrl.empty());
     cJSON_AddBoolToObject(mach1, "connected", timer.socketConnected());
-    cJSON_AddStringToObject(mach1, "via", g_linkRoute.load() ? "usb" : "wifi");
+    cJSON_AddStringToObject(mach1, "via", !g_linkRoute.load() ? "wifi" : g_linkVia.load() == ViaLocal ? "local" : "usb");
     cJSON_AddStringToObject(mach1, "club", timer.club().c_str());
     cJSON_AddNumberToObject(mach1, "pending", (double)timer.pendingCount());
     cJSON_AddBoolToObject(mach1, "watched", timer.watching(now));
@@ -571,7 +589,7 @@ static void timerTask(void* arg)
     static UsbLink usbLink(timer);
     g_link = &usbLink;
     usbLink.rhVersion = std::string(RELAY_BOARD "-relay ") + RELAY_VERSION;
-    usbLink.toHost = [](const std::string& line) { queueOut('U', line); };
+    usbLink.toHost = [](const std::string& line) { queueOut(g_linkVia.load() == ViaLocal ? 'L' : 'U', line); };
     usbLink.hostClock = [](int64_t epochMs) {
         if (!clockValid()) {
             clockFromHost(epochMs);
@@ -684,8 +702,47 @@ static void timerTask(void* arg)
             case QueueKind::Refused: addLog("mach1 refused the club key: check the feed URL"); break;
             case QueueKind::Console: consoleCommand(e.text, *ctx, driver, timer); break;
             case QueueKind::Link:
-                if (g_serialMode.load() == SerialOff)
-                    usbLink.received(e.text, now, g_wsConnected);
+            case QueueKind::LocalLink: {
+                const int from = e.kind == QueueKind::Link ? ViaUsb : ViaLocal;
+                if (from == ViaUsb && g_serialMode.load() != SerialOff)
+                    break;
+                const int owner = g_linkVia.load();
+                const bool mine = owner == from && (from == ViaUsb || e.fd == g_linkFd.load());
+                const bool taken = owner != ViaNone && !mine && usbLink.alive();
+                // A reply to this page alone (not the page carrying the relay).
+                auto replyHere = [&](std::string text) {
+                    if (from == ViaLocal)
+                        queueOut('P', std::to_string(e.fd) + ":" + text);
+                    else
+                        queueOut('U', text);
+                };
+                if (strstr(e.text, "\"link_probe\"")) {
+                    // A page looking for timers: who this is, claiming nothing.
+                    std::string info = usbLink.info(g_wsConnected);
+                    if (taken)
+                        info.insert(info.size() - 1, ",\"busy\":true");
+                    replyHere(info);
+                    break;
+                }
+                if (taken) {
+                    // Another page has the link: say so, change nothing.
+                    std::string info = usbLink.info(g_wsConnected);
+                    info.insert(info.size() - 1, ",\"busy\":true");
+                    replyHere(info);
+                    break;
+                }
+                if (!mine) {
+                    g_linkVia.store(from);
+                    g_linkFd.store(from == ViaLocal ? e.fd : -1);
+                    usbLink.label = from == ViaLocal ? "Local network" : "USB";
+                    usbLink.routeName = from == ViaLocal ? "relay_local" : "relay_usb";
+                }
+                usbLink.received(e.text, now, g_wsConnected);
+                break;
+            }
+            case QueueKind::LocalClosed:
+                if (g_linkVia.load() == ViaLocal && e.fd == g_linkFd.load())
+                    usbLink.tick(now, false, g_wsConnected);
                 break;
             }
             free(e.text);
@@ -695,7 +752,8 @@ static void timerTask(void* arg)
         const int serial = g_serialMode.load();
         if (serial == SerialRequested) {
             // The USB port now carries the node protocol, not the link.
-            usbLink.drop(now, "the USB host drives the node now", false);
+            if (g_linkVia.load() == ViaUsb)
+                usbLink.drop(now, "the USB host drives the node now", false);
             if (gateRunning) {
                 gateRunning = false;
                 timer.gateDown(now);
@@ -720,10 +778,22 @@ static void timerTask(void* arg)
             static int64_t nextUsbCheck = 0;
             if (now >= nextUsbCheck) {
                 nextUsbCheck = now + 100;
-                usbLink.tick(now, usb_serial_jtag_is_connected(), g_wsConnected);
+                const int via = g_linkVia.load();
+                const bool up = via == ViaUsb ? usb_serial_jtag_is_connected() : via == ViaLocal ? localLinkOpen(g_linkFd.load()) : true;
+                usbLink.tick(now, up, g_wsConnected);
             }
         }
         g_linkAlive.store(usbLink.alive());
+        if (!usbLink.alive() && !usbLink.viaLink())
+            g_linkVia.store(ViaNone);
+        // Pages on the network find the relay here (hello's addresses).
+        static std::string lastIp;
+        if (networkIp() != lastIp) {
+            lastIp = networkIp();
+            timer.addresses.clear();
+            if (!lastIp.empty())
+                timer.addresses.push_back(lastIp + ":80");
+        }
         if (handedOver)
             vTaskDelay(pdMS_TO_TICKS(20));
         else
@@ -844,7 +914,7 @@ static const esp_console_cmd_t kCommands[] = {
 // Logs must not reach the USB host while it speaks the node protocol.
 static int quietVprintf(const char* fmt, va_list args)
 {
-    if (g_serialMode.load() != SerialOff || g_linkAlive.load())
+    if (g_serialMode.load() != SerialOff || (g_linkAlive.load() && g_linkVia.load() == ViaUsb))
         return 0;
     return vprintf(fmt, args);
 }
@@ -1027,6 +1097,9 @@ extern "C" void app_main(void)
 
     g_events = xQueueCreate(64, sizeof(Event));
     g_outbox = xQueueCreate(64, sizeof(char*));
+    // The local link's messages, from the web server's task, to the timer task.
+    setLocalLinkHandlers([](const char* text, size_t len, int fd) { post(QueueKind::LocalLink, text, len, fd); },
+                         [](int fd) { post(QueueKind::LocalClosed, nullptr, 0, fd); });
 
     g_statusLock = xSemaphoreCreateMutex();
 #ifdef RELAY_DIAG

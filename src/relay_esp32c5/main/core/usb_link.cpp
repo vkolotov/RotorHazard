@@ -72,7 +72,7 @@ void UsbLink::received(const char* line, int64_t now, bool wifiConnected)
     seen_ = now;
     if (!alive_) {
         alive_ = true;
-        note("USB: mission control is on the USB port");
+        note(label + ": mission control is on the link");
     }
     if (type == "link_open") {
         const cJSON* t = cJSON_GetObjectItemCaseSensitive(m, "time_ms");
@@ -101,7 +101,7 @@ void UsbLink::tick(int64_t now, bool usbConnected, bool wifiConnected)
     if (alive_ && (!usbConnected || now - seen_ > USB_LINK_TIMEOUT_MS)) {
         alive_ = false;
         up_ = false;
-        note(usbConnected ? "USB: mission control went quiet" : "USB: unplugged");
+        note(label + (usbConnected ? ": mission control went quiet" : ": the page is gone (unplugged or closed)"));
     }
     // Without `prefer`, the link only stands in while Wi-Fi is down.
     update(now, wifiConnected, false);
@@ -111,7 +111,7 @@ void UsbLink::drop(int64_t now, const std::string& why, bool askReconnect)
 {
     if (!up_ && !via_)
         return;
-    note("USB: " + why);
+    note(label + ": " + why);
     up_ = false;
     if (askReconnect && toHost)
         toHost("{\"type\":\"link_reconnect\"}");
@@ -132,8 +132,8 @@ void UsbLink::update(int64_t now, bool wifiConnected, bool fresh)
         via_ = want;
         timer_.socketClosed();
         timer_.watchFrameMs = via_ ? USB_WATCH_FRAME_MS : WATCH_FRAME_MS;
-        timer_.route = via_ ? "relay_usb" : "relay";
-        note(via_ ? "mach1 through USB (mission control on the laptop)" : "mach1 through Wi-Fi again");
+        timer_.route = via_ ? routeName : "relay";
+        note(via_ ? "mach1 through " + label + " (mission control on a laptop)" : "mach1 through its own Wi-Fi again");
         if (routeChanged)
             routeChanged(via_);
         if (via_)

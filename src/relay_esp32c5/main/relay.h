@@ -33,3 +33,12 @@ bool networkUp();       // joined the configured network, with an address
 std::string networkIp();  // that address, "" without one
 bool hotspotOn();
 std::string hotspotSsid();
+
+// The local link: pages on the same network open a WebSocket at /link on the
+// web server and speak what the USB link speaks (core/usb_link.h). Text
+// frames go to `onText` with the client's socket; `onClosed` when one closes.
+// Pages only probing (link_probe) and the one carrying the relay share it.
+void setLocalLinkHandlers(void (*onText)(const char* text, size_t len, int fd), void (*onClosed)(int fd));
+bool localLinkOpen(int fd);
+// A message to that page (copied; sent from the web server's task).
+void localLinkSend(int fd, const std::string& text);

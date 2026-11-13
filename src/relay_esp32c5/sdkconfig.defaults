@@ -28,3 +28,7 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 # vprintf, which overflowed the default 2304-byte event task stack when Wi-Fi
 # got its address (Stack protection fault in sys_evt, reboot loop).
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# The local link: mission control on the same network carries mach1 over a
+# WebSocket to the relay's web server (/link), like the USB link.
+CONFIG_HTTPD_WS_SUPPORT=y

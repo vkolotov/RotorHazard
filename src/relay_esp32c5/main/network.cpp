@@ -317,6 +317,76 @@ static esp_err_t getOther(httpd_req_t* req)
     return httpd_resp_send(req, nullptr, 0);
 }
 
+// ---------------------------------------------------------------------------
+// The local link: a WebSocket at /link for one page on the network
+
+static httpd_handle_t g_http;
+static void (*g_onLinkText)(const char*, size_t, int);
+static void (*g_onLinkClosed)(int);
+
+void setLocalLinkHandlers(void (*onText)(const char*, size_t, int), void (*onClosed)(int))
+{
+    g_onLinkText = onText;
+    g_onLinkClosed = onClosed;
+}
+
+bool localLinkOpen(int fd)
+{
+    return g_http && fd >= 0 && httpd_ws_get_fd_info(g_http, fd) == HTTPD_WS_CLIENT_WEBSOCKET;
+}
+
+static esp_err_t wsLink(httpd_req_t* req)
+{
+    if (req->method == HTTP_GET)
+        return ESP_OK;  // the handshake: a page connected
+    httpd_ws_frame_t frame = {};
+    if (httpd_ws_recv_frame(req, &frame, 0) != ESP_OK)
+        return ESP_FAIL;
+    if (frame.type != HTTPD_WS_TYPE_TEXT || frame.len == 0 || frame.len > 16384)
+        return ESP_OK;
+    std::string text(frame.len, '\0');
+    frame.payload = (uint8_t*)text.data();
+    if (httpd_ws_recv_frame(req, &frame, frame.len) != ESP_OK)
+        return ESP_FAIL;
+    if (g_onLinkText)
+        g_onLinkText(text.data(), text.size(), httpd_req_to_sockfd(req));
+    return ESP_OK;
+}
+
+static void onSocketClose(httpd_handle_t, int fd)
+{
+    if (g_onLinkClosed)
+        g_onLinkClosed(fd);
+    close(fd);
+}
+
+struct LinkSend {
+    int fd;
+    std::string text;
+};
+
+static void sendWork(void* arg)
+{
+    auto* work = (LinkSend*)arg;
+    if (localLinkOpen(work->fd)) {
+        httpd_ws_frame_t frame = {};
+        frame.type = HTTPD_WS_TYPE_TEXT;
+        frame.payload = (uint8_t*)work->text.data();
+        frame.len = work->text.size();
+        httpd_ws_send_frame_async(g_http, work->fd, &frame);
+    }
+    delete work;
+}
+
+void localLinkSend(int fd, const std::string& text)
+{
+    if (!g_http || fd < 0)
+        return;
+    auto* work = new LinkSend{fd, text};
+    if (httpd_queue_work(g_http, sendWork, work) != ESP_OK)
+        delete work;
+}
+
 static void startHttp()
 {
     httpd_handle_t server = nullptr;
@@ -324,15 +394,26 @@ static void startHttp()
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
+    config.close_fn = onSocketClose;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "no web server");
         return;
     }
+    g_http = server;
+    auto uri = [](const char* path, httpd_method_t method, esp_err_t (*handler)(httpd_req_t*), bool ws = false) {
+        httpd_uri_t u = {};
+        u.uri = path;
+        u.method = method;
+        u.handler = handler;
+        u.is_websocket = ws;
+        return u;
+    };
     const httpd_uri_t uris[] = {
-        {.uri = "/", .method = HTTP_GET, .handler = getRoot, .user_ctx = nullptr},
-        {.uri = "/status.json", .method = HTTP_GET, .handler = getStatus, .user_ctx = nullptr},
-        {.uri = "/settings", .method = HTTP_POST, .handler = postSettings, .user_ctx = nullptr},
-        {.uri = "/*", .method = HTTP_GET, .handler = getOther, .user_ctx = nullptr},
+        uri("/", HTTP_GET, getRoot),
+        uri("/status.json", HTTP_GET, getStatus),
+        uri("/settings", HTTP_POST, postSettings),
+        uri("/link", HTTP_GET, wsLink, true),
+        uri("/*", HTTP_GET, getOther),
     };
     for (const auto& u : uris)
         httpd_register_uri_handler(server, &u);

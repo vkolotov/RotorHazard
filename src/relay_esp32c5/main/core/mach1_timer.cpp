@@ -267,6 +267,11 @@ std::string Mach1Timer::hello() const
     if (!relayUid.empty())
         cJSON_AddStringToObject(m, "relay_uid", relayUid.c_str());
     cJSON_AddStringToObject(m, "route", route.c_str());
+    if (!addresses.empty()) {
+        cJSON* list = cJSON_AddArrayToObject(m, "addresses");
+        for (const std::string& a : addresses)
+            cJSON_AddItemToArray(list, cJSON_CreateString(a.c_str()));
+    }
     if (!c5Input.empty()) {
         cJSON* input = cJSON_Parse(c5Input.c_str());
         if (cJSON_IsObject(input))

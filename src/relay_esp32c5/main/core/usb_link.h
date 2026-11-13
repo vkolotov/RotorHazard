@@ -1,6 +1,7 @@
-// The USB link: mach1 mission control, open in a browser on a laptop with the
-// relay plugged into it, carries the relay's mach1 connection over the USB
-// serial port. The relay stays the timer (its node driver and race engine run
+// The page link: mach1 mission control, open in a browser on a laptop with the
+// relay plugged into it (USB serial) or on the same network (a WebSocket at
+// /link on the relay's web server), carries the relay's mach1 connection.
+// One page at a time; the transport is the caller's (relay_main.cpp). The relay stays the timer (its node driver and race engine run
 // on, nothing restarts); only the path to mach1 changes. Unplugged, or with the
 // page closed, it goes back to its own Wi-Fi connection, resending whatever
 // mach1 has not acknowledged.
@@ -49,6 +50,10 @@ public:
     std::function<void(const std::string& line)> log;
     // What the page needs beyond the timer's name and uid.
     std::string rhVersion;
+    // The page's transport, set by the caller when a page starts speaking:
+    // how logs name it, and hello's route while it carries mach1.
+    std::string label = "USB";
+    std::string routeName = "relay_usb";
 
     // A JSON line from the USB host.
     void received(const char* line, int64_t now, bool wifiConnected);

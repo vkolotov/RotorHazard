@@ -134,6 +134,8 @@ public:
     // How mach1 reaches this timer, in hello: "relay" (its own Wi-Fi) or
     // "relay_usb" (through mission control on a laptop, over USB).
     std::string route = "relay";
+    // Where pages on the same network reach it ("ip:port"), in hello.
+    std::vector<std::string> addresses;
 
     // The gate node is up (driver Running) or gone (nullptr).
     void gateUp(NodeDriver* driver, int64_t now);
