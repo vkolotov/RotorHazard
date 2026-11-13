@@ -266,6 +266,9 @@ std::string Mach1Timer::hello() const
         cJSON_AddStringToObject(m, "node_id", uid.c_str() + 3);
     if (!relayUid.empty())
         cJSON_AddStringToObject(m, "relay_uid", relayUid.c_str());
+    // The node's own firmware, so mission control lists it with the relay's.
+    if (driver_ && !driver_->info().firmware.empty())
+        cJSON_AddStringToObject(m, "node_firmware", driver_->info().firmware.c_str());
     cJSON_AddStringToObject(m, "route", route.c_str());
     if (!addresses.empty()) {
         cJSON* list = cJSON_AddArrayToObject(m, "addresses");

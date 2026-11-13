@@ -464,6 +464,7 @@ static void timerTests()
         cJSON* hello = r.last("hello");
         CHECK(hello && str(hello, "hardware") == "ESP32C5" && num(hello, "node_count") == 8);
         CHECK(str(hello, "rh_version").find("c5-relay") == 0);
+        CHECK(str(hello, "node_firmware") == "1.2.0-c5.4");  // listed with the relay's in mission control
         // mission control enables node calibration from plugin 0.5.0
         CHECK(str(hello, "plugin_version") == "0.5.0");
         CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(hello, "frequencies")) == 8);
