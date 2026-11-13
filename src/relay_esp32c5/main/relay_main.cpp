@@ -15,6 +15,7 @@
 //           timer over Web Serial) drives the node through the relay's radio
 //           link instead of the relay. Wi-Fi stays up meanwhile.
 //   websocket client (esp_websocket_client) and Wi-Fi run their own tasks.
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdarg>
@@ -84,7 +85,13 @@ static std::atomic<int64_t> g_loopBeat{0};
 constexpr uint32_t STALL_MAGIC = 0x57A11ED0;
 static RTC_NOINIT_ATTR uint32_t g_stallMagic;
 static RTC_NOINIT_ATTR uint32_t g_stallMs;
+// The second watchdog: Wi-Fi is up but mach1 has not been heard this long, with
+// no race running and nothing waiting to be sent. Something below the main
+// loop is stuck (sockets, TLS); a restart clears it and loses nothing.
+constexpr int64_t MACH1_SILENT_RESTART_MS = 180000;
+constexpr uint32_t SILENT_MAGIC = 0x5113A7ED;
 static int g_resetReason = 0;
+static bool g_lastBootSilent = false;
 static bool g_lastBootStall = false;
 static uint32_t g_lastStallMs = 0;
 static std::atomic<int> g_serialMode{SerialOff};
@@ -487,7 +494,7 @@ static void addSystemInfo(cJSON* sys)
     cJSON_AddNumberToObject(sys, "heap_min", (double)esp_get_minimum_free_heap_size());
     cJSON_AddNumberToObject(sys, "heap_block", (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     cJSON_AddNumberToObject(sys, "reset_reason", g_resetReason);
-    cJSON_AddStringToObject(sys, "reset", g_lastBootStall ? "main loop stalled" : resetReasonName(g_resetReason));
+    cJSON_AddStringToObject(sys, "reset", g_lastBootStall ? "main loop stalled" : g_lastBootSilent ? "mach1 unreachable" : resetReasonName(g_resetReason));
     cJSON_AddNumberToObject(sys, "rssi", networkRssi());
 }
 
@@ -734,8 +741,28 @@ static void timerTask(void* arg)
     };
     if (g_lastBootStall)
         addLog("Restarted: the main loop had stalled for " + std::to_string(g_lastStallMs / 1000) + " s (core dump saved)");
+    if (g_lastBootSilent)
+        addLog("Restarted: mach1 was unreachable for " + std::to_string(g_lastStallMs / 1000) + " s with Wi-Fi up");
+    int64_t networkSince = -1;  // when Wi-Fi last came up; -1 while down
     for (;;) {
         g_loopBeat.store(esp_timer_get_time() / 1000);
+        {
+            const int64_t nowMs = esp_timer_get_time() / 1000;
+            if (!networkUp())
+                networkSince = -1;
+            else if (networkSince < 0)
+                networkSince = nowMs;
+            const bool idle = (timer.engine.status == RaceStatus::Ready || timer.engine.status == RaceStatus::Done) &&
+                              timer.pendingCount() == 0;
+            const int64_t quietMs = networkSince < 0 ? 0 : nowMs - std::max(networkSince, timer.lastHeardMs());
+            if (!ctx->socketUrl.empty() && idle && quietMs > MACH1_SILENT_RESTART_MS) {
+                addLog("mach1 unreachable for " + std::to_string(quietMs / 1000) + " s with Wi-Fi up; restarting");
+                g_stallMagic = SILENT_MAGIC;
+                g_stallMs = (uint32_t)quietMs;
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_restart();
+            }
+        }
         Event e;
         while (xQueueReceive(g_events, &e, 0) == pdTRUE) {
             const int64_t now = esp_timer_get_time() / 1000;
@@ -1125,7 +1152,8 @@ extern "C" void app_main(void)
 #endif
     g_resetReason = (int)esp_reset_reason();
     g_lastBootStall = g_stallMagic == STALL_MAGIC && g_resetReason == ESP_RST_PANIC;
-    g_lastStallMs = g_lastBootStall ? g_stallMs : 0;
+    g_lastBootSilent = g_stallMagic == SILENT_MAGIC && g_resetReason == ESP_RST_SW;
+    g_lastStallMs = g_lastBootStall || g_lastBootSilent ? g_stallMs : 0;
     g_stallMagic = 0;
     printf("relay boot: reset reason %d%s\n", g_resetReason, g_lastBootStall ? " (main loop stalled)" : "");
     {

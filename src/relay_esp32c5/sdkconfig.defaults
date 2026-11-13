@@ -32,3 +32,7 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 # The local link: mission control on the same network carries mach1 over a
 # WebSocket to the relay's web server (/link), like the USB link.
 CONFIG_HTTPD_WS_SUPPORT=y
+
+# Room for the web server (5 clients + 3), mach1 (TLS), DNS and SNTP: at 10,
+# dead page sockets once left none for mach1.
+CONFIG_LWIP_MAX_SOCKETS=16

@@ -403,6 +403,15 @@ static void startHttp()
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
+    // 5 clients (+3 the server keeps) leaves sockets for mach1, DNS and SNTP
+    // (LWIP_MAX_SOCKETS 16). Keep-alive closes a page whose laptop slept or
+    // left in ~20 s: dead sockets once filled the pool, and the relay could
+    // neither serve its page nor reach mach1 until it was reset.
+    config.max_open_sockets = 5;
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 5;
+    config.keep_alive_interval = 5;
+    config.keep_alive_count = 3;
     config.close_fn = onSocketClose;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "no web server");

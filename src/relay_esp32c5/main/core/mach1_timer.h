@@ -41,7 +41,7 @@ struct cJSON;
 
 namespace relay {
 
-constexpr const char* RELAY_VERSION = "0.2.5";
+constexpr const char* RELAY_VERSION = "0.2.6";
 // The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
 #ifndef RELAY_BOARD
 #define RELAY_BOARD "c5"
@@ -156,6 +156,8 @@ public:
     bool socketConnected() const { return connected_; }
     const std::string& club() const { return club_; }
     size_t pendingCount() const { return pending_.size(); }
+    // When mach1 was last heard (any message, or the socket opening), ms.
+    int64_t lastHeardMs() const { return lastHeard_; }
     bool watching(int64_t now) const { return now < watchUntil_; }
     const std::string& raceKey() const { return race_.raceKey; }
     std::string seatCallsign(int seat) const;
