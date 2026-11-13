@@ -1,0 +1,4 @@
+# ESP32-S3 N16R8 dev board: 16 MB flash. The 8 MB octal PSRAM is not used
+# (it takes GPIO35-37: keep the node link off those).
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

@@ -250,7 +250,7 @@ std::string Mach1Timer::hello() const
     cJSON* m = cJSON_CreateObject();
     cJSON_AddStringToObject(m, "type", "hello");
     cJSON_AddStringToObject(m, "name", name.c_str());
-    cJSON_AddStringToObject(m, "rh_version", (std::string("c5-relay ") + RELAY_VERSION).c_str());
+    cJSON_AddStringToObject(m, "rh_version", (std::string(RELAY_BOARD "-relay ") + RELAY_VERSION).c_str());
     cJSON_AddNumberToObject(m, "node_count", driver_ ? driver_->info().seats : 0);
     cJSON_AddStringToObject(m, "plugin_version", PLUGIN_PROTOCOL_VERSION);
     // What mission control may ask of it beyond the plugin's protocol.

@@ -350,7 +350,7 @@ struct TimerContext {
 static void printStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer& timer)
 {
     const int64_t now = esp_timer_get_time() / 1000;
-    printf("c5-relay %s  uid %s  name \"%s\"\n", RELAY_VERSION, ctx.uid.c_str(), ctx.settings.name.c_str());
+    printf(RELAY_BOARD "-relay %s  uid %s  name \"%s\"\n", RELAY_VERSION, ctx.uid.c_str(), ctx.settings.name.c_str());
     printf("link     UART1 tx %d rx %d @ %d\n", RELAY_LINK_TX, RELAY_LINK_RX, LINK_BAUD);
     printf("wifi     %s %s  ssid \"%s\"%s   clock %s\n", networkUp() ? "up" : "down", networkIp().c_str(), ctx.settings.ssid.c_str(), hotspotOn() ? ("  hotspot " + hotspotSsid()).c_str() : "",
            clockValid() ? "synced" : "not synced");
@@ -833,8 +833,11 @@ extern "C" void app_main(void)
     // reset), polling PCR_UART0_CONF for a UART0 that has no clock: the board
     // looks dead until it is power-cycled. Seen on two boards on 2026-11-12;
     // switching the clock on over JTAG let the stuck ROM boot at once.
+    // The S3's ROM does not have this problem.
+#if CONFIG_IDF_TARGET_ESP32C5
     uart_ll_enable_bus_clock(UART_NUM_0, true);
     uart_ll_sclk_enable(&UART0);
+#endif
     printf("relay boot: reset reason %d\n", (int)esp_reset_reason());
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {

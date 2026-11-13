@@ -1,5 +1,4 @@
-CONFIG_IDF_TARGET="esp32c5"
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Flash size and target: sdkconfig.defaults.<target>.
 # Wi-Fi, TLS and the app need more than the default 1 MB app partition;
 # the table is single-app-large plus a core dump partition.
 CONFIG_PARTITION_TABLE_CUSTOM=y

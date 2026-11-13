@@ -42,6 +42,11 @@ struct cJSON;
 namespace relay {
 
 constexpr const char* RELAY_VERSION = "0.1.0";
+// The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
+#ifndef RELAY_BOARD
+#define RELAY_BOARD "c5"
+#define RELAY_BOARD_UC "C5"
+#endif
 // The rh_mach1 plugin protocol the relay speaks (hello's plugin_version):
 // mission control enables node calibration and channels from 0.5.0. The
 // relay's own firmware version goes in rh_version.
@@ -111,7 +116,7 @@ public:
     // drives it. Otherwise the relay itself (relayUid).
     std::string uid;
     std::string session;
-    std::string name = "C5 relay";
+    std::string name = RELAY_BOARD_UC " relay";
     // The relay's own id ("relay-<mac>"), reported in hello.
     std::string relayUid;
     // The node is another (or the first) node with an id: be it in mach1. The

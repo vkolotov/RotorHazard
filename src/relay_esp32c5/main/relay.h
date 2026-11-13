@@ -2,8 +2,13 @@
 #pragma once
 #include <string>
 
+#ifndef RELAY_BOARD  // set by the build (main/CMakeLists.txt)
+#define RELAY_BOARD "c5"
+#define RELAY_BOARD_UC "C5"
+#endif
+
 struct Settings {
-    std::string ssid, password, feed, name = "C5 relay";
+    std::string ssid, password, feed, name = RELAY_BOARD_UC " relay";
     int minLapMs = 4000;
     int ignoreAfterStartMs = 500;
     // Kept from mission control: the last C5 detection write (hex) and its geometry (JSON).

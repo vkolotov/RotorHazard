@@ -184,12 +184,12 @@ static void dnsTask(void*)
 // The setup page
 
 static const char PAGE_HEAD[] = R"(<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>C5 relay</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>)" RELAY_BOARD_UC R"( relay</title>
 <style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:1rem auto;padding:0 1rem;color:#222}
 h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.5rem}label{display:block;margin:.6rem 0 .2rem;font-weight:600}
 input{width:100%;box-sizing:border-box;padding:.5rem;font-size:1rem}button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem}
 small{color:#666}table{border-collapse:collapse;width:100%;font-size:.9rem}td,th{padding:.2rem .4rem;text-align:left;border-bottom:1px solid #eee}
-.ok{color:#080}.bad{color:#b00}</style></head><body><h1>C5 relay</h1>
+.ok{color:#080}.bad{color:#b00}</style></head><body><h1>)" RELAY_BOARD_UC R"( relay</h1>
 )";
 
 static const char PAGE_SCRIPT[] = R"(<script>
@@ -272,7 +272,7 @@ static esp_err_t postSettings(httpd_req_t* req)
     if (!form["password"].empty() || next.ssid != g_settings.ssid)
         next.password = form["password"];
     next.feed = form["feed"];
-    next.name = form["name"].empty() ? "C5 relay" : form["name"];
+    next.name = form["name"].empty() ? RELAY_BOARD_UC " relay" : form["name"];
     const std::string minlap = form["minlap"];
     if (next.ssid.size() > 32)
         error = "The network name is longer than 32 characters.";
@@ -347,14 +347,14 @@ void startNetwork(const Settings& s, const std::string& uid)
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     char ssid[32];
-    snprintf(ssid, sizeof ssid, "C5-Relay-%02X%02X", mac[4], mac[5]);
+    snprintf(ssid, sizeof ssid, RELAY_BOARD_UC "-Relay-%02X%02X", mac[4], mac[5]);
     g_apSsid = ssid;
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     g_sta = esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
-    esp_netif_set_hostname(g_sta, "c5-relay");
+    esp_netif_set_hostname(g_sta, RELAY_BOARD "-relay");
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
     esp_wifi_set_storage(WIFI_STORAGE_RAM);

@@ -1,4 +1,4 @@
-# RotorHazard relay for the ESP32-C5
+# RotorHazard relay for the ESP32-C5 (and ESP32-S3)
 
 A C5 board that drives a RotorHazard node over a UART (the 900 MHz AirPort
 link to the gate, or a wire) and **is the timer**: it runs the race and
@@ -68,6 +68,27 @@ idf.py -B build build                    # link on GPIO11/12 by default
 idf.py -B build -DRELAY_LINK_TX=<gpio> -DRELAY_LINK_RX=<gpio> build
 idf.py -B build -p /dev/serial/by-id/<relay> flash
 ```
+
+ESP32-S3 (e.g. an N16R8 dev board; 2.4 GHz Wi-Fi only, needs the Xtensa
+toolchain: `~/esp/esp-idf/install.sh esp32s3`). Keep its sdkconfig in its own
+build directory so the C5's `sdkconfig` is untouched, and don't commit the
+`dependencies.lock` target change `set-target` makes:
+
+```text
+idf.py -B build-s3 -D SDKCONFIG=build-s3/sdkconfig set-target esp32s3   # once
+idf.py -B build-s3 -D SDKCONFIG=build-s3/sdkconfig build
+idf.py -B build-s3 -D SDKCONFIG=build-s3/sdkconfig -p /dev/serial/by-id/<relay> flash
+```
+
+The link defaults to the board's TX/RX pins, **GPIO43/44** (UART0's pads;
+avoid 35-37, the octal PSRAM's). The COM port's USB-UART bridge is wired to
+the same pins: with the radio connected, leave `COM` unplugged (its TX would
+fight the radio's on GPIO44). The console is on the native `USB` port
+(`303a:1001`). Flash once over `COM` (auto-reset into download mode, as the
+factory firmware may own the USB port), then over `USB`. On an N16R8 clone
+the `5V IN` pin is input-only until its `IN-OUT` pads are bridged. Names
+follow the target (`S3 relay`, `S3-Relay-xxxx` AP, `s3-relay` in
+`rh_version`). The C5 UART0 clock fix below is C5-only.
 
 No PHY hacks, so any ESP-IDF 5.5.x works; `esp_websocket_client` comes from
 the component registry.
