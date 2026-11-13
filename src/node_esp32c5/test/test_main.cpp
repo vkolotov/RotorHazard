@@ -545,6 +545,18 @@ static void testRhProtocol()
     link.feed((const uint8_t*)cl, strlen(cl));
     CHECK(consoleSaw, "console line");
     CHECK(readCmd(link, out, READ_REVISION_CODE, 2, &d), "protocol after console");
+
+    // A stray '!' (noise on the radio link) must not swallow the commands after it.
+    consoleSaw = false;
+    const uint8_t noise[] = {'!', 0xF8, 'x'};
+    link.feed(noise, sizeof noise);
+    // The next binary command (a control byte, as most of RotorHazard's are) is answered at once.
+    CHECK(readCmd(link, out, READ_RHFEAT_FLAGS, 2, &d), "first command after a stray '!'");
+    CHECK(readCmd(link, out, READ_REVISION_CODE, 2, &d), "protocol after a stray '!'");
+    CHECK(!consoleSaw, "no console line from noise");
+    // UTF-8 in a console line is still text.
+    link.feed((const uint8_t*)"!status \xC3\xA9\n", 11);
+    CHECK(readCmd(link, out, READ_REVISION_CODE, 2, &d), "protocol after a UTF-8 console line");
 }
 
 static void testCalibration()

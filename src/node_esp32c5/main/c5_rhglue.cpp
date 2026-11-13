@@ -13,7 +13,7 @@
 #include "commands.h"
 
 #ifndef RHNODE_C5_VERSION
-#define RHNODE_C5_VERSION "1.2.0-c5.13-node-id"
+#define RHNODE_C5_VERSION "1.2.0-c5.14-console-guard"
 #endif
 
 // informational strings read by RH (prefixes let them be found in the .bin)
@@ -408,6 +408,15 @@ void RhLink::byte(uint8_t b)
             inConsole_ = false;
             if (console_)
                 console_(line_, out_);
+        } else if (b < 0x20 || b == 0x7F) {
+            // Not text: the '!' was noise (a relay being flashed sends its
+            // boot output over the radio link), and this is RotorHazard's next
+            // command. Without this, every request after a stray '!' was
+            // swallowed as console text until a newline that never came: the
+            // node went silent until it was power-cycled.
+            inConsole_ = false;
+            lineLen_ = 0;
+            byte(b);
         } else if (lineLen_ + 1 < sizeof(line_)) {
             line_[lineLen_++] = (char)b;
         }
