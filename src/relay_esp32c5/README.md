@@ -133,6 +133,58 @@ the second try, then ~160-300 round trips/s with 0 bad in 812-1598; the
 relay back at 11 sweeps/s about 1 s after the host went quiet. Not yet
 tried from Chrome.
 
+## USB link: the relay stays the timer, mach1 goes through the laptop
+
+mach1's **Connect** (Timers page and mission control; mach1
+`lib/browserTimer/localTimers.ts`, `lib/relayUsbLink.ts`) is the other way to
+use the port: the relay keeps running the node and the race, and only its
+mach1 connection moves to the cable. Plugged in mid-race, it switches;
+unplugged (or the page closed), it is back on its own Wi-Fi within seconds.
+Nothing restarts and unacknowledged race messages are resent on the new path
+(mach1 stores a resend once).
+
+- **Which board is it:** Connect sends one byte, `0x01`. The relay answers
+  with `link_info` at once (the USB task keeps a copy, so a busy timer task
+  does not delay it); a RotorHazard node ignores it (an undefined read
+  command). Connect then links a relay, or drives a node itself.
+- Lines starting with `{` are the rh_mach1 plugin's local-link messages
+  (`core/usb_link.h`): the page sends `link_open` every 2 s (with its clock,
+  which sets a relay that has no SNTP), opens mach1's timer socket under the
+  relay's uid from `link_info`, then `link_up {prefer: true}`. The relay
+  closes its own Wi-Fi socket, so mach1 sees one connection, and sends
+  hello (route `relay_usb`), status and every unacknowledged message
+  through the page (`link_send`). mach1's messages come back as
+  `link_cloud`. Watched readings go out every 100 ms (250 ms over Wi-Fi);
+  the page reads them first-hand rather than through mach1.
+- Back to Wi-Fi: USB unplugged (`usb_serial_jtag_is_connected()`, checked
+  every 100 ms), 6 s without a line from the page, `link_down` (the page lost
+  mach1), or mach1 quiet through the page for 30 s (the page is asked to
+  reconnect with `link_reconnect`).
+- Logs are kept off the port while a page is on it. Console commands still
+  work. A non-letter byte other than `{` and `0x01` still starts
+  pass-through, which ends the link.
+- The page opens the port with DTR on and RTS off: the ESP32's USB serial
+  resets the chip while RTS is on and DTR off. Verified on the S3 relay and a
+  C5 node (2026-11-13): open/close cycles leave both running.
+- `status` shows `mach1 connected through USB`; the setup page's
+  `status.json` has `mach1.via` = `usb` or `wifi`. `link` prints the node
+  link's pin setup and the bytes sent and received since boot.
+- Older relay firmware (0.1.0) takes the `{` lines as pass-through: update
+  the relay first.
+
+Bench (S3 relay, 2026-11-13, a script doing what the page does, against
+mach1.org.nz without a race): opening the port did not reset the relay; it
+switched to USB within a second of `link_up`; after the page went quiet it
+was back on Wi-Fi in 6 s plus ~4 s to reconnect. Host tests cover a race
+started over Wi-Fi going on through USB and back with nothing lost.
+
+**Flashing a relay used to silence its C5 node** until the node was
+power-cycled: the flash output on the link pin reached the node over the
+radio, and a stray `!` put the node's link into console-line mode, which then
+swallowed every binary request. Fixed in node `1.2.0-c5.14-console-guard`;
+an older node can be revived without power by sending it a newline through
+pass-through (`\x22\n` from the relay's USB port).
+
 ## Wiring
 
 Relay pads TX (GPIO11) → node/XR4 RX, relay RX (GPIO12) ← node/XR4 TX, GND.

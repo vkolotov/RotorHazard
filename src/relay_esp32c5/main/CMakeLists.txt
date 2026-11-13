@@ -1,9 +1,9 @@
 idf_component_register(
     SRCS "relay_main.cpp" "network.cpp" "core/web_form.cpp" "core/node_protocol.cpp" "core/node_driver.cpp" "core/race_engine.cpp"
-         "core/channels.cpp" "core/mach1_timer.cpp" "core/feed_url.cpp"
+         "core/channels.cpp" "core/mach1_timer.cpp" "core/feed_url.cpp" "core/usb_link.cpp"
     INCLUDE_DIRS "core"
     PRIV_REQUIRES esp_http_server esp_wifi esp_netif esp_event nvs_flash esp_driver_uart esp_timer json console
-                  mbedtls esp_driver_usb_serial_jtag)
+                  mbedtls esp_driver_usb_serial_jtag esp_driver_gpio)
 
 # Default link pins: the board's TX/RX pads (UART0's pins), which the ROM
 # also prints its boot banner on. C5-Zero: GPIO11/12. ESP32-S3 dev boards:

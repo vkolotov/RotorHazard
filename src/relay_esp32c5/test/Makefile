@@ -7,7 +7,7 @@ CJSON := $(IDF_PATH)/components/json/cJSON
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined \
     -I$(CORE) -I$(CJSON) -I.
 SRCS := test_main.cpp $(CORE)/node_protocol.cpp $(CORE)/node_driver.cpp $(CORE)/race_engine.cpp \
-    $(CORE)/channels.cpp $(CORE)/mach1_timer.cpp $(CORE)/feed_url.cpp $(CORE)/web_form.cpp
+    $(CORE)/channels.cpp $(CORE)/mach1_timer.cpp $(CORE)/feed_url.cpp $(CORE)/web_form.cpp $(CORE)/usb_link.cpp
 
 test_relay: $(SRCS) test_constants.o cJSON.o $(wildcard $(CORE)/*.h) fake_node.h
 	$(CXX) $(CXXFLAGS) -o $@ $(SRCS) test_constants.o cJSON.o

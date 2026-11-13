@@ -14,6 +14,7 @@
 #include "mach1_timer.h"
 #include "node_driver.h"
 #include "race_engine.h"
+#include "usb_link.h"
 
 using namespace relay;
 
@@ -833,6 +834,149 @@ static void identityTests()
     });
 }
 
+// ---------------------------------------------------------------------------
+// USB link: mission control on a laptop carries the relay's mach1 connection
+
+struct LinkRig : Rig {
+    UsbLink link{timer};
+    std::vector<std::string> toHost;
+    std::vector<bool> routes;
+    int64_t hostClock = 0;
+    LinkRig()
+    {
+        link.toHost = [this](const std::string& line) { toHost.push_back(line); };
+        link.routeChanged = [this](bool via) { routes.push_back(via); };
+        link.hostClock = [this](int64_t ms) { hostClock = ms; };
+        link.log = [this](const std::string& l) { lines.push_back(l); };
+        link.rhVersion = "c5-relay test";
+    }
+    void line(const std::string& json, bool wifi = true) { link.received(json.c_str(), now(), wifi); }
+    cJSON* lastToHost() { return toHost.empty() ? nullptr : cJSON_Parse(toHost.back().c_str()); }
+};
+
+static void usbLinkTests()
+{
+    test("usb link: link_open answers link_info with the timer's uid and takes the page's clock", [] {
+        LinkRig r;
+        r.timer.uid = "c5-3c84270a1b2c";
+        r.timer.name = "Start gate";
+        r.line(R"({"type":"link_open","time_ms":1762800123456})");
+        CHECK(r.link.alive() && !r.link.viaLink());
+        CHECK(r.hostClock == 1762800123456LL);
+        cJSON* info = r.lastToHost();
+        CHECK(str(info, "type") == "link_info" && str(info, "uid") == "c5-3c84270a1b2c");
+        CHECK(str(info, "name") == "Start gate" && cJSON_IsTrue(cJSON_GetObjectItem(info, "cloud")));
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(info, "via_link")));
+        cJSON_Delete(info);
+        // Not link messages: ignored.
+        r.line(R"({"type":"command","id":"x","action":"stop"})");
+        r.line("not json");
+        CHECK(r.routes.empty());
+    });
+    test("usb link: a race started over Wi-Fi goes on through USB and back, nothing lost", [] {
+        LinkRig r;
+        r.up();  // Wi-Fi socket open
+        r.command(START_CMD);
+        r.run(9100);
+        r.command(R"({"type":"ack","session":"s1","seq":1})");  // race_stage acked
+        CHECK_EQ(r.timer.pendingCount(), 1u);                    // race_start not yet
+        r.run(1000);
+        // Plugged in: the page opens the link, then its own socket to mach1.
+        r.line(R"({"type":"link_open","time_ms":1762800000000})");
+        r.clearSent();
+        r.line(R"({"type":"link_up","prefer":true})");
+        CHECK(r.link.viaLink() && r.routes.size() == 1 && r.routes[0]);
+        // What a fresh connection gets: hello, status, the unacknowledged race_start.
+        CHECK(r.sent.size() == 3 && str(r.sent[0], "type") == "hello" && str(r.sent[2], "type") == "rh.race_start");
+        CHECK(str(r.sent[0], "route") == "relay_usb");
+        CHECK(r.timer.socketConnected());
+        // The race goes on: a lap is sent (through the page), acks come back through it.
+        r.clearSent();
+        r.node.cross(0, r.node.clockUs - 1000);
+        r.run(300);
+        CHECK(r.ofType("rh.lap").size() == 1);
+        r.line(R"({"type":"link_cloud","message":{"type":"ack","session":"s1","seq":2}})");
+        CHECK_EQ(r.timer.pendingCount(), 1u);  // the lap is left
+        // Commands from mach1 arrive through the page too.
+        r.line(R"({"type":"link_cloud","message":{"type":"command","id":"c9","action":"set_levels","seat":3,"enter":150,"exit":110}})");
+        CHECK(r.node.seats[3].enter == 150);
+        // Unplugged: straight back to Wi-Fi; the reopened socket resends the lap.
+        r.link.tick(r.now(), false, true);
+        CHECK(!r.link.viaLink() && !r.link.alive() && r.routes.size() == 2 && !r.routes[1]);
+        CHECK(!r.timer.socketConnected());
+        r.clearSent();
+        r.timer.socketOpen(r.now());
+        CHECK(r.sent.size() == 3 && str(r.sent[2], "type") == "rh.lap");
+        CHECK(str(r.sent[0], "route") == "relay");
+        CHECK(r.timer.engine.status == RaceStatus::Racing);
+    });
+    test("usb link: a quiet page or a closed page socket hands mach1 back to Wi-Fi", [] {
+        LinkRig r;
+        r.up();
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up","prefer":true})");
+        CHECK(r.link.viaLink());
+        // Still heard from within the timeout: stays.
+        r.run(4000);
+        r.line(R"({"type":"link_open"})");
+        r.run(4000);
+        r.link.tick(r.now(), true, true);
+        CHECK(r.link.viaLink());
+        r.run(USB_LINK_TIMEOUT_MS + 100);
+        r.link.tick(r.now(), true, true);
+        CHECK(!r.link.viaLink() && !r.link.alive());
+        // The page's socket to mach1 closes: link_down.
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up","prefer":true})");
+        CHECK(r.link.viaLink());
+        r.line(R"({"type":"link_down"})");
+        CHECK(!r.link.viaLink() && r.link.alive());
+        // A second link_up on the same route resends what a fresh socket gets.
+        r.line(R"({"type":"link_up","prefer":true})");
+        r.clearSent();
+        r.line(R"({"type":"link_up","prefer":true})");
+        CHECK(r.ofType("hello").size() == 1);
+    });
+    test("usb link: without prefer the page stands in only while Wi-Fi is down", [] {
+        LinkRig r;
+        r.up();
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up"})", true);
+        CHECK(!r.link.viaLink() && r.routes.empty());
+        r.link.tick(r.now(), true, false);  // Wi-Fi socket lost
+        CHECK(r.link.viaLink());
+    });
+    test("usb link: mach1 quiet through the page asks it to reconnect, Wi-Fi meanwhile", [] {
+        LinkRig r;
+        r.up();
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up","prefer":true})");
+        r.link.drop(r.now(), "mach1 went quiet", true);
+        CHECK(!r.link.viaLink() && r.routes.back() == false);
+        CHECK(r.toHost.back() == R"({"type":"link_reconnect"})");
+        // link_cloud is ignored while the route is Wi-Fi.
+        r.line(R"({"type":"link_cloud","message":{"type":"command","id":"c8","action":"set_levels","seat":3,"enter":151,"exit":111}})");
+        CHECK(r.node.seats[3].enter != 151);
+    });
+    test("usb link: a probe is answered with link_info and nothing else; USB watch frames are faster", [] {
+        LinkRig r;
+        r.up();
+        r.line(R"({"type":"link_probe"})");
+        cJSON* info = r.lastToHost();
+        CHECK(str(info, "type") == "link_info" && !r.link.alive());
+        cJSON_Delete(info);
+        CHECK(r.timer.watchFrameMs == WATCH_FRAME_MS);
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up","prefer":true})");
+        CHECK(r.timer.watchFrameMs == USB_WATCH_FRAME_MS);
+        r.link.tick(r.now(), false, true);
+        CHECK(r.timer.watchFrameMs == WATCH_FRAME_MS);
+    });
+    test("usb link: link_send wraps a mach1 message", [] {
+        CHECK(UsbLink::wrap(R"({"type":"status"})") == R"({"type":"link_send","message":{"type":"status"}})");
+    });
+}
+
 int main()
 {
     CHECK(relayConstantsChecked() == 1);
@@ -841,6 +985,7 @@ int main()
     timerTests();
     settingsTests();
     identityTests();
+    usbLinkTests();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

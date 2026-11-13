@@ -41,7 +41,7 @@ struct cJSON;
 
 namespace relay {
 
-constexpr const char* RELAY_VERSION = "0.1.0";
+constexpr const char* RELAY_VERSION = "0.2.0";
 // The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
 #ifndef RELAY_BOARD
 #define RELAY_BOARD "c5"
@@ -129,6 +129,11 @@ public:
     std::string rename(const std::string& next);
 
     RaceEngine engine;
+    // How often a watched gate's readings go out: faster while the USB link carries them.
+    int64_t watchFrameMs = WATCH_FRAME_MS;
+    // How mach1 reaches this timer, in hello: "relay" (its own Wi-Fi) or
+    // "relay_usb" (through mission control on a laptop, over USB).
+    std::string route = "relay";
 
     // The gate node is up (driver Running) or gone (nullptr).
     void gateUp(NodeDriver* driver, int64_t now);

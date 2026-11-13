@@ -266,7 +266,7 @@ std::string Mach1Timer::hello() const
         cJSON_AddStringToObject(m, "node_id", uid.c_str() + 3);
     if (!relayUid.empty())
         cJSON_AddStringToObject(m, "relay_uid", relayUid.c_str());
-    cJSON_AddStringToObject(m, "route", "relay");
+    cJSON_AddStringToObject(m, "route", route.c_str());
     if (!c5Input.empty()) {
         cJSON* input = cJSON_Parse(c5Input.c_str());
         if (cJSON_IsObject(input))
@@ -433,7 +433,7 @@ void Mach1Timer::tick(int64_t now)
                     samples_[(int)i].push_back(driver_->seats()[i].rssi);
             }
             if (now >= nextFrame_) {
-                nextFrame_ = now + WATCH_FRAME_MS;
+                nextFrame_ = now + watchFrameMs;
                 sendWatchFrame(now);
             }
         }
@@ -854,7 +854,7 @@ void Mach1Timer::watch(cJSON* command, int64_t now)
         samples_.clear();
         marks_.clear();
         nextSample_ = now;
-        nextFrame_ = now + WATCH_FRAME_MS;
+        nextFrame_ = now + watchFrameMs;
     }
     watchUntil_ = now + ttlMs;
     if (driver_)
