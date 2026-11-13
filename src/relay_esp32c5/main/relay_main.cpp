@@ -39,6 +39,8 @@
 #include "esp_system.h"
 #include "hal/uart_ll.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -71,6 +73,20 @@ constexpr int64_t SERIAL_IDLE_MS = 3000;
 // stops polling and hands the UART over (Granted); the USB task gives it back
 // (Off) and the timer task reconnects to the node.
 enum SerialMode : int { SerialOff = 0, SerialRequested = 1, SerialGranted = 2 };
+
+// Main-loop watchdog. The timer task beats every pass; if it stops for this
+// long the relay aborts, which writes a core dump and reboots, and the next
+// boot says so. Long enough for a node probe (a few seconds) and slow
+// mach1/TLS work, short enough that a stuck relay is back before the next heat.
+constexpr int64_t LOOP_STALL_MS = 30000;
+static std::atomic<int64_t> g_loopBeat{0};
+// Survives the abort's reboot (not a power cycle): why the last boot happened.
+constexpr uint32_t STALL_MAGIC = 0x57A11ED0;
+static RTC_NOINIT_ATTR uint32_t g_stallMagic;
+static RTC_NOINIT_ATTR uint32_t g_stallMs;
+static int g_resetReason = 0;
+static bool g_lastBootStall = false;
+static uint32_t g_lastStallMs = 0;
 static std::atomic<int> g_serialMode{SerialOff};
 
 // The USB link (core/usb_link.h): one JSON object per line, starting with '{'.
@@ -463,6 +479,38 @@ static void printStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer&
     }
 }
 
+static const char* resetReasonName(int reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON: return "power on";
+    case ESP_RST_EXT: return "reset pin";
+    case ESP_RST_SW: return "restart";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "SDIO";
+    case ESP_RST_USB: return "USB";
+    case ESP_RST_JTAG: return "JTAG";
+    default: return "unknown";
+    }
+}
+
+// The timer task stopped beating: abort, so the core dump shows where it was.
+static void watchLoop(void*)
+{
+    const int64_t beat = g_loopBeat.load();
+    const int64_t now = esp_timer_get_time() / 1000;
+    if (beat > 0 && now - beat > LOOP_STALL_MS) {
+        g_stallMagic = STALL_MAGIC;
+        g_stallMs = (uint32_t)(now - beat);
+        printf("relay: main loop stalled for %lld ms; aborting for a core dump\n", (long long)(now - beat));
+        abort();
+    }
+}
+
 // What the setup page shows (`/status.json`).
 static void publishStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer& timer)
 {
@@ -471,6 +519,13 @@ static void publishStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Time
     cJSON_AddStringToObject(m, "version", RELAY_VERSION);
     cJSON_AddStringToObject(m, "uid", ctx.uid.c_str());
     cJSON_AddStringToObject(m, "name", ctx.settings.name.c_str());
+    cJSON* sys = cJSON_AddObjectToObject(m, "system");
+    cJSON_AddNumberToObject(sys, "uptime_s", (double)(now / 1000));
+    cJSON_AddNumberToObject(sys, "heap", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(sys, "heap_min", (double)esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(sys, "heap_block", (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(sys, "reset_reason", g_resetReason);
+    cJSON_AddStringToObject(sys, "reset", g_lastBootStall ? "main loop stalled" : resetReasonName(g_resetReason));
     cJSON* wifi = cJSON_AddObjectToObject(m, "wifi");
     cJSON_AddBoolToObject(wifi, "up", networkUp());
     cJSON_AddStringToObject(wifi, "ip", networkIp().c_str());
@@ -689,7 +744,10 @@ static void timerTask(void* arg)
             vTaskDelay(pdMS_TO_TICKS(20));
         }
     };
+    if (g_lastBootStall)
+        addLog("Restarted: the main loop had stalled for " + std::to_string(g_lastStallMs / 1000) + " s (core dump saved)");
     for (;;) {
+        g_loopBeat.store(esp_timer_get_time() / 1000);
         Event e;
         while (xQueueReceive(g_events, &e, 0) == pdTRUE) {
             const int64_t now = esp_timer_get_time() / 1000;
@@ -1077,7 +1135,17 @@ extern "C" void app_main(void)
     uart_ll_enable_bus_clock(UART_NUM_0, true);
     uart_ll_sclk_enable(&UART0);
 #endif
-    printf("relay boot: reset reason %d\n", (int)esp_reset_reason());
+    g_resetReason = (int)esp_reset_reason();
+    g_lastBootStall = g_stallMagic == STALL_MAGIC && g_resetReason == ESP_RST_PANIC;
+    g_lastStallMs = g_lastBootStall ? g_stallMs : 0;
+    g_stallMagic = 0;
+    printf("relay boot: reset reason %d%s\n", g_resetReason, g_lastBootStall ? " (main loop stalled)" : "");
+    {
+        const esp_timer_create_args_t args = {.callback = watchLoop, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK, .name = "loopwd", .skip_unhandled_events = true};
+        esp_timer_handle_t watch;
+        if (esp_timer_create(&args, &watch) == ESP_OK)
+            esp_timer_start_periodic(watch, 1000 * 1000);
+    }
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

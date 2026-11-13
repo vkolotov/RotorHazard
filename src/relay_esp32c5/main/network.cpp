@@ -201,7 +201,8 @@ let h=`<table><tr><th>Wi-Fi</th><td>${yes(s.wifi.up,'online '+s.wifi.ip,'not con
 <tr><th>mach1</th><td>${yes(s.mach1.connected,'connected '+s.mach1.club,'not connected')} · pending ${s.mach1.pending}${s.mach1.watched?' · watched':''}</td></tr>
 <tr><th>Node</th><td>${yes(s.node.status=='running',s.node.status,s.node.status)} ${esc(s.node.proc)} ${esc(s.node.firmware)} API ${s.node.api} · ${s.node.sweeps.toFixed(1)} sweeps/s · ${esc(s.node.detail)}</td></tr>
 <tr><th>Link</th><td>${s.node.reads} reads · ${s.node.timeouts} timeouts · ${s.node.checksum} checksum errors</td></tr>
-<tr><th>Race</th><td>${esc(s.race.status)} ${esc(s.race.format)}</td></tr></table>`;
+<tr><th>Race</th><td>${esc(s.race.status)} ${esc(s.race.format)}</td></tr>
+<tr><th>System</th><td>${s.system?`up ${Math.floor(s.system.uptime_s/3600)}h ${Math.floor(s.system.uptime_s/60)%60}m · heap ${Math.round(s.system.heap/1024)} KB (min ${Math.round(s.system.heap_min/1024)}, block ${Math.round(s.system.heap_block/1024)}) · last reset: ${esc(s.system.reset)}`:''}</td></tr></table>`;
 if(s.seats.length){h+=`<table><tr><th>Node</th><th>MHz</th><th>RSSI</th><th>Enter/exit</th><th>Pilot</th><th>Laps</th></tr>`+
 s.seats.map((x,i)=>`<tr><td>${i+1}</td><td>${x.frequency||'off'}</td><td>${x.rssi}</td><td>${x.enter}/${x.exit}</td><td>${esc(x.callsign)}</td><td>${x.laps}</td></tr>`).join('')+'</table>';}
 document.getElementById('status').innerHTML=h;}catch(e){document.getElementById('status').textContent='No status: '+e;}}

@@ -228,7 +228,10 @@ resets with the same wiring booted. A power cycle clears it. Cause not
 known.
 
 **Evidence on the next failure:** a `coredump` partition (ELF, read with
-`idf.py coredump-info`), the task watchdog panics, and the first console
+`idf.py coredump-info`), the task watchdog panics, a main-loop watchdog
+(the timer task silent for 30 s aborts for a core dump; the next boot logs
+"Restarted: the main loop had stalled"), `status.json`'s `system` (uptime,
+free heap, low-water mark, largest block, last reset reason), and the first console
 line is `relay boot: reset reason <n>`. `-DCMAKE_CXX_FLAGS=-DRELAY_DIAG`
 builds a staged start (console, then node UART, then Wi-Fi, 8 s apart) with
 a 1 s heartbeat, to see which step stops a board.
