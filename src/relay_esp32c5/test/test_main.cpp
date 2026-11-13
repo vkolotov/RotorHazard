@@ -677,6 +677,36 @@ static void timerTests()
         r.run(25000);
         CHECK(r.reconnects >= 1);
     });
+    test("driver: a C5 node's health (READ 0x45) parses; another version does not", [] {
+        uint8_t d[NODE_STATS_SIZE] = {};
+        d[0] = 1; d[1] = 9; d[2] = NODE_STATS_UART_LINK;
+        d[7] = 60;            // uptime 60 s
+        d[26] = 1; d[27] = 2; // failed 258
+        d[51] = 3;            // UART noise 3
+        NodeStats s;
+        CHECK(parseNodeStats(d, sizeof d, &s) && s.valid && s.resetReason == 9 && s.uptimeS == 60);
+        CHECK(s.failed == 258 && s.uartNoise == 3 && (s.flags & NODE_STATS_UART_LINK));
+        CHECK(std::string(resetReasonName(s.resetReason)) == "brownout");
+        d[0] = 2;
+        NodeStats t;
+        CHECK(!parseNodeStats(d, sizeof d, &t) && !t.valid);
+    });
+    test("driver: a node that restarted (its uptime went back) is set up again", [] {
+        FakeNode node;
+        node.hasStats = true;
+        node.seats[0].frequency = 5658;
+        NodeDriver d(node);
+        std::string error;
+        CHECK(d.start(&error) && d.info().hasStats);
+        CHECK(d.poll() && d.nodeStats().valid && d.nodeStats().uptimeS == 3600);
+        node.uptimeS = 3;                // rebooted: frequencies and levels gone
+        node.clockUs += NODE_STATS_EVERY_US;
+        d.poll();
+        CHECK(d.status() == NodeStatus::Lost && d.detail().find("restarted") != std::string::npos);
+        CHECK(d.start(&error) && d.status() == NodeStatus::Running);
+        node.clockUs += NODE_STATS_EVERY_US;
+        CHECK(d.poll() && d.status() == NodeStatus::Running && d.nodeStats().uptimeS == 3);
+    });
     test("timer: the heartbeat carries the relay's health and its node link", [] {
         Rig r;
         r.timer.systemInfo = [](cJSON* sys) { cJSON_AddNumberToObject(sys, "uptime_s", 42); };

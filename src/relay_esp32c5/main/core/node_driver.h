@@ -53,7 +53,27 @@ struct NodeInfo {
     // mach1 knows it by these however it is reached.
     std::string nodeId;
     std::string nodeName;
+    // It answers READ 0x45 (its health; firmware 1.2.0-c5.15 and later).
+    bool hasStats = false;
 };
+
+// A C5 node's health (READ 0x45), read every NODE_STATS_EVERY_US while running.
+struct NodeStats {
+    bool valid = false;
+    int64_t readAtUs = 0;  // link clock
+    uint8_t resetReason = 0, flags = 0;
+    uint32_t uptimeS = 0, heap = 0, heapMin = 0;
+    uint32_t cycles = 0, captures = 0, failed = 0, held = 0, clipped = 0, maxCycleUs = 0;
+    uint32_t uartCommands = 0, uartBadChecksums = 0, uartNoise = 0, usbCommands = 0;
+};
+constexpr uint8_t READ_NODE_STATS = 0x45;
+constexpr size_t NODE_STATS_SIZE = 56;
+constexpr uint16_t RHFEAT_C5_NODE_STATS = 0x0100;
+constexpr uint8_t NODE_STATS_USB_HOST = 1;
+constexpr uint8_t NODE_STATS_UART_LINK = 2;
+constexpr int64_t NODE_STATS_EVERY_US = 10000000;
+// What it read, or false (its fields untouched) if the reply is not version 1.
+bool parseNodeStats(const uint8_t* d, size_t n, NodeStats* out);
 
 // C5 node identity (READ 0x43 id, READ 0x44 / WRITE 0x75 name), behind feature flag 0x0080.
 constexpr uint8_t READ_RHFEAT_FLAGS = 0x11;
@@ -82,6 +102,8 @@ struct LinkCounters {
 
 enum class NodeStatus { Closed, Syncing, Running, Lost };
 const char* nodeStatusName(NodeStatus s);
+// esp_reset_reason_t in words ("power on", "USB", "crash", "brownout", ...).
+const char* resetReasonName(int reason);
 
 struct Reply {
     std::vector<uint8_t> data;
@@ -122,6 +144,7 @@ public:
     const LinkCounters& counters() const { return counters_; }
     double sweepsPerSecond() const { return sweepsPerSecond_; }
     int64_t minRttUs() const { return minRttUs_; }
+    const NodeStats& nodeStats() const { return nodeStats_; }
     void markLost(const std::string& why);
 
     // Exposed for tests and the console.
@@ -165,6 +188,7 @@ private:
     int64_t minRttUs_ = 0;
     std::deque<int64_t> sweepTimes_;
     double sweepsPerSecond_ = 0;
+    NodeStats nodeStats_;
 };
 
 }  // namespace relay

@@ -46,6 +46,9 @@ public:
     bool hasIdentity = true;
     std::vector<uint8_t> nodeId = {0x3c, 0x84, 0x27, 0x0a, 0x1b, 0x2c};
     std::string nodeName = "Start gate";
+    // Health (1.2.0-c5.15, READ 0x45): its uptime, which a restart starts again.
+    bool hasStats = false;
+    uint32_t uptimeS = 3600;
 
     bool wide() const { return relay::hasWideRssi(api, proc); }
 
@@ -223,7 +226,7 @@ private:
         case 0x11:  // feature flags: C5 detection and calibration
             if (!c5)
                 return;
-            d = {0x00, (uint8_t)(hasIdentity ? 0xE0 : 0x60)};
+            d = {(uint8_t)(hasStats ? 0x01 : 0x00), (uint8_t)(hasIdentity ? 0xE0 : 0x60)};
             break;
         case 0x41:  // C5 detection v3, 86 bytes
             if (!c5)
@@ -249,6 +252,18 @@ private:
                 return;
             d.assign(32, 0);
             memcpy(d.data(), nodeName.data(), std::min<size_t>(nodeName.size(), 32));
+            break;
+        case 0x45:
+            if (!c5 || !hasStats)
+                return;
+            d.assign(relay::NODE_STATS_SIZE, 0);
+            d[0] = 1;
+            d[1] = 1;  // power on
+            d[2] = relay::NODE_STATS_UART_LINK;
+            d[4] = (uint8_t)(uptimeS >> 24);
+            d[5] = (uint8_t)(uptimeS >> 16);
+            d[6] = (uint8_t)(uptimeS >> 8);
+            d[7] = (uint8_t)uptimeS;
             break;
         default: return;  // the node ignores what it does not know
         }

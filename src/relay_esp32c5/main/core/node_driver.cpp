@@ -124,6 +124,7 @@ bool NodeDriver::start(std::string* error)
     const bool haveFw = read(READ_FW_VERSION, FW_TEXT_BLOCK_SIZE, 2, &firmware);
     const bool haveProc = read(READ_FW_PROCTYPE, FW_TEXT_BLOCK_SIZE, 2, &proc);
     info_ = NodeInfo();
+    nodeStats_ = NodeStats();  // a restarted node's uptime starts again
     info_.apiLevel = apiLevel;
     info_.seats = seats;
     info_.firmware = haveFw ? fwText(firmware.data.data(), firmware.data.size()) : "";
@@ -132,8 +133,9 @@ bool NodeDriver::start(std::string* error)
     // A C5 node says who it is (firmware 1.2.0-c5.13 on): the node is the timer.
     if (info_.procType == "ESP32C5") {
         Reply features, id, name;
-        if (read(READ_RHFEAT_FLAGS, 2, 2, &features) && (((features.data[0] << 8) | features.data[1]) & RHFEAT_C5_NODE_ID) &&
-            read(READ_NODE_ID, 6, MAX_RETRIES, &id)) {
+        const int flags = read(READ_RHFEAT_FLAGS, 2, 2, &features) ? ((features.data[0] << 8) | features.data[1]) : 0;
+        info_.hasStats = (flags & RHFEAT_C5_NODE_STATS) != 0;
+        if ((flags & RHFEAT_C5_NODE_ID) && read(READ_NODE_ID, 6, MAX_RETRIES, &id)) {
             static const char* digits = "0123456789abcdef";
             for (uint8_t b : id.data) {
                 info_.nodeId += digits[b >> 4];
@@ -314,6 +316,52 @@ bool NodeDriver::setThresholds(int seat, int enter, int exit)
 // ---------------------------------------------------------------------------
 // Sweep
 
+const char* resetReasonName(int reason)
+{
+    // esp_reset_reason_t, the same on the relay and the C5 node.
+    switch (reason) {
+    case 1: return "power on";
+    case 2: return "reset pin";
+    case 3: return "restart";
+    case 4: return "crash";
+    case 5: return "interrupt watchdog";
+    case 6: return "task watchdog";
+    case 7: return "watchdog";
+    case 8: return "deep sleep";
+    case 9: return "brownout";
+    case 10: return "SDIO";
+    case 11: return "USB";
+    case 12: return "JTAG";
+    default: return "unknown";
+    }
+}
+
+bool parseNodeStats(const uint8_t* d, size_t n, NodeStats* out)
+{
+    if (n < NODE_STATS_SIZE || d[0] != 1)
+        return false;
+    auto u32 = [d](int at) {
+        return ((uint32_t)d[at] << 24) | ((uint32_t)d[at + 1] << 16) | ((uint32_t)d[at + 2] << 8) | d[at + 3];
+    };
+    out->valid = true;
+    out->resetReason = d[1];
+    out->flags = d[2];
+    out->uptimeS = u32(4);
+    out->heap = u32(8);
+    out->heapMin = u32(12);
+    out->cycles = u32(16);
+    out->captures = u32(20);
+    out->failed = u32(24);
+    out->held = u32(28);
+    out->clipped = u32(32);
+    out->maxCycleUs = u32(36);
+    out->uartCommands = u32(40);
+    out->uartBadChecksums = u32(44);
+    out->uartNoise = u32(48);
+    out->usbCommands = u32(52);
+    return true;
+}
+
 bool NodeDriver::poll()
 {
     if (status_ != NodeStatus::Running || seats_.empty())
@@ -343,6 +391,25 @@ bool NodeDriver::poll()
         sweepsPerSecond_ = sweepTimes_.size() > 1
                                ? (double)(sweepTimes_.size() - 1) * 1e6 / (double)(now - sweepTimes_.front())
                                : 0;
+    }
+    if (info_.hasStats && (!nodeStats_.valid || link_.nowUs() - nodeStats_.readAtUs >= NODE_STATS_EVERY_US)) {
+        // Between seats, once in a while: one short read.
+        Reply reply;
+        NodeStats stats;
+        if (read(READ_NODE_STATS, NODE_STATS_SIZE, 1, &reply) && parseNodeStats(reply.data.data(), reply.data.size(), &stats)) {
+            stats.readAtUs = link_.nowUs();
+            // Its uptime went back: it restarted (a reflash, a brownout) and
+            // forgot the frequencies and levels it was given. Too quick for
+            // the reads to fail, so say so: reconnecting sets them again.
+            const bool restarted = nodeStats_.valid && stats.uptimeS < nodeStats_.uptimeS;
+            nodeStats_ = stats;
+            if (restarted) {
+                markLost("The node restarted; setting it up again.");
+                return true;
+            }
+        } else {
+            nodeStats_.readAtUs = link_.nowUs();  // try again next time, not every seat
+        }
     }
     const bool ok = readSeat(seat);
     failures_ = ok ? 0 : failures_ + 1;

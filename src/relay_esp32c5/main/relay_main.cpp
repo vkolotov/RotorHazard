@@ -479,25 +479,6 @@ static void printStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer&
     }
 }
 
-static const char* resetReasonName(int reason)
-{
-    switch (reason) {
-    case ESP_RST_POWERON: return "power on";
-    case ESP_RST_EXT: return "reset pin";
-    case ESP_RST_SW: return "restart";
-    case ESP_RST_PANIC: return "crash";
-    case ESP_RST_INT_WDT: return "interrupt watchdog";
-    case ESP_RST_TASK_WDT: return "task watchdog";
-    case ESP_RST_WDT: return "watchdog";
-    case ESP_RST_DEEPSLEEP: return "deep sleep";
-    case ESP_RST_BROWNOUT: return "brownout";
-    case ESP_RST_SDIO: return "SDIO";
-    case ESP_RST_USB: return "USB";
-    case ESP_RST_JTAG: return "JTAG";
-    default: return "unknown";
-    }
-}
-
 // Uptime, memory and why it last started: the setup page and mach1's heartbeat.
 static void addSystemInfo(cJSON* sys)
 {

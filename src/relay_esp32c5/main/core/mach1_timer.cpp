@@ -347,6 +347,31 @@ std::string Mach1Timer::status() const
         cJSON_AddNumberToObject(link, "checksum", (double)c.checksumErrors);
         cJSON_AddNumberToObject(link, "sweeps", driver_->sweepsPerSecond());
         cJSON_AddNumberToObject(link, "rtt_ms", driver_->minRttUs() / 1000.0);
+        // The node's own health (C5 1.2.0-c5.15 on), as last read.
+        const NodeStats& n = driver_->nodeStats();
+        if (n.valid) {
+            cJSON* node = cJSON_AddObjectToObject(system, "node");
+            cJSON_AddNumberToObject(node, "age_s", (double)((now_ * 1000 - n.readAtUs) / 1000000));
+            cJSON_AddNumberToObject(node, "uptime_s", n.uptimeS);
+            cJSON_AddStringToObject(node, "reset", resetReasonName(n.resetReason));
+            cJSON_AddNumberToObject(node, "reset_reason", n.resetReason);
+            cJSON_AddNumberToObject(node, "heap", n.heap);
+            cJSON_AddNumberToObject(node, "heap_min", n.heapMin);
+            cJSON_AddBoolToObject(node, "usb_host", (n.flags & NODE_STATS_USB_HOST) != 0);
+            cJSON_AddBoolToObject(node, "uart_link", (n.flags & NODE_STATS_UART_LINK) != 0);
+            cJSON* scan = cJSON_AddObjectToObject(node, "scan");
+            cJSON_AddNumberToObject(scan, "cycles", n.cycles);
+            cJSON_AddNumberToObject(scan, "captures", n.captures);
+            cJSON_AddNumberToObject(scan, "failed", n.failed);
+            cJSON_AddNumberToObject(scan, "held", n.held);
+            cJSON_AddNumberToObject(scan, "clipped", n.clipped);
+            cJSON_AddNumberToObject(scan, "max_cycle_us", n.maxCycleUs);
+            cJSON* links = cJSON_AddObjectToObject(node, "links");
+            cJSON_AddNumberToObject(links, "uart_commands", n.uartCommands);
+            cJSON_AddNumberToObject(links, "uart_bad_checksums", n.uartBadChecksums);
+            cJSON_AddNumberToObject(links, "uart_noise", n.uartNoise);
+            cJSON_AddNumberToObject(links, "usb_commands", n.usbCommands);
+        }
     }
     std::string out = print(m);
     cJSON_Delete(m);
