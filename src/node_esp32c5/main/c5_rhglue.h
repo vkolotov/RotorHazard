@@ -31,6 +31,28 @@ constexpr uint8_t kNodeIdSize = 6;
 constexpr uint8_t kReadNodeName = 0x44;
 constexpr uint8_t kWriteNodeName = 0x75;
 constexpr uint8_t kNodeNameSize = 32;
+// The node's health (read 0x45, kNodeStatsSize bytes, behind feature flag
+// 0x0100), for mission control's timer statistics. Big-endian:
+//   0 version (1), 1 reset reason (esp_reset_reason_t), 2 flags (1 USB host
+//   connected, 2 UART link on), 3 reserved,
+//   4 uptime s, 8 free heap, 12 lowest free heap,
+//   16 scan cycles, 20 captures, 24 failed, 28 held, 32 clipped captures,
+//   36 longest cycle us,
+//   40 UART link commands, 44 its bad checksums, 48 its noise (a stray '!'
+//   recovered), 52 USB link commands (all u32).
+// Counters run from boot (the console's `stats` clears the scan ones).
+constexpr uint8_t kReadNodeStats = 0x45;
+constexpr uint8_t kNodeStatsVersion = 1;
+constexpr uint8_t kNodeStatsSize = 56;
+constexpr uint8_t kNodeStatsUsbHost = 1;
+constexpr uint8_t kNodeStatsUartLink = 2;
+
+// What the firmware knows of itself that the glue cannot: filled on each read.
+struct NodeSystem {
+    uint32_t uptimeS = 0, heap = 0, heapMin = 0;
+    uint8_t resetReason = 0, flags = 0;
+};
+
 constexpr uint8_t kDetectionConfigVersion = 3;
 constexpr uint8_t kDetectionConfigWriteSize = 3;  // version, minimum pass ms BE16
 constexpr uint8_t kDetectionConfigReadSize = 86;   // 14 + 12 curve points x 6; see writeDetectionConfig
@@ -77,6 +99,8 @@ public:
     void setConsole(ConsoleHandler h) { console_ = h; }
     uint32_t commands() const { return commands_; }
     uint32_t badChecksums() const { return badChecksums_; }
+    // A '!' that turned out to be noise (not a console line): recovered from.
+    uint32_t noise() const { return noise_; }
 
 private:
     Transport& out_;
@@ -87,10 +111,15 @@ private:
     bool inConsole_ = false;
     char line_[96];
     size_t lineLen_ = 0;
-    uint32_t commands_ = 0, badChecksums_ = 0;
+    uint32_t commands_ = 0, badChecksums_ = 0, noise_ = 0;
 
     void byte(uint8_t b);
 };
+
+// READ 0x45: the firmware's part (uptime, heap, reset reason, flags), and
+// the links whose counters it reports (either may be null).
+void rhSetSystemInfo(void (*fill)(NodeSystem* out));
+void rhSetStatsLinks(const RhLink* usb, const RhLink* uart);
 
 // Where a successful calibration write is saved (the firmware's flash).
 void rhSetCalibrationStore(void (*store)());

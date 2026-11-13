@@ -13,7 +13,7 @@
 #include "commands.h"
 
 #ifndef RHNODE_C5_VERSION
-#define RHNODE_C5_VERSION "1.2.0-c5.14-console-guard"
+#define RHNODE_C5_VERSION "1.2.0-c5.15"
 #endif
 
 // informational strings read by RH (prefixes let them be found in the .bin)
@@ -113,6 +113,58 @@ static void applyNodeName(const uint8_t* d)
     rhSetNodeName(name);
     if (g_nameStore)
         g_nameStore(g_nodeName);
+}
+
+static void (*g_systemInfo)(NodeSystem*) = nullptr;
+static const RhLink* g_statsUsb = nullptr;
+static const RhLink* g_statsUart = nullptr;
+
+void rhSetSystemInfo(void (*fill)(NodeSystem* out)) { g_systemInfo = fill; }
+void rhSetStatsLinks(const RhLink* usb, const RhLink* uart)
+{
+    g_statsUsb = usb;
+    g_statsUart = uart;
+}
+
+static void put32(uint8_t* d, uint32_t v)
+{
+    d[0] = (uint8_t)(v >> 24);
+    d[1] = (uint8_t)(v >> 16);
+    d[2] = (uint8_t)(v >> 8);
+    d[3] = (uint8_t)v;
+}
+
+static void writeNodeStats(Transport& out)
+{
+    uint8_t d[kNodeStatsSize + 1] = {};
+    NodeSystem sys;
+    if (g_systemInfo)
+        g_systemInfo(&sys);
+    d[0] = kNodeStatsVersion;
+    d[1] = sys.resetReason;
+    d[2] = sys.flags;
+    put32(d + 4, sys.uptimeS);
+    put32(d + 8, sys.heap);
+    put32(d + 12, sys.heapMin);
+    if (g_scanner) {
+        const ScanStats& s = g_scanner->stats();
+        put32(d + 16, s.cycles);
+        put32(d + 20, s.captures);
+        put32(d + 24, s.failed);
+        put32(d + 28, s.held);
+        put32(d + 32, s.clippedCaptures);
+        put32(d + 36, s.maxCycleUs);
+    }
+    if (g_statsUart) {
+        put32(d + 40, g_statsUart->commands());
+        put32(d + 44, g_statsUart->badChecksums());
+        put32(d + 48, g_statsUart->noise());
+    }
+    if (g_statsUsb)
+        put32(d + 52, g_statsUsb->commands());
+    for (int i = 0; i < kNodeStatsSize; ++i)
+        d[kNodeStatsSize] += d[i];
+    out.write(d, sizeof(d));
 }
 
 static void writeNodeId(Transport& out)
@@ -416,6 +468,7 @@ void RhLink::byte(uint8_t b)
             // node went silent until it was power-cycled.
             inConsole_ = false;
             lineLen_ = 0;
+            ++noise_;
             byte(b);
         } else if (lineLen_ + 1 < sizeof(line_)) {
             line_[lineLen_++] = (char)b;
@@ -445,6 +498,12 @@ void RhLink::byte(uint8_t b)
         }
         if (cmd_ == kReadNodeName) {
             writeNodeName(out_);
+            ++commands_;
+            rhAfterCommands();
+            return;
+        }
+        if (cmd_ == kReadNodeStats) {
+            writeNodeStats(out_);
             ++commands_;
             rhAfterCommands();
             return;

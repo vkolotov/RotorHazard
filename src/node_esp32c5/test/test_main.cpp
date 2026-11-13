@@ -317,7 +317,33 @@ static void testRhProtocol()
           "revision %02x%02x", d.size() > 1 ? d[0] : 0, d.size() > 1 ? d[1] : 0);
     CHECK(readCmd(link, out, READ_MULTINODE_COUNT, 1, &d) && d[0] == 8, "multinode");
     CHECK(readCmd(link, out, READ_RHFEAT_FLAGS, 2, &d) &&
-          be16(d, 0) == (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID), "features");
+          be16(d, 0) == (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID | RHFEAT_C5_NODE_STATS),
+          "features");
+    // Its health (0x45): the firmware's part, the scanner's and the links' counters.
+    rhSetSystemInfo([](c5::NodeSystem* sys) {
+        sys->uptimeS = 3723;
+        sys->heap = 150000;
+        sys->heapMin = 120000;
+        sys->resetReason = 11;
+        sys->flags = c5::kNodeStatsUartLink;
+    });
+    {
+        CaptureOut uartOut;
+        RhLink uart(uartOut);
+        rhSetStatsLinks(&link, &uart);
+        const uint8_t noisy[] = {'!', 0x05, READ_MULTINODE_COUNT};   // a stray '!', then RH's next command
+        uart.feed(noisy, sizeof(noisy));
+        CHECK(uart.noise() == 1, "noise counted %u", (unsigned)uart.noise());
+        const uint32_t before = link.commands();
+        CHECK(readCmd(link, out, c5::kReadNodeStats, c5::kNodeStatsSize, &d), "stats read");
+        auto u32 = [&](int at) { return ((uint32_t)d[at] << 24) | ((uint32_t)d[at + 1] << 16) | ((uint32_t)d[at + 2] << 8) | d[at + 3]; };
+        CHECK(d[0] == c5::kNodeStatsVersion && d[1] == 11 && d[2] == c5::kNodeStatsUartLink, "stats header");
+        CHECK(u32(4) == 3723 && u32(8) == 150000 && u32(12) == 120000, "stats system");
+        CHECK(u32(40) == 2 && u32(44) == 0 && u32(48) == 1, "stats uart link %u %u %u", u32(40), u32(44), u32(48));
+        CHECK(u32(52) == before, "stats usb link %u", u32(52));
+        rhSetStatsLinks(nullptr, nullptr);
+        rhSetSystemInfo(nullptr);
+    }
     // The node's identity: whatever it was given (the factory MAC on the C5).
     const uint8_t id[6] = {0x3c, 0x84, 0x27, 0x0a, 0x1b, 0x2c};
     rhSetNodeId(id);

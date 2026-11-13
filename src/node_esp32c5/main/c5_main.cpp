@@ -892,6 +892,15 @@ extern "C" void app_main(void)
     rhSetNodeId(mac);
     rhSetNodeName(loadNodeName(mac).c_str());
     rhSetNameStore(saveNodeName);
+    // Health for mission control (READ 0x45).
+    rhSetStatsLinks(&g_usbLink, g_uartLinkOn ? &g_uartLink : nullptr);
+    rhSetSystemInfo([](NodeSystem* s) {
+        s->uptimeS = (uint32_t)(esp_timer_get_time() / 1000000);
+        s->heap = esp_get_free_heap_size();
+        s->heapMin = esp_get_minimum_free_heap_size();
+        s->resetReason = (uint8_t)esp_reset_reason();
+        s->flags = (usb_serial_jtag_is_connected() ? kNodeStatsUsbHost : 0) | (g_uartLinkOn ? kNodeStatsUartLink : 0);
+    });
     for (int capacity = 1024; capacity >= 128; capacity /= 2) {
         if (esp_get_free_heap_size() < sizeof(Observation) * capacity + 16384) continue;
         g_record = (Observation*)malloc(sizeof(Observation) * capacity);
