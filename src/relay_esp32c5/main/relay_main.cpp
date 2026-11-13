@@ -498,6 +498,18 @@ static const char* resetReasonName(int reason)
     }
 }
 
+// Uptime, memory and why it last started: the setup page and mach1's heartbeat.
+static void addSystemInfo(cJSON* sys)
+{
+    cJSON_AddNumberToObject(sys, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    cJSON_AddNumberToObject(sys, "heap", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(sys, "heap_min", (double)esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(sys, "heap_block", (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(sys, "reset_reason", g_resetReason);
+    cJSON_AddStringToObject(sys, "reset", g_lastBootStall ? "main loop stalled" : resetReasonName(g_resetReason));
+    cJSON_AddNumberToObject(sys, "rssi", networkRssi());
+}
+
 // The timer task stopped beating: abort, so the core dump shows where it was.
 static void watchLoop(void*)
 {
@@ -519,13 +531,7 @@ static void publishStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Time
     cJSON_AddStringToObject(m, "version", RELAY_VERSION);
     cJSON_AddStringToObject(m, "uid", ctx.uid.c_str());
     cJSON_AddStringToObject(m, "name", ctx.settings.name.c_str());
-    cJSON* sys = cJSON_AddObjectToObject(m, "system");
-    cJSON_AddNumberToObject(sys, "uptime_s", (double)(now / 1000));
-    cJSON_AddNumberToObject(sys, "heap", (double)esp_get_free_heap_size());
-    cJSON_AddNumberToObject(sys, "heap_min", (double)esp_get_minimum_free_heap_size());
-    cJSON_AddNumberToObject(sys, "heap_block", (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    cJSON_AddNumberToObject(sys, "reset_reason", g_resetReason);
-    cJSON_AddStringToObject(sys, "reset", g_lastBootStall ? "main loop stalled" : resetReasonName(g_resetReason));
+    addSystemInfo(cJSON_AddObjectToObject(m, "system"));
     cJSON* wifi = cJSON_AddObjectToObject(m, "wifi");
     cJSON_AddBoolToObject(wifi, "up", networkUp());
     cJSON_AddStringToObject(wifi, "ip", networkIp().c_str());
@@ -701,6 +707,7 @@ static void timerTask(void* arg)
         }
     };
     timer.send = [](const std::string& text) { queueOut('M', text); };
+    timer.systemInfo = addSystemInfo;
     timer.reconnect = [] {
         if (g_linkRoute.load()) {
             // Through the page: it reopens its socket; Wi-Fi meanwhile.

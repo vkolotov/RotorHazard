@@ -41,7 +41,7 @@ struct cJSON;
 
 namespace relay {
 
-constexpr const char* RELAY_VERSION = "0.2.2";
+constexpr const char* RELAY_VERSION = "0.2.3";
 // The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
 #ifndef RELAY_BOARD
 #define RELAY_BOARD "c5"
@@ -104,6 +104,9 @@ public:
     // Keep a setting across reboots (NVS on the relay): "c5det" (hex), "c5in"
     // (JSON), "name", "nodeid" (hex), "minlap", "ignorems", "namepend" (decimal).
     std::function<void(const std::string& key, const std::string& value)> saveSetting;
+    // The relay's health for the status heartbeat's "system" (uptime, heap,
+    // reset reason, Wi-Fi signal), added to the object it is given.
+    std::function<void(cJSON* system)> systemInfo;
 
     // Loaded at boot from the saved settings.
     // The last C5 detection write (WRITE 0x73 payload), written again on every (re)connect.

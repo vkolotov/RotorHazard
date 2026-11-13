@@ -48,6 +48,14 @@ bool networkUp() { return g_haveIp; }
 bool hotspotOn() { return g_apOn; }
 std::string hotspotSsid() { return g_apSsid; }
 
+int networkRssi()
+{
+    wifi_ap_record_t ap;
+    if (!g_haveIp || esp_wifi_sta_get_ap_info(&ap) != ESP_OK)
+        return 0;
+    return ap.rssi;
+}
+
 std::string networkIp()
 {
     esp_netif_ip_info_t ip;

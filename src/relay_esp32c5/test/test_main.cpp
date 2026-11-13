@@ -677,6 +677,16 @@ static void timerTests()
         r.run(25000);
         CHECK(r.reconnects >= 1);
     });
+    test("timer: the heartbeat carries the relay's health and its node link", [] {
+        Rig r;
+        r.timer.systemInfo = [](cJSON* sys) { cJSON_AddNumberToObject(sys, "uptime_s", 42); };
+        r.up();
+        r.run(10100);
+        cJSON* sys = cJSON_GetObjectItem(cJSON_GetObjectItem(r.last("status"), "state"), "system");
+        CHECK(num(sys, "uptime_s") == 42);
+        cJSON* link = cJSON_GetObjectItem(sys, "link");
+        CHECK(str(link, "status") == "running" && num(link, "reads") > 0);
+    });
     test("timer: levels resolve as gate.py: own, node default, any-node own, any-node default", [] {
         Rig r;
         r.command(R"({"type":"gate_config","levels":[

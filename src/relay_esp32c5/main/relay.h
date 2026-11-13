@@ -33,6 +33,7 @@ bool networkUp();       // joined the configured network, with an address
 std::string networkIp();  // that address, "" without one
 bool hotspotOn();
 std::string hotspotSsid();
+int networkRssi();        // the joined access point's signal (dBm), 0 when not joined
 
 // The local link: pages on the same network open a WebSocket at /link on the
 // web server and speak what the USB link speaks (core/usb_link.h). Text

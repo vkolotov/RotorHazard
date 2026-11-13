@@ -334,6 +334,20 @@ std::string Mach1Timer::status() const
     else
         cJSON_AddNullToObject(state, "started_epoch_ms");
     cJSON_AddNumberToObject(state, "pending", (double)pending_.size());
+    // Health for mission control's timer details: the relay's, and its node link's.
+    cJSON* system = cJSON_AddObjectToObject(state, "system");
+    if (systemInfo)
+        systemInfo(system);
+    if (driver_) {
+        const LinkCounters& c = driver_->counters();
+        cJSON* link = cJSON_AddObjectToObject(system, "link");
+        cJSON_AddStringToObject(link, "status", nodeStatusName(driver_->status()));
+        cJSON_AddNumberToObject(link, "reads", (double)c.reads);
+        cJSON_AddNumberToObject(link, "timeouts", (double)c.timeouts);
+        cJSON_AddNumberToObject(link, "checksum", (double)c.checksumErrors);
+        cJSON_AddNumberToObject(link, "sweeps", driver_->sweepsPerSecond());
+        cJSON_AddNumberToObject(link, "rtt_ms", driver_->minRttUs() / 1000.0);
+    }
     std::string out = print(m);
     cJSON_Delete(m);
     return out;
