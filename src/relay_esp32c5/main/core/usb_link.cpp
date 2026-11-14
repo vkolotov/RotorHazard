@@ -103,6 +103,12 @@ void UsbLink::tick(int64_t now, bool usbConnected, bool wifiConnected)
         up_ = false;
         note(label + (usbConnected ? ": mission control went quiet" : ": the page is gone (unplugged or closed)"));
     }
+    // Ask for a sign of life; a page answers from its message handler, which
+    // a background tab still runs on time (its timers it does not).
+    if (alive_ && now - pinged_ >= USB_LINK_PING_MS && toHost) {
+        pinged_ = now;
+        toHost("{\"type\":\"link_ping\"}");
+    }
     // Without `prefer`, the link only stands in while Wi-Fi is down.
     update(now, wifiConnected, false);
 }

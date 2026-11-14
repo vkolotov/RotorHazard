@@ -14,7 +14,10 @@
 //                  link_open {time_ms} (every 2 s; also the page's clock),
 //                  link_up {prefer}, link_cloud {message}, link_down
 //   relay -> page: link_info {uid, name, cloud, via_link, ...},
-//                  link_send {message}, link_reconnect (mach1 went quiet)
+//                  link_send {message}, link_reconnect (mach1 went quiet),
+//                  link_ping (every 2 s while the page is on the link: a page
+//                  answers it with link_open at once, so a background tab,
+//                  whose timers the browser throttles, still counts as there)
 //
 // With `prefer` (the page always asks: a cable beats Wi-Fi) the link carries
 // everything even while the relay has Wi-Fi. While it does, the relay's own
@@ -32,6 +35,7 @@ namespace relay {
 
 // The page sends link_open every 2 s; this long without a line from it, it is gone.
 constexpr int64_t USB_LINK_TIMEOUT_MS = 6000;
+constexpr int64_t USB_LINK_PING_MS = 2000;
 // Watched readings while the link carries them (a local cable, not the internet).
 constexpr int64_t USB_WATCH_FRAME_MS = 100;
 
@@ -81,6 +85,7 @@ private:
     bool prefer_ = false;
     bool via_ = false;     // mach1's messages go through the page
     int64_t seen_ = 0;
+    int64_t pinged_ = 0;
 };
 
 }  // namespace relay

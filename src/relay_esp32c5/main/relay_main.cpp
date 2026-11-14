@@ -385,6 +385,10 @@ static void startSocket(const std::string& url)
     config.buffer_size = 4096;
     config.reconnect_timeout_ms = 3000;
     config.network_timeout_ms = 10000;
+    // Reconnect after mach1 closes the socket too (a restart, or another path
+    // to this timer replacing it). Without it the client's task ended and the
+    // relay stayed off mach1 until something restarted it.
+    config.enable_close_reconnect = true;
     config.task_stack = 6144;
     g_ws = esp_websocket_client_init(&config);
     esp_websocket_register_events(g_ws, WEBSOCKET_EVENT_ANY, wsEvent, nullptr);
@@ -750,6 +754,22 @@ static void timerTask(void* arg)
     int64_t networkSince = -1;  // when Wi-Fi last came up; -1 while down
     for (;;) {
         g_loopBeat.store(esp_timer_get_time() / 1000);
+        {
+            // On its own Wi-Fi but not connected for 30 s: make sure the
+            // client runs (start() refuses, harmlessly, if it already does).
+            static int64_t wsDownSince = -1;
+            const int64_t t = esp_timer_get_time() / 1000;
+            const bool wanted = g_ws && networkUp() && !g_linkRoute.load() && g_serialMode.load() == SerialOff;
+            if (!wanted || esp_websocket_client_is_connected(g_ws)) {
+                wsDownSince = -1;
+            } else if (wsDownSince < 0) {
+                wsDownSince = t;
+            } else if (t - wsDownSince > 30000) {
+                wsDownSince = t;
+                if (esp_websocket_client_start(g_ws) == ESP_OK)
+                    addLog("mach1: the connection had stopped; started it again");
+            }
+        }
         {
             const int64_t nowMs = esp_timer_get_time() / 1000;
             if (!networkUp())

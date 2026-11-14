@@ -1,5 +1,6 @@
 // Host tests for the relay's portable core: race engine, node driver (against
 // a fake node on a virtual clock), and the mach1 timer protocol.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -977,6 +978,32 @@ static void usbLinkTests()
         r.clearSent();
         r.line(R"({"type":"link_up","prefer":true})");
         CHECK(r.ofType("hello").size() == 1);
+    });
+    test("usb link: a page on the link is pinged every 2 s; answering keeps it, as a background tab does", [] {
+        LinkRig r;
+        r.up();
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up","prefer":true})");
+        r.toHost.clear();
+        auto pings = [&] { return std::count(r.toHost.begin(), r.toHost.end(), std::string(R"({"type":"link_ping"})")); };
+        // Its own timers throttled: it only answers pings, for a minute.
+        for (int i = 0; i < 60; i++) {
+            r.run(1000);
+            const auto before = pings();
+            r.link.tick(r.now(), true, true);
+            if (pings() > before)
+                r.line(R"({"type":"link_open"})");
+        }
+        CHECK(r.link.viaLink() && r.link.alive());
+        CHECK(pings() >= 29 && pings() <= 31);
+        // Not answering: quiet after the timeout, and no more pings.
+        r.run(USB_LINK_TIMEOUT_MS + 100);
+        r.link.tick(r.now(), true, true);
+        CHECK(!r.link.viaLink() && !r.link.alive());
+        const auto after = pings();
+        r.run(5000);
+        r.link.tick(r.now(), true, true);
+        CHECK(pings() == after);
     });
     test("usb link: without prefer the page stands in only while Wi-Fi is down", [] {
         LinkRig r;
