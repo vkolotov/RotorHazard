@@ -256,6 +256,15 @@ static esp_err_t getStatus(httpd_req_t* req)
     return httpd_resp_send(req, json.data(), (ssize_t)json.size());
 }
 
+// The log ring (relay_main): what the relay and its mach1 connection did lately.
+static esp_err_t getLog(httpd_req_t* req)
+{
+    const std::string text = diagText();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, text.data(), (ssize_t)text.size());
+}
+
 static std::string message(const std::string& title, const std::string& text)
 {
     return std::string(PAGE_HEAD) + "<h2>" + htmlEscape(title) + "</h2><p>" + text +
@@ -445,6 +454,7 @@ static void startHttp()
     const httpd_uri_t uris[] = {
         uri("/", HTTP_GET, getRoot),
         uri("/status.json", HTTP_GET, getStatus),
+        uri("/log.txt", HTTP_GET, getLog),
         uri("/settings", HTTP_POST, postSettings),
         uri("/link", HTTP_GET, wsLink, true),
         uri("/*", HTTP_GET, getOther),

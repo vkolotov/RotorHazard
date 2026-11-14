@@ -25,6 +25,10 @@ bool saveSettings(const Settings& s);
 // The status the web page shows, as JSON: the timer task refreshes it.
 void setStatusJson(const std::string& json);
 std::string statusJson();
+// The last log lines (ESP-IDF's, the websocket client's and the relay's own
+// connection events), oldest first, for /log.txt: evidence without the USB
+// console, whose opening resets the board.
+std::string diagText();
 
 // network.cpp: Wi-Fi (station, and the setup hotspot ELRS-style), the wall
 // clock, the setup page.

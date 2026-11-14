@@ -293,6 +293,26 @@ static std::string g_frame;  // a text message arriving in pieces
 static void wsEvent(void*, esp_event_base_t, int32_t id, void* data)
 {
     auto* d = (esp_websocket_event_data_t*)data;
+    // Every connection event, with its errors, into the log ring (/log.txt).
+    const char* name = nullptr;
+    switch (id) {
+    case WEBSOCKET_EVENT_ERROR: name = "error"; break;
+    case WEBSOCKET_EVENT_CONNECTED: name = "connected"; break;
+    case WEBSOCKET_EVENT_DISCONNECTED: name = "disconnected"; break;
+    case WEBSOCKET_EVENT_CLOSED: name = "closed"; break;
+    case WEBSOCKET_EVENT_BEFORE_CONNECT: name = "before_connect"; break;
+    case WEBSOCKET_EVENT_BEGIN: name = "begin"; break;
+    case WEBSOCKET_EVENT_FINISH: name = "finish"; break;
+    default: break;
+    }
+    if (name) {
+        const esp_websocket_error_codes_t& e = d->error_handle;
+        ESP_LOGW("relay-ws", "event %s: error_type %d tls_err 0x%x tls_stack 0x%x handshake %d sock_errno %d close %d", name,
+                 (int)e.error_type, (unsigned)e.esp_tls_last_esp_err, (unsigned)e.esp_tls_stack_err,
+                 e.esp_ws_handshake_status_code, e.esp_transport_sock_errno, d->close_status_code);
+    } else if (id == WEBSOCKET_EVENT_DATA && d->op_code == 0x08) {
+        ESP_LOGW("relay-ws", "close frame from mach1, %d bytes", d->data_len);
+    }
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
         g_wsConnected = true;
@@ -781,6 +801,12 @@ static void timerTask(void* arg)
             const int64_t quietMs = networkSince < 0 ? 0 : nowMs - std::max(networkSince, timer.lastHeardMs());
             if (!ctx->socketUrl.empty() && idle && quietMs > MACH1_SILENT_RESTART_MS) {
                 addLog("mach1 unreachable for " + std::to_string(quietMs / 1000) + " s with Wi-Fi up; restarting");
+                // Keep the evidence: the log's last lines survive the restart.
+                const std::string all = diagText();
+                size_t from = all.size();
+                for (int n = 0; n < 25 && from > 0; n++)
+                    from = all.rfind('\n', from - 2) == std::string::npos ? 0 : all.rfind('\n', from - 2) + 1;
+                saveString("lastdiag", all.substr(from, 3800));
                 g_stallMagic = SILENT_MAGIC;
                 g_stallMs = (uint32_t)quietMs;
                 vTaskDelay(pdMS_TO_TICKS(200));
@@ -1008,9 +1034,67 @@ static const esp_console_cmd_t kCommands[] = {
     {.command = "reboot", .help = "Restart (applies saved settings)", .hint = nullptr, .func = cmdReboot, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
 };
 
-// Logs must not reach the USB host while it speaks the node protocol.
+// The log ring behind /log.txt: every log line, whatever the USB console does.
+constexpr int DIAG_LINES = 80;
+constexpr int DIAG_WIDTH = 200;
+static char g_diag[DIAG_LINES][DIAG_WIDTH];
+static int g_diagNext = 0;
+static SemaphoreHandle_t g_diagLock;
+
+static void diagAppend(const char* text)
+{
+    if (!g_diagLock || xSemaphoreTake(g_diagLock, 0) != pdTRUE)
+        return;  // never wait in a log call
+    static bool lineOpen = false;
+    for (const char* p = text; *p; p++) {
+        if (!lineOpen) {
+            snprintf(g_diag[g_diagNext], DIAG_WIDTH, "%8lld ", (long long)(esp_timer_get_time() / 1000));
+            lineOpen = true;
+        }
+        char* line = g_diag[g_diagNext];
+        const size_t len = strlen(line);
+        if (*p == '\n') {
+            g_diagNext = (g_diagNext + 1) % DIAG_LINES;
+            lineOpen = false;
+        } else if (*p != '\r' && *p != 0x1b && len + 1 < DIAG_WIDTH) {
+            line[len] = *p;
+            line[len + 1] = 0;
+        }
+    }
+    xSemaphoreGive(g_diagLock);
+}
+
+// The log's tail as it was before the last watchdog restart (NVS "lastdiag").
+static std::string g_diagBefore;
+
+std::string diagText()
+{
+    std::string out;
+    if (!g_diagLock)
+        return out;
+    if (!g_diagBefore.empty())
+        out = "--- before the last restart (mach1 unreachable) ---\n" + g_diagBefore + "--- since boot ---\n";
+    xSemaphoreTake(g_diagLock, portMAX_DELAY);
+    for (int i = 0; i < DIAG_LINES; i++) {
+        const char* line = g_diag[(g_diagNext + i) % DIAG_LINES];
+        if (*line) {
+            out += line;
+            out += '\n';
+        }
+    }
+    xSemaphoreGive(g_diagLock);
+    return out;
+}
+
+// Logs must not reach the USB host while it speaks the node protocol; the ring keeps them all.
 static int quietVprintf(const char* fmt, va_list args)
 {
+    char text[DIAG_WIDTH];
+    va_list copy;
+    va_copy(copy, args);
+    vsnprintf(text, sizeof text, fmt, copy);
+    va_end(copy);
+    diagAppend(text);
     if (g_serialMode.load() != SerialOff || (g_linkAlive.load() && g_linkVia.load() == ViaUsb))
         return 0;
     return vprintf(fmt, args);
@@ -1148,6 +1232,7 @@ static void startUsb()
     usb_serial_jtag_vfs_use_driver();
     g_usbLock = xSemaphoreCreateMutex();
     setvbuf(stdout, nullptr, _IONBF, 0);
+    g_diagLock = xSemaphoreCreateMutex();
     esp_log_set_vprintf(quietVprintf);
 
     esp_console_config_t console = ESP_CONSOLE_CONFIG_DEFAULT();
@@ -1195,6 +1280,13 @@ extern "C" void app_main(void)
 
     static TimerContext ctx;
     ctx.settings = loadSettings();
+    {
+        nvs_handle_t h;
+        if (nvs_open("relay", NVS_READONLY, &h) == ESP_OK) {
+            g_diagBefore = nvsString(h, "lastdiag", "");
+            nvs_close(h);
+        }
+    }
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char uid[32];
