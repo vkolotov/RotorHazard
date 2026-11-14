@@ -267,6 +267,11 @@ static QueueHandle_t g_events;  // -> timer task
 // local client (a probe, or a page told the relay is busy).
 static QueueHandle_t g_outbox;
 static esp_websocket_client_handle_t g_ws;
+// Every client gets a new generation; events from an older (destroyed) one
+// are ignored. The lock covers g_ws against the sender task.
+static std::atomic<int> g_wsGen{0};
+static SemaphoreHandle_t g_wsLock;
+static std::string g_wsUrl;
 // The client's task ended (mach1 closed the socket, or the relay stopped it).
 static std::atomic<bool> g_wsFinished{false};
 static volatile bool g_wsConnected;
@@ -292,9 +297,12 @@ static void postText(QueueKind kind, const char* text) { post(kind, text, text ?
 
 static std::string g_frame;  // a text message arriving in pieces
 
-static void wsEvent(void*, esp_event_base_t, int32_t id, void* data)
+static void wsEvent(void* arg, esp_event_base_t, int32_t id, void* data)
 {
     auto* d = (esp_websocket_event_data_t*)data;
+    const int gen = (int)(intptr_t)arg;
+    if (gen != g_wsGen.load())
+        return;  // a client being destroyed
     // Every connection event, with its errors, into the log ring (/log.txt).
     const char* name = nullptr;
     switch (id) {
@@ -318,13 +326,13 @@ static void wsEvent(void*, esp_event_base_t, int32_t id, void* data)
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
         g_wsConnected = true;
-        post(QueueKind::SocketOpen, nullptr, 0);
+        post(QueueKind::SocketOpen, nullptr, 0, gen);
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
         if (g_wsConnected) {
             g_wsConnected = false;
-            post(QueueKind::SocketClosed, nullptr, 0);
+            post(QueueKind::SocketClosed, nullptr, 0, gen);
         }
         break;
     case WEBSOCKET_EVENT_FINISH:
@@ -341,7 +349,7 @@ static void wsEvent(void*, esp_event_base_t, int32_t id, void* data)
                 g_frame.clear();
             g_frame.append(d->data_ptr, d->data_len);
             if (d->payload_offset + d->data_len >= d->payload_len) {
-                post(QueueKind::SocketText, g_frame.data(), g_frame.size());
+                post(QueueKind::SocketText, g_frame.data(), g_frame.size(), gen);
                 g_frame.clear();
             }
         }
@@ -393,10 +401,12 @@ static void senderTask(void*)
                 localLinkSend(g_linkFd.load(), UsbLink::wrap(text));
             else
                 usbLine(UsbLink::wrap(text));
-        } else if (g_ws && g_wsConnected && esp_websocket_client_is_connected(g_ws)) {
+        } else if (g_wsConnected && xSemaphoreTake(g_wsLock, pdMS_TO_TICKS(1000)) == pdTRUE) {
             // Dropped while mach1 is away: race messages are resent from
             // `pending` on the next connect, everything else is sent afresh.
-            esp_websocket_client_send_text(g_ws, text, strlen(text), pdMS_TO_TICKS(5000));
+            if (g_ws && esp_websocket_client_is_connected(g_ws))
+                esp_websocket_client_send_text(g_ws, text, strlen(text), pdMS_TO_TICKS(5000));
+            xSemaphoreGive(g_wsLock);
         }
         free(item);
     }
@@ -414,10 +424,31 @@ static void probeTask(void* arg)
     }
 }
 
-static void startSocket(const std::string& url)
+// A fresh client every time: one reused across stop/start ended up failing
+// every connect (esp-tls timeouts) while a plain socket to the same host:port
+// connected in ~30 ms, until the relay was rebooted. Route switches (a page
+// taking the relay over, mach1 restarting) stop and start it often.
+static void wsCloseNow()
 {
+    xSemaphoreTake(g_wsLock, portMAX_DELAY);
+    g_wsGen.fetch_add(1);
+    if (g_ws) {
+        esp_websocket_client_destroy(g_ws);  // stops its task first
+        g_ws = nullptr;
+    }
+    g_wsConnected = false;
+    g_wsFinished = false;
+    xSemaphoreGive(g_wsLock);
+}
+
+static void wsOpenNow()
+{
+    if (g_wsUrl.empty())
+        return;
+    wsCloseNow();
+    xSemaphoreTake(g_wsLock, portMAX_DELAY);
     esp_websocket_client_config_t config = {};
-    config.uri = url.c_str();
+    config.uri = g_wsUrl.c_str();
     config.crt_bundle_attach = esp_crt_bundle_attach;
     config.buffer_size = 4096;
     config.reconnect_timeout_ms = 3000;
@@ -425,12 +456,56 @@ static void startSocket(const std::string& url)
     // Not enable_close_reconnect: the client then reconnected by itself after
     // mach1 closed it, even while a page carried the relay, and the two
     // sockets replaced each other every few seconds. A close ends the
-    // client's task (WEBSOCKET_EVENT_FINISH); the timer task starts it again
-    // when the relay is on its own Wi-Fi.
+    // client's task (WEBSOCKET_EVENT_FINISH); the timer task opens a fresh
+    // one when the relay is on its own Wi-Fi.
     config.task_stack = 6144;
+    const int gen = g_wsGen.load();
     g_ws = esp_websocket_client_init(&config);
-    esp_websocket_register_events(g_ws, WEBSOCKET_EVENT_ANY, wsEvent, nullptr);
-    esp_websocket_client_start(g_ws);
+    if (g_ws) {
+        esp_websocket_register_events(g_ws, WEBSOCKET_EVENT_ANY, wsEvent, (void*)(intptr_t)gen);
+        esp_websocket_client_start(g_ws);
+    }
+    xSemaphoreGive(g_wsLock);
+}
+
+// Opening and closing run here, not in the timer task: destroying a client
+// waits for its task, up to the 10 s connect timeout, and the timer task must
+// keep polling the node through a race. The latest request wins.
+enum WsWant : int { WsNone = 0, WsOpen = 1, WsClose = 2 };
+static std::atomic<int> g_wsWant{WsNone};
+static TaskHandle_t g_wsCtl;
+
+static void wsCtlTask(void*)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        const int want = g_wsWant.exchange(WsNone);
+        if (want == WsOpen)
+            wsOpenNow();
+        else if (want == WsClose)
+            wsCloseNow();
+    }
+}
+
+static void wsRequest(int want)
+{
+    // Stop using the current client at once; its late events are ignored.
+    g_wsGen.fetch_add(1);
+    g_wsConnected = false;
+    g_wsFinished = false;
+    g_wsWant.store(want);
+    if (g_wsCtl)
+        xTaskNotifyGive(g_wsCtl);
+}
+
+static void wsOpen() { wsRequest(WsOpen); }
+static void wsClose() { wsRequest(WsClose); }
+
+static void startSocket(const std::string& url)
+{
+    xTaskCreate(wsCtlTask, "wsctl", 4096, nullptr, 4, &g_wsCtl);
+    g_wsUrl = url;
+    wsOpen();
     // The host from wss://host/...
     static std::string host;
     const size_t from = url.find("://");
@@ -700,25 +775,23 @@ static void timerTask(void* arg)
     usbLink.log = addLog;
     usbLink.routeChanged = [](bool viaLink) {
         g_linkRoute.store(viaLink);
-        if (!g_ws)
+        if (g_wsUrl.empty())
             return;
         if (viaLink) {
             // mach1 gets one connection for this timer: the page's.
-            esp_websocket_client_stop(g_ws);
-            g_wsConnected = false;
+            wsClose();
         } else if (g_serialMode.load() == SerialOff || timer.uid.rfind("c5-", 0) != 0) {
             // (In pass-through a C5 node's timer is the USB host's, so not then.)
-            esp_websocket_client_start(g_ws);
+            wsOpen();
         }
     };
     timer.identity = [ctx](const std::string& uid) {
         // Another node: reconnect to mach1 as that node's timer.
         ctx->socketUrl = socketUrl(ctx->settings.feed, uid);
-        if (g_ws && !ctx->socketUrl.empty()) {
-            esp_websocket_client_stop(g_ws);
-            esp_websocket_client_set_uri(g_ws, ctx->socketUrl.c_str());
+        if (!g_wsUrl.empty() && !ctx->socketUrl.empty()) {
+            g_wsUrl = ctx->socketUrl;
             if (!g_linkRoute.load())
-                esp_websocket_client_start(g_ws);
+                wsOpen();
         }
         // A page on the USB link reconnects as it.
         g_link->identityChanged(g_wsConnected);
@@ -752,9 +825,8 @@ static void timerTask(void* arg)
         if (g_linkRoute.load()) {
             // Through the page: it reopens its socket; Wi-Fi meanwhile.
             g_link->drop(esp_timer_get_time() / 1000, "mach1 went quiet through the laptop", true);
-        } else if (g_ws) {
-            esp_websocket_client_stop(g_ws);
-            esp_websocket_client_start(g_ws);
+        } else if (!g_wsUrl.empty()) {
+            wsOpen();
         }
     };
     driver.onCrossing = [](int seat, int64_t atUs, int) {
@@ -799,35 +871,32 @@ static void timerTask(void* arg)
     for (;;) {
         g_loopBeat.store(esp_timer_get_time() / 1000);
         {
-            // mach1 closed the socket and the client's task ended: start it
-            // again, 3 s on, if the relay is on its own Wi-Fi (not while a
-            // page carries it, nor while USB drives the node).
-            static int64_t finishedAt = -1;
+            // On its own Wi-Fi, mach1 not connected: a fresh client 3 s after
+            // mach1 closed the socket (the old client's task ended), and also
+            // after 30 s of failed attempts (the client retries by itself,
+            // but a broken one never recovers).
+            static int64_t finishedAt = -1, downSince = -1;
             const int64_t t = esp_timer_get_time() / 1000;
+            const bool wanted = !g_wsUrl.empty() && networkUp() && !g_linkRoute.load() && g_serialMode.load() == SerialOff;
             if (g_wsFinished.load() && finishedAt < 0)
                 finishedAt = t;
-            if (finishedAt >= 0 && t - finishedAt >= 3000) {
-                g_wsFinished = false;
-                finishedAt = -1;
-                if (g_ws && networkUp() && !g_linkRoute.load() && g_serialMode.load() == SerialOff &&
-                    esp_websocket_client_start(g_ws) == ESP_OK)
-                    ESP_LOGI(TAG, "mach1 closed the socket; connecting again");
+            if (!wanted || g_wsConnected) {
+                downSince = -1;
+                if (!wanted)
+                    finishedAt = -1;
+            } else if (downSince < 0) {
+                downSince = t;
             }
-        }
-        {
-            // On its own Wi-Fi but not connected for 30 s: make sure the
-            // client runs (start() refuses, harmlessly, if it already does).
-            static int64_t wsDownSince = -1;
-            const int64_t t = esp_timer_get_time() / 1000;
-            const bool wanted = g_ws && networkUp() && !g_linkRoute.load() && g_serialMode.load() == SerialOff;
-            if (!wanted || esp_websocket_client_is_connected(g_ws)) {
-                wsDownSince = -1;
-            } else if (wsDownSince < 0) {
-                wsDownSince = t;
-            } else if (t - wsDownSince > 30000) {
-                wsDownSince = t;
-                if (esp_websocket_client_start(g_ws) == ESP_OK)
-                    addLog("mach1: the connection had stopped; started it again");
+            if (wanted && finishedAt >= 0 && t - finishedAt >= 3000) {
+                finishedAt = -1;
+                downSince = t;
+                ESP_LOGI(TAG, "mach1 closed the socket; connecting with a fresh client");
+                wsOpen();
+            } else if (wanted && downSince >= 0 && t - downSince > 30000) {
+                downSince = t;
+                finishedAt = -1;
+                addLog("mach1: not connected for 30 s; a fresh connection");
+                wsOpen();
             }
         }
         {
@@ -859,9 +928,10 @@ static void timerTask(void* arg)
             // The Wi-Fi socket's events, from before it was closed for the USB link, are stale.
             const bool viaUsb = g_linkRoute.load();
             switch (e.kind) {
-            case QueueKind::SocketOpen: if (!viaUsb) timer.socketOpen(now); break;
-            case QueueKind::SocketClosed: if (!viaUsb) timer.socketClosed(); break;
-            case QueueKind::SocketText: if (!viaUsb) timer.message(e.text, now); break;
+            // e.fd carries the client's generation: an older client's events are stale.
+            case QueueKind::SocketOpen: if (!viaUsb && e.fd == g_wsGen.load()) timer.socketOpen(now); break;
+            case QueueKind::SocketClosed: if (!viaUsb && e.fd == g_wsGen.load()) timer.socketClosed(); break;
+            case QueueKind::SocketText: if (!viaUsb && e.fd == g_wsGen.load()) timer.message(e.text, now); break;
             case QueueKind::Refused: addLog("mach1 refused the club key: check the feed URL"); break;
             case QueueKind::Console: consoleCommand(e.text, *ctx, driver, timer); break;
             case QueueKind::Link:
@@ -924,8 +994,8 @@ static void timerTask(void* arg)
             handedOver = true;
             addLog("Serial: a USB host drives the node");
             // The host (mach1 in a browser) is now this node's timer in mach1: step aside.
-            if (g_ws && timer.uid.rfind("c5-", 0) == 0) {
-                esp_websocket_client_stop(g_ws);
+            if (!g_wsUrl.empty() && timer.uid.rfind("c5-", 0) == 0) {
+                wsClose();
                 timer.socketClosed();
                 addLog("mach1: the USB host is the timer now; reconnecting when it lets go");
             }
@@ -934,8 +1004,8 @@ static void timerTask(void* arg)
             handedOver = false;
             addLog("Serial ended; reconnecting to the node");
             nextGateTry = now;
-            if (g_ws && !esp_websocket_client_is_connected(g_ws))
-                esp_websocket_client_start(g_ws);
+            if (!g_wsUrl.empty() && !g_wsConnected && !g_linkRoute.load())
+                wsOpen();
         }
         if (!handedOver) {
             static int64_t nextUsbCheck = 0;
@@ -1273,6 +1343,7 @@ static void startUsb()
     g_usbLock = xSemaphoreCreateMutex();
     setvbuf(stdout, nullptr, _IONBF, 0);
     g_diagLock = xSemaphoreCreateMutex();
+    g_wsLock = xSemaphoreCreateMutex();
     esp_log_set_vprintf(quietVprintf);
 
     esp_console_config_t console = ESP_CONSOLE_CONFIG_DEFAULT();
