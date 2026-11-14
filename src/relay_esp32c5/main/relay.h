@@ -38,6 +38,9 @@ std::string networkIp();  // that address, "" without one
 bool hotspotOn();
 std::string hotspotSsid();
 int networkRssi();
+// Where the network breaks: a TCP connect to the router, DNS for `host`, and a
+// plain TCP connect to it (no TLS), with times or errno. Blocks up to ~9 s.
+std::string networkProbe(const char* host, int port);
 // Open connections to the web server: all clients, and how many are page links (/link WebSockets).
 int webClients(int* links);        // the joined access point's signal (dBm), 0 when not joined
 

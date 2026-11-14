@@ -21,7 +21,9 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "esp_heap_caps.h"
 
 #include "feed_url.h"
 #include "relay.h"
@@ -47,6 +49,75 @@ static esp_timer_handle_t g_fallback, g_retry, g_reboot;
 bool networkUp() { return g_haveIp; }
 bool hotspotOn() { return g_apOn; }
 std::string hotspotSsid() { return g_apSsid; }
+
+// A plain TCP connect with a timeout: its time in ms, or -errno.
+static int tcpConnectMs(uint32_t ipNetOrder, int port, int timeoutMs)
+{
+    const int s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s < 0)
+        return -errno;
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    sockaddr_in a = {};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = ipNetOrder;
+    const int64_t t0 = esp_timer_get_time();
+    int result;
+    if (connect(s, (sockaddr*)&a, sizeof a) == 0) {
+        result = 0;
+    } else if (errno != EINPROGRESS) {
+        result = -errno;
+    } else {
+        fd_set w;
+        FD_ZERO(&w);
+        FD_SET(s, &w);
+        timeval tv = {timeoutMs / 1000, (timeoutMs % 1000) * 1000};
+        if (select(s + 1, nullptr, &w, nullptr, &tv) <= 0) {
+            result = -ETIMEDOUT;
+        } else {
+            int err = 0;
+            socklen_t len = sizeof err;
+            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len);
+            result = err ? -err : 0;
+        }
+    }
+    close(s);
+    return result == 0 ? (int)((esp_timer_get_time() - t0) / 1000) : result;
+}
+
+std::string networkProbe(const char* host, int port)
+{
+    char out[240];
+    esp_netif_ip_info_t ip = {};
+    if (!g_haveIp || !g_sta || esp_netif_get_ip_info(g_sta, &ip) != ESP_OK)
+        return "no address";
+    // The router (anything listening on 80, or a refusal, means the LAN works).
+    const int lan = tcpConnectMs(ip.gw.addr, 80, 2000);
+    // DNS, then a plain TCP connect (no TLS) to the server.
+    const int64_t t0 = esp_timer_get_time();
+    addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    const int dns = getaddrinfo(host, nullptr, &hints, &res);
+    const int dnsMs = (int)((esp_timer_get_time() - t0) / 1000);
+    char addr[16] = "-";
+    int wan = 0;
+    if (dns == 0 && res) {
+        const uint32_t a = ((sockaddr_in*)res->ai_addr)->sin_addr.s_addr;
+        inet_ntoa_r(((sockaddr_in*)res->ai_addr)->sin_addr, addr, sizeof addr);
+        wan = tcpConnectMs(a, port, 5000);
+    }
+    if (res)
+        freeaddrinfo(res);
+    snprintf(out, sizeof out,
+             "router tcp:80 %s%d%s | dns %s %d ms | %s tcp:%d %s%d%s | internal heap %u (largest %u) | rssi %d",
+             lan >= 0 ? "ok " : "fail ", lan >= 0 ? lan : -lan, lan >= 0 ? " ms" : " (errno)",
+             dns == 0 ? addr : "fail", dnsMs, host, port, wan >= 0 ? "ok " : "fail ", wan >= 0 ? wan : -wan,
+             wan >= 0 ? " ms" : " (errno)", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), networkRssi());
+    return out;
+}
 
 int networkRssi()
 {

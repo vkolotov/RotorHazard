@@ -267,6 +267,8 @@ static QueueHandle_t g_events;  // -> timer task
 // local client (a probe, or a page told the relay is busy).
 static QueueHandle_t g_outbox;
 static esp_websocket_client_handle_t g_ws;
+// The client's task ended (mach1 closed the socket, or the relay stopped it).
+static std::atomic<bool> g_wsFinished{false};
 static volatile bool g_wsConnected;
 
 static void post(QueueKind kind, const char* text, size_t len, int fd = -1)
@@ -324,6 +326,9 @@ static void wsEvent(void*, esp_event_base_t, int32_t id, void* data)
             g_wsConnected = false;
             post(QueueKind::SocketClosed, nullptr, 0);
         }
+        break;
+    case WEBSOCKET_EVENT_FINISH:
+        g_wsFinished = true;
         break;
     case WEBSOCKET_EVENT_DATA:
         if (d->op_code == 0x08 && d->data_len >= 2) {
@@ -397,6 +402,18 @@ static void senderTask(void*)
     }
 }
 
+// While mach1 is not connected: every 10 s, where the network breaks (/log.txt).
+static void probeTask(void* arg)
+{
+    const std::string host = *(std::string*)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        if (!networkUp() || g_wsConnected || g_linkRoute.load())
+            continue;
+        ESP_LOGW("relay-net", "mach1 not connected: %s", networkProbe(host.c_str(), 443).c_str());
+    }
+}
+
 static void startSocket(const std::string& url)
 {
     esp_websocket_client_config_t config = {};
@@ -405,14 +422,21 @@ static void startSocket(const std::string& url)
     config.buffer_size = 4096;
     config.reconnect_timeout_ms = 3000;
     config.network_timeout_ms = 10000;
-    // Reconnect after mach1 closes the socket too (a restart, or another path
-    // to this timer replacing it). Without it the client's task ended and the
-    // relay stayed off mach1 until something restarted it.
-    config.enable_close_reconnect = true;
+    // Not enable_close_reconnect: the client then reconnected by itself after
+    // mach1 closed it, even while a page carried the relay, and the two
+    // sockets replaced each other every few seconds. A close ends the
+    // client's task (WEBSOCKET_EVENT_FINISH); the timer task starts it again
+    // when the relay is on its own Wi-Fi.
     config.task_stack = 6144;
     g_ws = esp_websocket_client_init(&config);
     esp_websocket_register_events(g_ws, WEBSOCKET_EVENT_ANY, wsEvent, nullptr);
     esp_websocket_client_start(g_ws);
+    // The host from wss://host/...
+    static std::string host;
+    const size_t from = url.find("://");
+    const size_t start = from == std::string::npos ? 0 : from + 3;
+    host = url.substr(start, url.find_first_of(":/", start) - start);
+    xTaskCreate(probeTask, "netprobe", 4096, &host, 2, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +798,22 @@ static void timerTask(void* arg)
     int64_t networkSince = -1;  // when Wi-Fi last came up; -1 while down
     for (;;) {
         g_loopBeat.store(esp_timer_get_time() / 1000);
+        {
+            // mach1 closed the socket and the client's task ended: start it
+            // again, 3 s on, if the relay is on its own Wi-Fi (not while a
+            // page carries it, nor while USB drives the node).
+            static int64_t finishedAt = -1;
+            const int64_t t = esp_timer_get_time() / 1000;
+            if (g_wsFinished.load() && finishedAt < 0)
+                finishedAt = t;
+            if (finishedAt >= 0 && t - finishedAt >= 3000) {
+                g_wsFinished = false;
+                finishedAt = -1;
+                if (g_ws && networkUp() && !g_linkRoute.load() && g_serialMode.load() == SerialOff &&
+                    esp_websocket_client_start(g_ws) == ESP_OK)
+                    ESP_LOGI(TAG, "mach1 closed the socket; connecting again");
+            }
+        }
         {
             // On its own Wi-Fi but not connected for 30 s: make sure the
             // client runs (start() refuses, harmlessly, if it already does).
