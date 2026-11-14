@@ -36,6 +36,12 @@ namespace relay {
 // The page sends link_open every 2 s; this long without a line from it, it is gone.
 constexpr int64_t USB_LINK_TIMEOUT_MS = 6000;
 constexpr int64_t USB_LINK_PING_MS = 2000;
+// The page is still there but its socket to mach1 closed (link_down): wait
+// this long for it to reconnect before mach1 goes back to Wi-Fi. Switching at
+// once opened the relay's own socket, mach1 kept the newest and closed the
+// page's, the page reconnected, and the two replaced each other every ~2 s
+// (started by a mach1 restart, which closes both at once).
+constexpr int64_t USB_LINK_DOWN_HOLD_MS = 10000;
 // Watched readings while the link carries them (a local cable, not the internet).
 constexpr int64_t USB_WATCH_FRAME_MS = 100;
 
@@ -86,6 +92,7 @@ private:
     bool via_ = false;     // mach1's messages go through the page
     int64_t seen_ = 0;
     int64_t pinged_ = 0;
+    int64_t downAt_ = -1;  // link_down while the page is alive: holding the route since
 };
 
 }  // namespace relay

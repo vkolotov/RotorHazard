@@ -82,6 +82,7 @@ void UsbLink::received(const char* line, int64_t now, bool wifiConnected)
             toHost(info(wifiConnected));
     } else if (type == "link_up") {
         up_ = true;
+        downAt_ = -1;
         prefer_ = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "prefer"));
         // A new socket to mach1 on the page: it gets what a fresh connection gets.
         update(now, wifiConnected, true);
@@ -91,6 +92,11 @@ void UsbLink::received(const char* line, int64_t now, bool wifiConnected)
             timer_.message(printed(message).c_str(), now);
     } else if (type == "link_down") {
         up_ = false;
+        // The page stays; give it time to reconnect before Wi-Fi takes over.
+        if (via_ && alive_ && downAt_ < 0) {
+            downAt_ = now;
+            note(label + ": the page's mach1 socket closed; waiting for it to reconnect");
+        }
         update(now, wifiConnected, false);
     }
     cJSON_Delete(m);
@@ -119,6 +125,7 @@ void UsbLink::drop(int64_t now, const std::string& why, bool askReconnect)
         return;
     note(label + ": " + why);
     up_ = false;
+    downAt_ = -1;  // mach1 quiet through the page, or USB taken: Wi-Fi now
     if (askReconnect && toHost)
         toHost("{\"type\":\"link_reconnect\"}");
     // Back to Wi-Fi now; a reconnected page sends link_up and takes over again.
@@ -133,7 +140,15 @@ void UsbLink::identityChanged(bool wifiConnected)
 
 void UsbLink::update(int64_t now, bool wifiConnected, bool fresh)
 {
-    const bool want = alive_ && up_ && (prefer_ || !wifiConnected);
+    bool want = alive_ && up_ && (prefer_ || !wifiConnected);
+    if (!want && via_ && alive_ && !up_ && downAt_ >= 0) {
+        if (now - downAt_ < USB_LINK_DOWN_HOLD_MS)
+            want = true;  // holding for the page's reconnect
+        else
+            note(label + ": the page did not reconnect to mach1");
+    }
+    if (!alive_ || up_)
+        downAt_ = -1;
     if (want != via_) {
         via_ = want;
         timer_.socketClosed();

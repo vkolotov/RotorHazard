@@ -967,17 +967,47 @@ static void usbLinkTests()
         r.run(USB_LINK_TIMEOUT_MS + 100);
         r.link.tick(r.now(), true, true);
         CHECK(!r.link.viaLink() && !r.link.alive());
-        // The page's socket to mach1 closes: link_down.
+        // The page's socket to mach1 closes (link_down) and the page does not
+        // reconnect: Wi-Fi after the hold, the page still there.
         r.line(R"({"type":"link_open"})");
         r.line(R"({"type":"link_up","prefer":true})");
         CHECK(r.link.viaLink());
         r.line(R"({"type":"link_down"})");
+        CHECK(r.link.viaLink());
+        r.run(USB_LINK_DOWN_HOLD_MS / 2);
+        r.line(R"({"type":"link_open"})");
+        r.link.tick(r.now(), true, true);
+        CHECK(r.link.viaLink());
+        r.run(USB_LINK_DOWN_HOLD_MS / 2 + 100);
+        r.line(R"({"type":"link_open"})");
+        r.link.tick(r.now(), true, true);
         CHECK(!r.link.viaLink() && r.link.alive());
         // A second link_up on the same route resends what a fresh socket gets.
         r.line(R"({"type":"link_up","prefer":true})");
         r.clearSent();
         r.line(R"({"type":"link_up","prefer":true})");
         CHECK(r.ofType("hello").size() == 1);
+    });
+    test("usb link: the page's mach1 socket closing and reopening keeps the route (no Wi-Fi socket to fight it)", [] {
+        LinkRig r;
+        r.up();
+        r.line(R"({"type":"link_open"})");
+        r.line(R"({"type":"link_up","prefer":true})");
+        CHECK(r.link.viaLink());
+        const size_t changes = r.routes.size();
+        // mach1 restarts: the page's socket closes, and it reconnects 1.5 s later.
+        r.line(R"({"type":"link_down"})");
+        r.run(1500);
+        r.link.tick(r.now(), true, true);
+        r.line(R"({"type":"link_up","prefer":true})");
+        r.run(USB_LINK_DOWN_HOLD_MS);
+        r.line(R"({"type":"link_open"})");
+        r.link.tick(r.now(), true, true);
+        CHECK(r.link.viaLink() && r.routes.size() == changes);
+        // The page itself going away still hands mach1 back at once.
+        r.run(USB_LINK_TIMEOUT_MS + 100);
+        r.link.tick(r.now(), true, true);
+        CHECK(!r.link.viaLink());
     });
     test("usb link: a page on the link is pinged every 2 s; answering keeps it, as a background tab does", [] {
         LinkRig r;
