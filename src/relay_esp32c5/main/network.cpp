@@ -210,7 +210,7 @@ let h=`<table><tr><th>Wi-Fi</th><td>${yes(s.wifi.up,'online '+s.wifi.ip,'not con
 <tr><th>Node</th><td>${yes(s.node.status=='running',s.node.status,s.node.status)} ${esc(s.node.proc)} ${esc(s.node.firmware)} API ${s.node.api} · ${s.node.sweeps.toFixed(1)} sweeps/s · ${esc(s.node.detail)}</td></tr>
 <tr><th>Link</th><td>${s.node.reads} reads · ${s.node.timeouts} timeouts · ${s.node.checksum} checksum errors</td></tr>
 <tr><th>Race</th><td>${esc(s.race.status)} ${esc(s.race.format)}</td></tr>
-<tr><th>System</th><td>${s.system?`up ${Math.floor(s.system.uptime_s/3600)}h ${Math.floor(s.system.uptime_s/60)%60}m · heap ${Math.round(s.system.heap/1024)} KB (min ${Math.round(s.system.heap_min/1024)}, block ${Math.round(s.system.heap_block/1024)}) · last reset: ${esc(s.system.reset)}`:''}</td></tr></table>`;
+<tr><th>System</th><td>${s.system?`up ${Math.floor(s.system.uptime_s/3600)}h ${Math.floor(s.system.uptime_s/60)%60}m · heap ${Math.round(s.system.heap/1024)} KB (min ${Math.round(s.system.heap_min/1024)}, block ${Math.round(s.system.heap_block/1024)}) · last reset: ${esc(s.system.reset)} · web connections ${s.system.web_clients} (${s.system.link_clients} page links)`:''}</td></tr></table>`;
 if(s.seats.length){h+=`<table><tr><th>Node</th><th>MHz</th><th>RSSI</th><th>Enter/exit</th><th>Pilot</th><th>Laps</th></tr>`+
 s.seats.map((x,i)=>`<tr><td>${i+1}</td><td>${x.frequency||'off'}</td><td>${x.rssi}</td><td>${x.enter}/${x.exit}</td><td>${esc(x.callsign)}</td><td>${x.laps}</td></tr>`).join('')+'</table>';}
 document.getElementById('status').innerHTML=h;}catch(e){document.getElementById('status').textContent='No status: '+e;}}
@@ -342,6 +342,22 @@ void setLocalLinkHandlers(void (*onText)(const char*, size_t, int), void (*onClo
 bool localLinkOpen(int fd)
 {
     return g_http && fd >= 0 && httpd_ws_get_fd_info(g_http, fd) == HTTPD_WS_CLIENT_WEBSOCKET;
+}
+
+int webClients(int* links)
+{
+    if (links)
+        *links = 0;
+    if (!g_http)
+        return 0;
+    size_t n = 8;
+    int fds[8];
+    if (httpd_get_client_list(g_http, &n, fds) != ESP_OK)
+        return 0;
+    for (size_t i = 0; links && i < n; i++)
+        if (httpd_ws_get_fd_info(g_http, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
+            ++*links;
+    return (int)n;
 }
 
 static esp_err_t wsLink(httpd_req_t* req)

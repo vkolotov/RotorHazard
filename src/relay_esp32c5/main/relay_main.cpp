@@ -496,6 +496,10 @@ static void addSystemInfo(cJSON* sys)
     cJSON_AddNumberToObject(sys, "reset_reason", g_resetReason);
     cJSON_AddStringToObject(sys, "reset", g_lastBootStall ? "main loop stalled" : g_lastBootSilent ? "mach1 unreachable" : resetReasonName(g_resetReason));
     cJSON_AddNumberToObject(sys, "rssi", networkRssi());
+    // Open web connections (5 at most): a count that keeps climbing means pages leave dead sockets.
+    int links = 0;
+    cJSON_AddNumberToObject(sys, "web_clients", webClients(&links));
+    cJSON_AddNumberToObject(sys, "link_clients", links);
 }
 
 // The timer task stopped beating: abort, so the core dump shows where it was.
