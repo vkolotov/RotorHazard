@@ -718,6 +718,37 @@ static void timerTests()
         cJSON* link = cJSON_GetObjectItem(sys, "link");
         CHECK(str(link, "status") == "running" && num(link, "reads") > 0);
     });
+    test("timer: a node's battery (READ 0x48) rides on its health; node_io calibrates it", [] {
+        uint8_t d[NODE_BATTERY_SIZE] = {1, 1, 0x08, 0x1B, 0x10, 0x36, 0x07, 0xD0};
+        NodeBattery b;
+        CHECK(parseNodeBattery(d, sizeof d, &b) && b.pinMv == 2075 && b.batteryMv == 4150 && b.ratioMilli == 2000);
+        d[0] = 2;
+        NodeBattery c;
+        CHECK(!parseNodeBattery(d, sizeof d, &c) && !c.valid);
+        Rig r;
+        r.node.hasStats = true;
+        r.node.hasBattery = true;
+        r.up();
+        r.run(10100);
+        cJSON* node = cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(r.last("status"), "state"), "system"), "node");
+        cJSON* battery = cJSON_GetObjectItem(node, "battery");
+        CHECK(battery && num(battery, "mv") == 4150 && num(battery, "pin_mv") == 2075 && num(battery, "ratio") == 2.0);
+        // Calibrate through node_io: write the ratio, read the battery back.
+        r.command(R"({"type":"command","id":"b1","action":"node_io","ops":[{"w":127,"d":[8,19]},{"r":72,"n":8}]})");
+        CHECK(r.node.batteryRatio == 2067);
+        r.node.clockUs += NODE_STATS_EVERY_US;
+        r.run(10100);
+        battery = cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(r.last("status"), "state"), "system"), "node"), "battery");
+        CHECK(battery && num(battery, "mv") == 4289);
+    });
+    test("timer: no battery object for a node without the feature", [] {
+        Rig r;
+        r.node.hasStats = true;
+        r.up();
+        r.run(10100);
+        cJSON* node = cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(r.last("status"), "state"), "system"), "node");
+        CHECK(node && !cJSON_GetObjectItem(node, "battery"));
+    });
     test("timer: levels resolve as gate.py: own, node default, any-node own, any-node default", [] {
         Rig r;
         r.command(R"({"type":"gate_config","levels":[
@@ -753,9 +784,24 @@ static void settingsTests()
         r.up();
         cJSON* hello = r.last("hello");
         cJSON* features = cJSON_GetObjectItem(hello, "features");
-        CHECK(cJSON_GetArraySize(features) == 4 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io");
+        CHECK(cJSON_GetArraySize(features) == 5 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io" &&
+              std::string(cJSON_GetArrayItem(features, 4)->valuestring) == "firmware_update");
         CHECK(num(cJSON_GetObjectItem(hello, "c5_input"), "angle") == 90);
         CHECK(num(cJSON_GetObjectItem(hello, "race_settings"), "minLapMs") == 4000);
+    });
+    test("timer: firmware update command is accepted and queued", [] {
+        Rig r;
+        std::string target, url, sha;
+        size_t size = 0;
+        r.timer.firmwareUpdate = [&](const std::string& t, const std::string& u,
+                                     const std::string& h, size_t n) {
+            target = t; url = u; sha = h; size = n; return std::string();
+        };
+        r.up();
+        r.command(R"({"type":"command","id":"ota1","action":"firmware_update","target":"node","url":"https://mach1/fw.bin","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":834000})");
+        cJSON* result = r.last("command_result");
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result, "ok")) && target == "node" &&
+              url == "https://mach1/fw.bin" && sha.size() == 64 && size == 834000);
     });
     test("timer: node_io carries C5 settings reads and writes, keeps the detection, and nothing else", [] {
         Rig r;

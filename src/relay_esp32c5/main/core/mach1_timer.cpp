@@ -126,6 +126,7 @@ size_t c5ReadSize(int command)
     case C5_FEATURES: return 2;
     case C5_READ_DETECTION: return C5_DETECTION_SIZE;
     case C5_READ_CALIBRATION: return C5_CALIBRATION_SIZE;
+    case READ_NODE_BATTERY: return NODE_BATTERY_SIZE;
     default: return 0;
     }
 }
@@ -135,6 +136,7 @@ size_t c5WriteSize(int command)
     switch (command) {
     case C5_WRITE_DETECTION: return 3;
     case C5_WRITE_CALIBRATION: return C5_CALIBRATION_SIZE;
+    case WRITE_NODE_BATTERY_RATIO: return 2;
     default: return 0;
     }
 }
@@ -259,6 +261,7 @@ std::string Mach1Timer::hello() const
     cJSON_AddItemToArray(features, cJSON_CreateString("c5_input"));
     cJSON_AddItemToArray(features, cJSON_CreateString("race_settings"));
     cJSON_AddItemToArray(features, cJSON_CreateString("set_name"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("firmware_update"));
     // The node this timer is (its id), and the relay reaching it.
     if (driver_ && !driver_->info().nodeId.empty())
         cJSON_AddStringToObject(m, "node_id", driver_->info().nodeId.c_str());
@@ -371,6 +374,14 @@ std::string Mach1Timer::status() const
             cJSON_AddNumberToObject(links, "uart_bad_checksums", n.uartBadChecksums);
             cJSON_AddNumberToObject(links, "uart_noise", n.uartNoise);
             cJSON_AddNumberToObject(links, "usb_commands", n.usbCommands);
+            // Its battery (C5 1.2.0-c5.18 on), when a divider is wired.
+            const NodeBattery& b = driver_->nodeBattery();
+            if (b.valid && (b.flags & NODE_BATTERY_WIRED)) {
+                cJSON* battery = cJSON_AddObjectToObject(node, "battery");
+                cJSON_AddNumberToObject(battery, "mv", b.batteryMv);
+                cJSON_AddNumberToObject(battery, "pin_mv", b.pinMv);
+                cJSON_AddNumberToObject(battery, "ratio", b.ratioMilli / 1000.0);
+            }
         }
     }
     std::string out = print(m);
@@ -686,6 +697,13 @@ void Mach1Timer::runCommand(cJSON* command, int64_t now)
         error = setLevels(command);
     else if (action == "set_channel")
         error = setChannel(command);
+    else if (action == "firmware_update") {
+        if (!firmwareUpdate)
+            error = "Firmware update is unavailable.";
+        else
+            error = firmwareUpdate(getStr(command, "target"), getStr(command, "url"),
+                                   getStr(command, "sha256"), (size_t)getInt(command, "size", 0));
+    }
     else
         error = "Unknown command " + action;
     cJSON_AddStringToObject(result, "type", "command_result");

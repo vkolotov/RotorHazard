@@ -49,6 +49,9 @@ public:
     // Health (1.2.0-c5.15, READ 0x45): its uptime, which a restart starts again.
     bool hasStats = false;
     uint32_t uptimeS = 3600;
+    // Battery (1.2.0-c5.18, READ 0x48): pin mV and the divider ratio x1000.
+    bool hasBattery = false;
+    uint16_t batteryPinMv = 2075, batteryRatio = 2000;
 
     bool wide() const { return relay::hasWideRssi(api, proc); }
 
@@ -104,6 +107,7 @@ private:
         case 0x73: return c5 ? 3 : 0;   // C5 detection
         case 0x74: return c5 ? 36 : 0;  // C5 calibration
         case 0x75: return c5 && hasIdentity ? 32 : 0;  // node name
+        case 0x7F: return c5 && hasBattery ? 2 : 0;    // battery divider ratio
         default: return 0;
         }
     }
@@ -162,6 +166,10 @@ private:
                 }
                 if (command == 0x75) {
                     nodeName.assign((const char*)&frame[1], strnlen((const char*)&frame[1], 32));
+                    continue;
+                }
+                if (command == 0x7F) {
+                    batteryRatio = (uint16_t)value;
                     continue;
                 }
                 if (command == 0x74) {
@@ -226,7 +234,7 @@ private:
         case 0x11:  // feature flags: C5 detection and calibration
             if (!c5)
                 return;
-            d = {(uint8_t)(hasStats ? 0x01 : 0x00), (uint8_t)(hasIdentity ? 0xE0 : 0x60)};
+            d = {(uint8_t)((hasStats ? 0x01 : 0x00) | (hasBattery ? 0x04 : 0x00)), (uint8_t)(hasIdentity ? 0xE0 : 0x60)};
             break;
         case 0x41:  // C5 detection v3, 86 bytes
             if (!c5)
@@ -265,6 +273,14 @@ private:
             d[6] = (uint8_t)(uptimeS >> 8);
             d[7] = (uint8_t)uptimeS;
             break;
+        case 0x48: {
+            if (!c5 || !hasBattery)
+                return;
+            const uint16_t mv = (uint16_t)(batteryPinMv * batteryRatio / 1000);
+            d = {1, 1, (uint8_t)(batteryPinMv >> 8), (uint8_t)batteryPinMv, (uint8_t)(mv >> 8), (uint8_t)mv,
+                 (uint8_t)(batteryRatio >> 8), (uint8_t)batteryRatio};
+            break;
+        }
         default: return;  // the node ignores what it does not know
         }
         reply(command, d);

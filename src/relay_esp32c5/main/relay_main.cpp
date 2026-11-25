@@ -38,6 +38,7 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "hal/uart_ll.h"
 #include "esp_timer.h"
 #include "esp_attr.h"
@@ -57,6 +58,7 @@
 #include "node_driver.h"
 #include "node_protocol.h"
 #include "usb_link.h"
+#include "firmware_update.h"
 
 using namespace relay;
 
@@ -81,6 +83,15 @@ enum SerialMode : int { SerialOff = 0, SerialRequested = 1, SerialGranted = 2 };
 // mach1/TLS work, short enough that a stuck relay is back before the next heat.
 constexpr int64_t LOOP_STALL_MS = 30000;
 static std::atomic<int64_t> g_loopBeat{0};
+struct UpdateState {
+    bool active = false;
+    std::string target;
+    std::string phase;
+    std::string error;
+    size_t done = 0;
+    size_t total = 0;
+};
+static UpdateState g_update;
 // Survives the abort's reboot (not a power cycle): why the last boot happened.
 constexpr uint32_t STALL_MAGIC = 0x57A11ED0;
 static RTC_NOINIT_ATTR uint32_t g_stallMagic;
@@ -623,6 +634,16 @@ static void addSystemInfo(cJSON* sys)
     int links = 0;
     cJSON_AddNumberToObject(sys, "web_clients", webClients(&links));
     cJSON_AddNumberToObject(sys, "link_clients", links);
+    if (g_update.active || !g_update.phase.empty()) {
+        cJSON* update = cJSON_AddObjectToObject(sys, "update");
+        cJSON_AddStringToObject(update, "target", g_update.target.c_str());
+        cJSON_AddStringToObject(update, "phase", g_update.phase.c_str());
+        cJSON_AddNumberToObject(update, "done", (double)g_update.done);
+        cJSON_AddNumberToObject(update, "total", (double)g_update.total);
+        cJSON_AddBoolToObject(update, "active", g_update.active);
+        if (!g_update.error.empty())
+            cJSON_AddStringToObject(update, "error", g_update.error.c_str());
+    }
 }
 
 // The timer task stopped beating: abort, so the core dump shows where it was.
@@ -751,6 +772,7 @@ static void timerTask(void* arg)
 #endif
     static NodeDriver driver(link);
     static Mach1Timer timer;
+    FirmwareRequest pendingUpdate;
     timer.uid = ctx->uid;
     timer.session = hexId(16);
     timer.name = ctx->settings.name;
@@ -821,6 +843,27 @@ static void timerTask(void* arg)
     };
     timer.send = [](const std::string& text) { queueOut('M', text); };
     timer.systemInfo = addSystemInfo;
+    timer.firmwareUpdate = [&](const std::string& target, const std::string& url,
+                               const std::string& sha256, size_t size) -> std::string {
+        if (pendingUpdate.pending || g_update.active)
+            return "A firmware update is already running.";
+        if (timer.engine.status == RaceStatus::Staging || timer.engine.status == RaceStatus::Racing)
+            return "Stop the race before updating firmware.";
+        if (!networkUp())
+            return "The relay has no network connection.";
+        if (target != "node" && target != "relay")
+            return "Firmware target must be node or relay.";
+        if (target == "node" && (driver.status() != NodeStatus::Running || driver.info().procType != "ESP32C5"))
+            return "An update-capable C5 node is not connected.";
+#if !CONFIG_IDF_TARGET_ESP32S3
+        if (target == "relay")
+            return "Self-update is supported by the S3 relay.";
+#endif
+        if (url.empty() || sha256.size() != 64 || !size)
+            return "The firmware manifest is incomplete.";
+        pendingUpdate = {true, target, url, sha256, size};
+        return "";
+    };
     timer.reconnect = [] {
         if (g_linkRoute.load()) {
             // Through the page: it reopens its socket; Wi-Fi meanwhile.
@@ -981,6 +1024,45 @@ static void timerTask(void* arg)
             free(e.text);
         }
         const int64_t now = esp_timer_get_time() / 1000;
+        if (pendingUpdate.pending && !handedOver) {
+            FirmwareRequest request = pendingUpdate;
+            pendingUpdate.pending = false;
+            if (gateRunning) {
+                gateRunning = false;
+                timer.gateDown(now);
+            }
+            g_update = {true, request.target, "starting", "", 0, request.size};
+            addLog("Firmware update started: " + request.target);
+            int lastReported = -1;
+            auto progress = [&](const char* phase, size_t done, size_t total) {
+                g_loopBeat.store(esp_timer_get_time() / 1000);
+                g_update.phase = phase;
+                g_update.done = done;
+                g_update.total = total;
+                const int pct = total ? (int)(done * 100 / total) : 0;
+                if (pct == 100 || pct / 5 != lastReported / 5) {
+                    lastReported = pct;
+                    queueOut('M', timer.status());
+                    publishStatus(*ctx, driver, timer);
+                }
+            };
+            std::string updateError;
+            bool ok = request.target == "node"
+                ? updateNodeFirmware(driver, request, progress, &updateError)
+                : updateRelayFirmware(request, progress, &updateError);
+            g_update.active = false;
+            g_update.phase = ok ? "complete" : "failed";
+            g_update.error = ok ? "" : updateError;
+            addLog(ok ? "Firmware update complete: " + request.target
+                      : "Firmware update failed: " + updateError);
+            queueOut('M', timer.status());
+            publishStatus(*ctx, driver, timer);
+            if (ok && request.target == "relay") {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                esp_restart();
+            }
+            nextGateTry = esp_timer_get_time() / 1000;
+        }
         // Serial pass-through: stop using the link and hand it to the USB task.
         const int serial = g_serialMode.load();
         if (serial == SerialRequested) {
@@ -1371,6 +1453,10 @@ extern "C" void app_main(void)
     uart_ll_sclk_enable(&UART0);
 #endif
     g_resetReason = (int)esp_reset_reason();
+    // Reaching the application means the new OTA image can run far enough to
+    // initialise the relay; cancel bootloader rollback. A crash before this
+    // point leaves it pending and the bootloader restores the old slot.
+    esp_ota_mark_app_valid_cancel_rollback();
     g_lastBootStall = g_stallMagic == STALL_MAGIC && g_resetReason == ESP_RST_PANIC;
     g_lastBootSilent = g_stallMagic == SILENT_MAGIC && g_resetReason == ESP_RST_SW;
     g_lastStallMs = g_lastBootStall || g_lastBootSilent ? g_stallMs : 0;

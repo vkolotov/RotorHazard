@@ -55,6 +55,8 @@ struct NodeInfo {
     std::string nodeName;
     // It answers READ 0x45 (its health; firmware 1.2.0-c5.15 and later).
     bool hasStats = false;
+    // It answers READ 0x48 (battery voltage; firmware 1.2.0-c5.18 and later).
+    bool hasBattery = false;
 };
 
 // A C5 node's health (READ 0x45), read every NODE_STATS_EVERY_US while running.
@@ -74,6 +76,21 @@ constexpr uint8_t NODE_STATS_UART_LINK = 2;
 constexpr int64_t NODE_STATS_EVERY_US = 10000000;
 // What it read, or false (its fields untouched) if the reply is not version 1.
 bool parseNodeStats(const uint8_t* d, size_t n, NodeStats* out);
+
+// A C5 node's battery (READ 0x48), read with its health: a divider on an ADC
+// pin. Big-endian: version 1, flags (1 = a divider is wired), pin mV,
+// battery mV, ratio x1000. WRITE 0x7F (ratio x1000) calibrates it.
+struct NodeBattery {
+    bool valid = false;
+    uint8_t flags = 0;
+    uint16_t pinMv = 0, batteryMv = 0, ratioMilli = 0;
+};
+constexpr uint8_t READ_NODE_BATTERY = 0x48;
+constexpr uint8_t WRITE_NODE_BATTERY_RATIO = 0x7F;
+constexpr size_t NODE_BATTERY_SIZE = 8;
+constexpr uint16_t RHFEAT_C5_BATTERY = 0x0400;
+constexpr uint8_t NODE_BATTERY_WIRED = 1;
+bool parseNodeBattery(const uint8_t* d, size_t n, NodeBattery* out);
 
 // C5 node identity (READ 0x43 id, READ 0x44 / WRITE 0x75 name), behind feature flag 0x0080.
 constexpr uint8_t READ_RHFEAT_FLAGS = 0x11;
@@ -145,6 +162,7 @@ public:
     double sweepsPerSecond() const { return sweepsPerSecond_; }
     int64_t minRttUs() const { return minRttUs_; }
     const NodeStats& nodeStats() const { return nodeStats_; }
+    const NodeBattery& nodeBattery() const { return nodeBattery_; }
     void markLost(const std::string& why);
 
     // Exposed for tests and the console.
@@ -189,6 +207,7 @@ private:
     std::deque<int64_t> sweepTimes_;
     double sweepsPerSecond_ = 0;
     NodeStats nodeStats_;
+    NodeBattery nodeBattery_;
 };
 
 }  // namespace relay

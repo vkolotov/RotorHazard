@@ -41,7 +41,7 @@ struct cJSON;
 
 namespace relay {
 
-constexpr const char* RELAY_VERSION = "0.2.13";
+constexpr const char* RELAY_VERSION = "0.3.2-battery";
 // The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
 #ifndef RELAY_BOARD
 #define RELAY_BOARD "c5"
@@ -107,6 +107,9 @@ public:
     // The relay's health for the status heartbeat's "system" (uptime, heap,
     // reset reason, Wi-Fi signal), added to the object it is given.
     std::function<void(cJSON* system)> systemInfo;
+    // Queue an OTA job after its command_result has been sent. Arguments are
+    // target ("node" or "relay"), HTTPS URL, SHA-256 hex and byte size.
+    std::function<std::string(const std::string&, const std::string&, const std::string&, size_t)> firmwareUpdate;
 
     // Loaded at boot from the saved settings.
     // The last C5 detection write (WRITE 0x73 payload), written again on every (re)connect.

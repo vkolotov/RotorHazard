@@ -125,6 +125,7 @@ bool NodeDriver::start(std::string* error)
     const bool haveProc = read(READ_FW_PROCTYPE, FW_TEXT_BLOCK_SIZE, 2, &proc);
     info_ = NodeInfo();
     nodeStats_ = NodeStats();  // a restarted node's uptime starts again
+    nodeBattery_ = NodeBattery();
     info_.apiLevel = apiLevel;
     info_.seats = seats;
     info_.firmware = haveFw ? fwText(firmware.data.data(), firmware.data.size()) : "";
@@ -135,6 +136,7 @@ bool NodeDriver::start(std::string* error)
         Reply features, id, name;
         const int flags = read(READ_RHFEAT_FLAGS, 2, 2, &features) ? ((features.data[0] << 8) | features.data[1]) : 0;
         info_.hasStats = (flags & RHFEAT_C5_NODE_STATS) != 0;
+        info_.hasBattery = (flags & RHFEAT_C5_BATTERY) != 0;
         if ((flags & RHFEAT_C5_NODE_ID) && read(READ_NODE_ID, 6, MAX_RETRIES, &id)) {
             static const char* digits = "0123456789abcdef";
             for (uint8_t b : id.data) {
@@ -362,6 +364,18 @@ bool parseNodeStats(const uint8_t* d, size_t n, NodeStats* out)
     return true;
 }
 
+bool parseNodeBattery(const uint8_t* d, size_t n, NodeBattery* out)
+{
+    if (n < NODE_BATTERY_SIZE || d[0] != 1)
+        return false;
+    out->valid = true;
+    out->flags = d[1];
+    out->pinMv = (uint16_t)((d[2] << 8) | d[3]);
+    out->batteryMv = (uint16_t)((d[4] << 8) | d[5]);
+    out->ratioMilli = (uint16_t)((d[6] << 8) | d[7]);
+    return true;
+}
+
 bool NodeDriver::poll()
 {
     if (status_ != NodeStatus::Running || seats_.empty())
@@ -407,6 +421,12 @@ bool NodeDriver::poll()
                 markLost("The node restarted; setting it up again.");
                 return true;
             }
+            // Its battery, with its health: one more short read.
+            Reply battery;
+            NodeBattery b;
+            if (info_.hasBattery && read(READ_NODE_BATTERY, NODE_BATTERY_SIZE, 1, &battery) &&
+                parseNodeBattery(battery.data.data(), battery.data.size(), &b))
+                nodeBattery_ = b;
         } else {
             nodeStats_.readAtUs = link_.nowUs();  // try again next time, not every seat
         }
