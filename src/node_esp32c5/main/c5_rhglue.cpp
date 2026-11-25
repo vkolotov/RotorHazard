@@ -13,7 +13,7 @@
 #include "commands.h"
 
 #ifndef RHNODE_C5_VERSION
-#define RHNODE_C5_VERSION "1.2.0-c5.15"
+#define RHNODE_C5_VERSION "1.2.0-c5.18-battery"
 #endif
 
 // informational strings read by RH (prefixes let them be found in the .bin)
@@ -30,6 +30,14 @@ void handleStatusMessage(byte, byte) {}
 void doJumpToBootloader() {}
 
 namespace c5 {
+
+__attribute__((weak)) void fwUpdateWriteInfo(Transport&) {}
+__attribute__((weak)) void fwUpdateWriteStatus(Transport&) {}
+__attribute__((weak)) int fwUpdatePayloadSize(uint8_t) { return -1; }
+__attribute__((weak)) void fwUpdateHandle(uint8_t, const uint8_t*, size_t) {}
+__attribute__((weak)) bool fwUpdateBusy() { return false; }
+__attribute__((weak)) void fwUpdateInit() {}
+__attribute__((weak)) void fwUpdateTick() {}
 
 static Scanner* g_scanner = nullptr;
 
@@ -165,6 +173,43 @@ static void writeNodeStats(Transport& out)
     for (int i = 0; i < kNodeStatsSize; ++i)
         d[kNodeStatsSize] += d[i];
     out.write(d, sizeof(d));
+}
+
+static void (*g_batteryRead)(NodeBattery*) = nullptr;
+static bool (*g_batterySetRatio)(uint16_t) = nullptr;
+
+void rhSetBattery(void (*read)(NodeBattery*), bool (*setRatio)(uint16_t))
+{
+    g_batteryRead = read;
+    g_batterySetRatio = setRatio;
+}
+
+static void put16(uint8_t* d, uint16_t v)
+{
+    d[0] = (uint8_t)(v >> 8);
+    d[1] = (uint8_t)v;
+}
+
+static void writeBattery(Transport& out)
+{
+    uint8_t d[kBatterySize + 1] = {};
+    NodeBattery b;
+    if (g_batteryRead)
+        g_batteryRead(&b);
+    d[0] = kBatteryVersion;
+    d[1] = b.flags;
+    put16(d + 2, b.pinMv);
+    put16(d + 4, b.batteryMv);
+    put16(d + 6, b.ratioMilli);
+    for (int i = 0; i < kBatterySize; ++i)
+        d[kBatterySize] += d[i];
+    out.write(d, sizeof(d));
+}
+
+static void applyBatteryRatio(const uint8_t* d)
+{
+    if (g_batterySetRatio)
+        g_batterySetRatio((uint16_t)((d[0] << 8) | d[1]));
 }
 
 static void writeNodeId(Transport& out)
@@ -508,20 +553,41 @@ void RhLink::byte(uint8_t b)
             rhAfterCommands();
             return;
         }
+        if (cmd_ == kReadBattery) {
+            writeBattery(out_);
+            ++commands_;
+            rhAfterCommands();
+            return;
+        }
         if (cmd_ == kReadNodeId) {
             writeNodeId(out_);
             ++commands_;
             rhAfterCommands();
             return;
         }
+        if (cmd_ == kReadFwUpdateInfo) {
+            fwUpdateWriteInfo(out_);
+            ++commands_;
+            return;
+        }
+        if (cmd_ == kReadFwUpdateStatus) {
+            fwUpdateWriteStatus(out_);
+            ++commands_;
+            return;
+        }
         if (cmd_ > 0x50) {   // writes to the node carry a payload and a checksum
             int size;
-            if (cmd_ == kWriteDetectionConfig)
+            const int fwSize = fwUpdatePayloadSize(cmd_);
+            if (fwSize >= 0)
+                size = fwSize;
+            else if (cmd_ == kWriteDetectionConfig)
                 size = kDetectionConfigWriteSize;
             else if (cmd_ == kWriteCalibrationConfig)
                 size = kCalibrationConfigDataSize;
             else if (cmd_ == kWriteNodeName)
                 size = kNodeNameSize;
+            else if (cmd_ == kWriteBatteryRatio)
+                size = 2;
             else {
                 g_message.command = cmd_;
                 size = (int8_t)g_message.getPayloadSize();
@@ -551,12 +617,16 @@ void RhLink::byte(uint8_t b)
     for (uint8_t i = 0; i < size; ++i)
         sum += buf_[i];
     if (sum == buf_[size]) {
-        if (cmd_ == kWriteDetectionConfig) {
+        if (fwUpdatePayloadSize(cmd_) >= 0) {
+            fwUpdateHandle(cmd_, buf_, size);
+        } else if (cmd_ == kWriteDetectionConfig) {
             applyDetectionConfig(buf_);
         } else if (cmd_ == kWriteCalibrationConfig) {
             applyCalibrationConfig(buf_);
         } else if (cmd_ == kWriteNodeName) {
             applyNodeName(buf_);
+        } else if (cmd_ == kWriteBatteryRatio) {
+            applyBatteryRatio(buf_);
         } else {
             g_message.command = cmd_;
             g_message.buffer.size = size;

@@ -14,6 +14,8 @@
 
 namespace c5 {
 
+class Transport;
+
 // C5-private extension of the RotorHazard serial-node protocol. Read commands
 // are <= 0x50 and writes are > 0x50, matching RhLink's existing framing.
 constexpr uint8_t kReadDetectionConfig = 0x41;
@@ -46,6 +48,53 @@ constexpr uint8_t kNodeStatsVersion = 1;
 constexpr uint8_t kNodeStatsSize = 56;
 constexpr uint8_t kNodeStatsUsbHost = 1;
 constexpr uint8_t kNodeStatsUartLink = 2;
+
+// Battery voltage (read 0x48, kBatterySize bytes, behind feature flag 0x0400):
+// a resistor divider from the battery to an ADC pin. Big-endian:
+//   0 version (1), 1 flags (1 = a divider is wired: the pin reads at least
+//   kBatteryPinMinMv), 2 pin mV, 4 battery mV (pin x ratio), 6 divider ratio
+//   x1000 (u16 each). The pin and battery read 0 until the first sample.
+// WRITE 0x7F (2 bytes, ratio x1000 BE16) sets and saves the ratio; 0 restores
+// the default. A known battery voltage calibrates it: ratio = battery / pin.
+constexpr uint8_t kReadBattery = 0x48;
+constexpr uint8_t kWriteBatteryRatio = 0x7F;
+constexpr uint8_t kBatteryVersion = 1;
+constexpr uint8_t kBatterySize = 8;
+constexpr uint8_t kBatteryWired = 1;
+constexpr uint16_t kBatteryPinMinMv = 150;
+constexpr uint16_t kBatteryRatioMin = 1000, kBatteryRatioMax = 20000;
+struct NodeBattery {
+    uint16_t pinMv = 0, batteryMv = 0, ratioMilli = 0;
+    uint8_t flags = 0;
+};
+
+// Reliable application update. Both direct RotorHazard serial and a relay
+// over AirPort speak exactly these messages. Writes retain RH's outer
+// additive checksum; STATUS acknowledges the next byte offset, making a
+// repeated chunk harmless after a lost reply.
+constexpr uint8_t kReadFwUpdateInfo = 0x46;
+constexpr uint8_t kReadFwUpdateStatus = 0x47;
+constexpr uint8_t kWriteFwUpdateBegin = 0x76;
+constexpr uint8_t kWriteFwUpdateData = 0x77;
+constexpr uint8_t kWriteFwUpdateFinish = 0x7B;
+constexpr uint8_t kWriteFwUpdateAbort = 0x7C;
+constexpr uint8_t kWriteFwUpdateConfirm = 0x7D;
+constexpr uint8_t kFwUpdateProtocol = 1;
+constexpr uint8_t kFwUpdateChunkSize = 64;
+constexpr uint8_t kFwUpdateInfoSize = 16;
+constexpr uint8_t kFwUpdateStatusSize = 16;
+constexpr uint8_t kFwUpdateBeginSize = 41; // protocol, session, size, SHA-256
+constexpr uint8_t kFwUpdateDataSize = 9 + kFwUpdateChunkSize; // session, offset, length, padded data
+
+// Device implementation in c5_ota.cpp. Weak no-op definitions keep the
+// portable host tests independent of ESP-IDF.
+void fwUpdateWriteInfo(Transport& out);
+void fwUpdateWriteStatus(Transport& out);
+int fwUpdatePayloadSize(uint8_t command);
+void fwUpdateHandle(uint8_t command, const uint8_t* data, size_t size);
+bool fwUpdateBusy();
+void fwUpdateInit();
+void fwUpdateTick();
 
 // What the firmware knows of itself that the glue cannot: filled on each read.
 struct NodeSystem {
@@ -106,7 +155,7 @@ private:
     Transport& out_;
     ConsoleHandler console_ = nullptr;
     uint8_t cmd_ = 0;
-    uint8_t buf_[72];   // the largest write payload plus its checksum
+    uint8_t buf_[80];   // the largest write payload plus its checksum
     uint8_t want_ = 0, have_ = 0;     // write command payload + checksum
     bool inConsole_ = false;
     char line_[96];
@@ -120,6 +169,9 @@ private:
 // the links whose counters it reports (either may be null).
 void rhSetSystemInfo(void (*fill)(NodeSystem* out));
 void rhSetStatsLinks(const RhLink* usb, const RhLink* uart);
+// READ 0x48 / WRITE 0x7F: the firmware's battery reading and ratio store
+// (without them the node answers "not wired").
+void rhSetBattery(void (*read)(NodeBattery* out), bool (*setRatio)(uint16_t ratioMilli));
 
 // Where a successful calibration write is saved (the firmware's flash).
 void rhSetCalibrationStore(void (*store)());

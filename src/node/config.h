@@ -37,10 +37,12 @@
 #define RHFEAT_C5_CALIBRATION_CONFIG ((uint16_t)0x0040)  // C5 calibration trims (protocol v2)
 #define RHFEAT_C5_NODE_ID ((uint16_t)0x0080)  // C5 node identity: READ 0x43 id (factory MAC), 0x44/0x75 name
 #define RHFEAT_C5_NODE_STATS ((uint16_t)0x0100)  // C5 node health: READ 0x45
+#define RHFEAT_SAFE_FWUPDATE ((uint16_t)0x0200)  // acknowledged in-application firmware update
+#define RHFEAT_C5_BATTERY ((uint16_t)0x0400)  // C5 battery voltage: READ 0x48, WRITE 0x7F divider ratio
 #define RHFEAT_NONE ((uint16_t)0)
 
 #if RHNODE_RADIO_BACKEND
-#define RHFEAT_FLAGS_VALUE (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID | RHFEAT_C5_NODE_STATS)
+#define RHFEAT_FLAGS_VALUE (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID | RHFEAT_C5_NODE_STATS | RHFEAT_SAFE_FWUPDATE | RHFEAT_C5_BATTERY)
 
 #define SERIAL_BAUD_RATE 921600
 #define MULTI_RHNODE_MAX 8

@@ -317,7 +317,8 @@ static void testRhProtocol()
           "revision %02x%02x", d.size() > 1 ? d[0] : 0, d.size() > 1 ? d[1] : 0);
     CHECK(readCmd(link, out, READ_MULTINODE_COUNT, 1, &d) && d[0] == 8, "multinode");
     CHECK(readCmd(link, out, READ_RHFEAT_FLAGS, 2, &d) &&
-          be16(d, 0) == (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG | RHFEAT_C5_NODE_ID | RHFEAT_C5_NODE_STATS),
+          be16(d, 0) == (RHFEAT_C5_DETECTION_CONFIG | RHFEAT_C5_CALIBRATION_CONFIG |
+                         RHFEAT_C5_NODE_ID | RHFEAT_C5_NODE_STATS | RHFEAT_SAFE_FWUPDATE | RHFEAT_C5_BATTERY),
           "features");
     // Its health (0x45): the firmware's part, the scanner's and the links' counters.
     rhSetSystemInfo([](c5::NodeSystem* sys) {
@@ -343,6 +344,27 @@ static void testRhProtocol()
         CHECK(u32(52) == before, "stats usb link %u", u32(52));
         rhSetStatsLinks(nullptr, nullptr);
         rhSetSystemInfo(nullptr);
+    }
+    // Battery (0x48): without a reading the node says "not wired"; with one,
+    // pin, battery and ratio; WRITE 0x7F sets the ratio through the store.
+    CHECK(readCmd(link, out, c5::kReadBattery, c5::kBatterySize, &d) && d[0] == c5::kBatteryVersion && d[1] == 0 &&
+          be16(d, 4) == 0, "battery without a reader");
+    {
+        static uint16_t ratio = 2000;
+        rhSetBattery([](c5::NodeBattery* b) {
+            b->pinMv = 2080;
+            b->ratioMilli = ratio;
+            b->batteryMv = (uint16_t)(2080u * ratio / 1000);
+            b->flags = c5::kBatteryWired;
+        }, [](uint16_t r) { ratio = r; return true; });
+        CHECK(readCmd(link, out, c5::kReadBattery, c5::kBatterySize, &d) && d[1] == c5::kBatteryWired &&
+              be16(d, 2) == 2080 && be16(d, 4) == 4160 && be16(d, 6) == 2000, "battery read %u %u %u", be16(d, 2), be16(d, 4), be16(d, 6));
+        const uint32_t before = link.commands();
+        writeCmd(link, c5::kWriteBatteryRatio, {0x08, 0x13});   // 2.067
+        CHECK(ratio == 2067 && link.commands() == before + 1, "battery ratio written %u", ratio);
+        CHECK(readCmd(link, out, c5::kReadBattery, c5::kBatterySize, &d) && be16(d, 4) == 4299, "battery after ratio %u", be16(d, 4));
+        CHECK(readCmd(link, out, READ_MULTINODE_COUNT, 1, &d) && d[0] == 8, "link in step after battery");
+        rhSetBattery(nullptr, nullptr);
     }
     // The node's identity: whatever it was given (the factory MAC on the C5).
     const uint8_t id[6] = {0x3c, 0x84, 0x27, 0x0a, 0x1b, 0x2c};

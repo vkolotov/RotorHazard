@@ -34,6 +34,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "c5_battery.h"
 #include "c5_filter.h"
 #include "c5_radio.h"
 #include "c5_rhglue.h"
@@ -542,6 +543,7 @@ void console(const char* line, Transport& out)
         say(out, "status | scan [cycles] | rf MHz | raw [LO] [stock] | freq seat MHz | gain N | n samples");
         say(out, "meter taps hop | image off|cancel | map floorDb | hold clipMin oobDb");
         say(out, "skip mask | stock 0|1 | seats N | ant 0|1 | filter [mean N|median ms] | autosave 0|1 | stats | save | reboot");
+        say(out, "vbat | vbat ratio <x1000> | vbat cal <battery mV now>");
         say(out, "cal show | set <MHz> <dB> | clear | on | off | floor [ms] | capture [ms] | save");
     } else if (!strcmp(cmd, "status")) {
         say(out, "%s %s, board %s, API %d, seats %d", firmwareVersionString, firmwareProcTypeString,
@@ -764,6 +766,31 @@ void console(const char* line, Transport& out)
             markDirty();
         }
         say(out, "antenna %d (%s)", g_antenna, g_antenna ? "u.FL" : "on-board ceramic");
+    } else if (!strcmp(cmd, "vbat")) {
+        // vbat | vbat ratio <x1000> | vbat cal <battery mV now>
+        NodeBattery b;
+        batteryRead(&b);
+        char sub[16] = {};
+        long v = 0;
+        const int fields = sscanf(line, "%*s %15s %ld", sub, &v);
+        if (fields == 2 && !strcmp(sub, "ratio")) {
+            if (v < 0 || v > 65535 || !batterySetRatio((uint16_t)v)) {
+                say(out, "err ratio %d..%d (x1000), 0 = default", kBatteryRatioMin, kBatteryRatioMax);
+                return;
+            }
+        } else if (fields == 2 && !strcmp(sub, "cal")) {
+            const long r = b.pinMv >= kBatteryPinMinMv && v > 0 ? v * 1000 / b.pinMv : 0;
+            if (r <= 0 || r > 65535 || !batterySetRatio((uint16_t)r)) {
+                say(out, "err no reading to calibrate against (pin %u mV)", b.pinMv);
+                return;
+            }
+        } else if (fields >= 1) {
+            say(out, "err vbat | vbat ratio <x1000> | vbat cal <battery mV now>");
+            return;
+        }
+        batteryRead(&b);
+        say(out, "battery %u mV, pin %u mV, ratio %.3f, %s", b.batteryMv, b.pinMv, b.ratioMilli / 1000.0,
+            (b.flags & kBatteryWired) ? "wired" : "not wired");
     } else if (!strcmp(cmd, "save")) {
         saveSettings();
         g_settingsDirty = false;
@@ -820,13 +847,17 @@ void nodeTask(void*)
 {
     uint32_t k = 0;
     for (;;) {
-        g_scanner.cycle(nowUs);
-        recordCycle();
+        if (!fwUpdateBusy()) {
+            g_scanner.cycle(nowUs);
+            recordCycle();
+        }
         pollLinks();
+        fwUpdateTick();
         static uint32_t lastFilterMs = 0;
         if (rhc5_millis() - lastFilterMs >= 1000) {
             lastFilterMs = rhc5_millis();
             updateFilterLength(false);
+            batterySample();
         }
         if ((++k & 63) == 0 && g_settingsAutoSave && g_settingsDirty && rhc5_millis() - g_dirtySinceMs > 2000) {
             saveSettings();
@@ -880,6 +911,8 @@ extern "C" void app_main(void)
         nvs_flash_init();
     }
     loadSettings();
+    fwUpdateInit();
+    batteryInit();
     applyAntenna();
     if (!g_radio.begin(g_scanner.config().gain))
         ESP_LOGE(TAG, "radio boot check failed: captures are not live");
@@ -894,6 +927,7 @@ extern "C" void app_main(void)
     rhSetNameStore(saveNodeName);
     // Health for mission control (READ 0x45).
     rhSetStatsLinks(&g_usbLink, g_uartLinkOn ? &g_uartLink : nullptr);
+    rhSetBattery(batteryRead, batterySetRatio);
     rhSetSystemInfo([](NodeSystem* s) {
         s->uptimeS = (uint32_t)(esp_timer_get_time() / 1000000);
         s->heap = esp_get_free_heap_size();
