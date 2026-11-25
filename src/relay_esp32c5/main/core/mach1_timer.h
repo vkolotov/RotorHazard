@@ -41,7 +41,7 @@ struct cJSON;
 
 namespace relay {
 
-constexpr const char* RELAY_VERSION = "0.3.4";
+constexpr const char* RELAY_VERSION = "0.3.5";
 // The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
 #ifndef RELAY_BOARD
 #define RELAY_BOARD "c5"
@@ -110,6 +110,8 @@ public:
     // Queue an OTA job after its command_result has been sent. Arguments are
     // target ("node" or "relay"), HTTPS URL, SHA-256 hex and byte size.
     std::function<std::string(const std::string&, const std::string&, const std::string&, size_t)> firmwareUpdate;
+    // Calibrate the relay's own battery divider against a measured voltage (mV): "" or why not.
+    std::function<std::string(int mv)> relayBatteryCalibrate;
 
     // Loaded at boot from the saved settings.
     // The last C5 detection write (WRITE 0x73 payload), written again on every (re)connect.
@@ -200,6 +202,7 @@ private:
     std::string setLevels(cJSON* command);
     std::string setChannel(cJSON* command);
     std::string nodeIo(cJSON* command, cJSON* result);
+    std::string batteryCalibrate(cJSON* command);
     std::string rememberC5Input(cJSON* command);
     std::string raceSettings(cJSON* command);
     void adoptNode();

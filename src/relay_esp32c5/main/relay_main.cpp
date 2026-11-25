@@ -748,7 +748,7 @@ static void consoleCommand(const std::string& line, TimerContext& ctx, NodeDrive
     } else if (line.rfind("name ", 0) == 0) {
         const std::string error = timer.rename(line.substr(5));
         printf("%s\n", error.empty() ? ("name \"" + timer.name + "\"").c_str() : error.c_str());
-    } else if (line == "vbat" || line.rfind("vbat ", 0) == 0) {
+    } else if (line == "vbat" || line == "vbat " || line.rfind("vbat ", 0) == 0) {
         // vbat | vbat ratio <x1000> | vbat cal <battery mV now>
         char sub[16] = {};
         long v = 0;
@@ -869,6 +869,15 @@ static void timerTask(void* arg)
     };
     timer.send = [](const std::string& text) { queueOut('M', text); };
     timer.systemInfo = addSystemInfo;
+    timer.relayBatteryCalibrate = [](int mv) -> std::string {
+        const Battery b = batteryRead();
+        if (!b.wired)
+            return "The relay reports no battery divider.";
+        if (!batterySetRatio((int)((int64_t)mv * 1000 / b.pinMv)))
+            return "That voltage does not fit the relay's reading.";
+        addLog("Relay battery calibrated: ratio " + std::to_string(batteryRead().ratioMilli) + "/1000");
+        return "";
+    };
     timer.firmwareUpdate = [&](const std::string& target, const std::string& url,
                                const std::string& sha256, size_t size) -> std::string {
         if (pendingUpdate.pending || g_update.active)
@@ -1249,6 +1258,13 @@ static int cmdMinLap(int argc, char** argv)
     return 0;
 }
 
+static int cmdVbat(int argc, char** argv)
+{
+    postText(QueueKind::Console, ("vbat " + joinArgs(argc, argv, 1)).c_str());
+    vTaskDelay(pdMS_TO_TICKS(50));
+    return 0;
+}
+
 // What the node link's pins and UART are doing: which side of the link is silent.
 static int cmdLink(int, char**)
 {
@@ -1273,6 +1289,7 @@ static const esp_console_cmd_t kCommands[] = {
     {.command = "feed", .help = "feed <url>: the club feed URL from mach1 (source segment e.g. relay)", .hint = nullptr, .func = cmdFeed, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "name", .help = "name <text>: what mach1 calls this timer", .hint = nullptr, .func = cmdName, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "minlap", .help = "minlap <ms>: minimum lap time", .hint = nullptr, .func = cmdMinLap, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "vbat", .help = "vbat [ratio <x1000> | cal <battery mV now>]: the relay's battery", .hint = nullptr, .func = cmdVbat, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "link", .help = "The node link's pins and byte counts", .hint = nullptr, .func = cmdLink, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "reboot", .help = "Restart (applies saved settings)", .hint = nullptr, .func = cmdReboot, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
 };

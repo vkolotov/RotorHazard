@@ -741,6 +741,24 @@ static void timerTests()
         battery = cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(r.last("status"), "state"), "system"), "node"), "battery");
         CHECK(battery && num(battery, "mv") == 4289);
     });
+    test("timer: battery_calibrate sets the node's ratio from a measured voltage; the relay's through its hook", [] {
+        Rig r;
+        r.node.hasStats = true;
+        r.node.hasBattery = true;
+        r.up();
+        r.run(10100);
+        r.command(R"({"type":"command","id":"c1","action":"battery_calibrate","target":"node","mv":4200})");
+        CHECK(r.node.batteryRatio == 2024);   // 4200 / 2075
+        CHECK(str(r.last("command_result"), "id") == "c1" && cJSON_IsTrue(cJSON_GetObjectItem(r.last("command_result"), "ok")));
+        r.command(R"({"type":"command","id":"c2","action":"battery_calibrate","target":"relay","mv":4070})");
+        CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(r.last("command_result"), "ok")));  // no hook: no relay battery
+        int got = 0;
+        r.timer.relayBatteryCalibrate = [&got](int mv) { got = mv; return std::string(); };
+        r.command(R"({"type":"command","id":"c3","action":"battery_calibrate","target":"relay","mv":4070})");
+        CHECK(got == 4070 && cJSON_IsTrue(cJSON_GetObjectItem(r.last("command_result"), "ok")));
+        r.command(R"({"type":"command","id":"c4","action":"battery_calibrate","target":"node","mv":100})");
+        CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(r.last("command_result"), "ok")) && r.node.batteryRatio == 2024);
+    });
     test("timer: no battery object for a node without the feature", [] {
         Rig r;
         r.node.hasStats = true;
@@ -784,8 +802,9 @@ static void settingsTests()
         r.up();
         cJSON* hello = r.last("hello");
         cJSON* features = cJSON_GetObjectItem(hello, "features");
-        CHECK(cJSON_GetArraySize(features) == 5 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io" &&
-              std::string(cJSON_GetArrayItem(features, 4)->valuestring) == "firmware_update");
+        CHECK(cJSON_GetArraySize(features) == 6 && std::string(cJSON_GetArrayItem(features, 0)->valuestring) == "node_io" &&
+              std::string(cJSON_GetArrayItem(features, 4)->valuestring) == "firmware_update" &&
+              std::string(cJSON_GetArrayItem(features, 5)->valuestring) == "battery_calibrate");
         CHECK(num(cJSON_GetObjectItem(hello, "c5_input"), "angle") == 90);
         CHECK(num(cJSON_GetObjectItem(hello, "race_settings"), "minLapMs") == 4000);
     });

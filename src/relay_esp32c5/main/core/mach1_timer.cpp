@@ -262,6 +262,7 @@ std::string Mach1Timer::hello() const
     cJSON_AddItemToArray(features, cJSON_CreateString("race_settings"));
     cJSON_AddItemToArray(features, cJSON_CreateString("set_name"));
     cJSON_AddItemToArray(features, cJSON_CreateString("firmware_update"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("battery_calibrate"));
     // The node this timer is (its id), and the relay reaching it.
     if (driver_ && !driver_->info().nodeId.empty())
         cJSON_AddStringToObject(m, "node_id", driver_->info().nodeId.c_str());
@@ -697,6 +698,8 @@ void Mach1Timer::runCommand(cJSON* command, int64_t now)
         error = setLevels(command);
     else if (action == "set_channel")
         error = setChannel(command);
+    else if (action == "battery_calibrate")
+        error = batteryCalibrate(command);
     else if (action == "firmware_update") {
         if (!firmwareUpdate)
             error = "Firmware update is unavailable.";
@@ -1006,6 +1009,33 @@ void Mach1Timer::gateConfig(cJSON* m, int64_t now)
 
 // ---------------------------------------------------------------------------
 // Settings from mission control
+
+// A battery reading set to what a meter measured (mV): the divider ratio
+// becomes measured / pin, saved where the divider is (the relay or the node).
+std::string Mach1Timer::batteryCalibrate(cJSON* command)
+{
+    const std::string target = getStr(command, "target");
+    const int64_t mv = getInt(command, "mv", 0);
+    if (mv < 500 || mv > 60000)
+        return "Give the measured battery voltage.";
+    if (target == "relay")
+        return relayBatteryCalibrate ? relayBatteryCalibrate((int)mv) : "This relay has no battery reading.";
+    if (target != "node")
+        return "Battery target must be node or relay.";
+    if (!driver_ || driver_->status() != NodeStatus::Running)
+        return "The gate node is not connected to the relay.";
+    if (engine.status == RaceStatus::Staging || engine.status == RaceStatus::Racing)
+        return "Calibrate the battery between races.";
+    const NodeBattery& b = driver_->nodeBattery();
+    if (!driver_->info().hasBattery || !b.valid || !(b.flags & NODE_BATTERY_WIRED) || !b.pinMv)
+        return "The node reports no battery divider.";
+    const int64_t ratio = mv * 1000 / b.pinMv;
+    if (ratio < 1000 || ratio > 20000)
+        return "That voltage does not fit the node's reading.";
+    driver_->writeRaw(WRITE_NODE_BATTERY_RATIO, {(uint8_t)(ratio >> 8), (uint8_t)ratio});
+    note("Node battery calibrated: ratio " + std::to_string(ratio) + "/1000");
+    return "";
+}
 
 std::string Mach1Timer::nodeIo(cJSON* command, cJSON* result)
 {
