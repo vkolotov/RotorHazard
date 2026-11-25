@@ -1033,15 +1033,29 @@ static void timerTask(void* arg)
             }
             g_update = {true, request.target, "starting", "", 0, request.size};
             addLog("Firmware update started: " + request.target);
-            int lastReported = -1;
+            int64_t lastReportMs = -1;
+            std::string lastPhase;
+            // The update holds this task for minutes. Meanwhile: progress to
+            // mach1 every 2 s (and on each new phase), and what arrives is
+            // held for afterwards (a command or gate config must not reach
+            // the node mid-update), but mach1's messages count as heard, so
+            // neither socket check takes it for gone.
+            std::vector<Event> held;
             auto progress = [&](const char* phase, size_t done, size_t total) {
-                g_loopBeat.store(esp_timer_get_time() / 1000);
+                const int64_t t = esp_timer_get_time() / 1000;
+                g_loopBeat.store(t);
                 g_update.phase = phase;
                 g_update.done = done;
                 g_update.total = total;
-                const int pct = total ? (int)(done * 100 / total) : 0;
-                if (pct == 100 || pct / 5 != lastReported / 5) {
-                    lastReported = pct;
+                Event e;
+                while (xQueueReceive(g_events, &e, 0) == pdTRUE) {
+                    if (e.kind == QueueKind::SocketText && e.fd == g_wsGen.load())
+                        timer.heard(t);
+                    held.push_back(e);
+                }
+                if (lastReportMs < 0 || t - lastReportMs >= 2000 || lastPhase != phase || (total && done >= total)) {
+                    lastReportMs = t;
+                    lastPhase = phase;
                     queueOut('M', timer.status());
                     publishStatus(*ctx, driver, timer);
                 }
@@ -1055,8 +1069,14 @@ static void timerTask(void* arg)
             g_update.error = ok ? "" : updateError;
             addLog(ok ? "Firmware update complete: " + request.target
                       : "Firmware update failed: " + updateError);
+            timer.heard(esp_timer_get_time() / 1000);
             queueOut('M', timer.status());
             publishStatus(*ctx, driver, timer);
+            // What arrived during the update, back in line, ahead of anything newer.
+            for (auto it = held.rbegin(); it != held.rend(); ++it) {
+                if (xQueueSendToFront(g_events, &*it, 0) != pdTRUE)
+                    free(it->text);
+            }
             if (ok && request.target == "relay") {
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 esp_restart();
