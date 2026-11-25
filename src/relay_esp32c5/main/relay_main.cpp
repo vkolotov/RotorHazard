@@ -59,6 +59,7 @@
 #include "node_protocol.h"
 #include "usb_link.h"
 #include "firmware_update.h"
+#include "battery.h"
 
 using namespace relay;
 
@@ -634,6 +635,13 @@ static void addSystemInfo(cJSON* sys)
     int links = 0;
     cJSON_AddNumberToObject(sys, "web_clients", webClients(&links));
     cJSON_AddNumberToObject(sys, "link_clients", links);
+    const Battery battery = batteryRead();
+    if (battery.wired) {
+        cJSON* b = cJSON_AddObjectToObject(sys, "battery");
+        cJSON_AddNumberToObject(b, "mv", battery.batteryMv);
+        cJSON_AddNumberToObject(b, "pin_mv", battery.pinMv);
+        cJSON_AddNumberToObject(b, "ratio", battery.ratioMilli / 1000.0);
+    }
     if (g_update.active || !g_update.phase.empty()) {
         cJSON* update = cJSON_AddObjectToObject(sys, "update");
         cJSON_AddStringToObject(update, "target", g_update.target.c_str());
@@ -740,6 +748,24 @@ static void consoleCommand(const std::string& line, TimerContext& ctx, NodeDrive
     } else if (line.rfind("name ", 0) == 0) {
         const std::string error = timer.rename(line.substr(5));
         printf("%s\n", error.empty() ? ("name \"" + timer.name + "\"").c_str() : error.c_str());
+    } else if (line == "vbat" || line.rfind("vbat ", 0) == 0) {
+        // vbat | vbat ratio <x1000> | vbat cal <battery mV now>
+        char sub[16] = {};
+        long v = 0;
+        const int fields = sscanf(line.c_str(), "vbat %15s %ld", sub, &v);
+        Battery b = batteryRead();
+        bool ok = true;
+        if (fields == 2 && !strcmp(sub, "ratio"))
+            ok = v >= 0 && batterySetRatio((int)v);
+        else if (fields == 2 && !strcmp(sub, "cal"))
+            ok = b.wired && v > 0 && batterySetRatio((int)(v * 1000 / b.pinMv));
+        else if (fields >= 1)
+            ok = false;
+        b = batteryRead();
+        if (!ok)
+            printf("usage: vbat | vbat ratio <x1000, 1000..20000, 0 = default> | vbat cal <battery mV now>\n");
+        printf("battery %d mV, pin %d mV, ratio %.3f, %s\n", b.batteryMv, b.pinMv, b.ratioMilli / 1000.0,
+               b.wired ? "wired" : "not wired");
     } else if (line.rfind("minlap ", 0) == 0) {
         const int ms = atoi(line.c_str() + 7);
         timer.engine.settings.minLapMs = ms;
@@ -879,6 +905,7 @@ static void timerTask(void* arg)
     bool gateRunning = false;
     bool handedOver = false;  // the USB task has the link (serial pass-through)
     int64_t nextGateTry = 0;
+    int64_t nextBatteryMs = 0;
     auto gateStep = [&](int64_t now) {
         if (gateRunning && driver.status() != NodeStatus::Running) {
             gateRunning = false;
@@ -1024,6 +1051,10 @@ static void timerTask(void* arg)
             free(e.text);
         }
         const int64_t now = esp_timer_get_time() / 1000;
+        if (now >= nextBatteryMs) {
+            nextBatteryMs = now + 1000;
+            batterySample();
+        }
         if (pendingUpdate.pending && !handedOver) {
             FirmwareRequest request = pendingUpdate;
             pendingUpdate.pending = false;
@@ -1497,6 +1528,7 @@ extern "C" void app_main(void)
 
     static TimerContext ctx;
     ctx.settings = loadSettings();
+    batteryInit();
     {
         nvs_handle_t h;
         if (nvs_open("relay", NVS_READONLY, &h) == ESP_OK) {

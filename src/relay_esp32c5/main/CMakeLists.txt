@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS "relay_main.cpp" "network.cpp" "core/web_form.cpp" "core/node_protocol.cpp" "core/node_driver.cpp" "core/race_engine.cpp"
-         "core/channels.cpp" "core/mach1_timer.cpp" "core/feed_url.cpp" "core/usb_link.cpp" "firmware_update.cpp"
+         "core/channels.cpp" "core/mach1_timer.cpp" "core/feed_url.cpp" "core/usb_link.cpp" "firmware_update.cpp" "battery.cpp"
     INCLUDE_DIRS "core"
-    PRIV_REQUIRES app_update esp_http_client esp_http_server esp_wifi esp_netif esp_event nvs_flash esp_driver_uart esp_timer json console
+    PRIV_REQUIRES app_update esp_adc esp_http_client esp_http_server esp_wifi esp_netif esp_event nvs_flash esp_driver_uart esp_timer json console
                   mbedtls esp_driver_usb_serial_jtag esp_driver_gpio)
 
 # Default link pins: the board's TX/RX pads (UART0's pins), which the ROM
@@ -15,6 +15,14 @@ else()
     set(RELAY_DEFAULT_TX 11)
     set(RELAY_DEFAULT_RX 12)
 endif()
+# The relay's battery divider (ADC1): GPIO1 on the S3 boards, none on the C5.
+if(NOT DEFINED RELAY_VBAT_GPIO)
+    if(IDF_TARGET STREQUAL "esp32s3")
+        set(RELAY_VBAT_GPIO 1)
+    else()
+        set(RELAY_VBAT_GPIO -1)
+    endif()
+endif()
 if(NOT DEFINED RELAY_LINK_TX)
     set(RELAY_LINK_TX ${RELAY_DEFAULT_TX})
 endif()
@@ -25,5 +33,5 @@ endif()
 string(REPLACE "esp32" "" RELAY_BOARD "${IDF_TARGET}")
 string(TOUPPER "${RELAY_BOARD}" RELAY_BOARD_UC)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
-    RELAY_LINK_TX=${RELAY_LINK_TX} RELAY_LINK_RX=${RELAY_LINK_RX}
+    RELAY_LINK_TX=${RELAY_LINK_TX} RELAY_LINK_RX=${RELAY_LINK_RX} RELAY_VBAT_GPIO=${RELAY_VBAT_GPIO}
     RELAY_BOARD="${RELAY_BOARD}" RELAY_BOARD_UC="${RELAY_BOARD_UC}")
