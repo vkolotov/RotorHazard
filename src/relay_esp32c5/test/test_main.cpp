@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "backpack.h"
 #include "cJSON.h"
 #include "channels.h"
 #include "fake_node.h"
@@ -808,6 +809,24 @@ static void settingsTests()
         CHECK(num(cJSON_GetObjectItem(hello, "c5_input"), "angle") == 90);
         CHECK(num(cJSON_GetObjectItem(hello, "race_settings"), "minLapMs") == 4000);
     });
+    test("timer: osd_test only with a backpack hook; it gets the phrase and text", [] {
+        Rig r;
+        r.up();
+        CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(r.last("hello"), "features")) == 6);  // no osd_test
+        r.command(R"({"type":"command","id":"o1","action":"osd_test","phrase":"abc"})");
+        CHECK(str(r.last("command_result"), "error") == "This relay has no OSD backpack.");
+        std::string gotPhrase, gotText;
+        Rig b;
+        b.timer.osdTest = [&](const std::string& p, const std::string& t) { gotPhrase = p; gotText = t; return std::string(); };
+        b.up();
+        cJSON* features = cJSON_GetObjectItem(b.last("hello"), "features");
+        CHECK(std::string(cJSON_GetArrayItem(features, cJSON_GetArraySize(features) - 1)->valuestring) == "osd_test");
+        b.command(R"({"type":"command","id":"o2","action":"osd_test","phrase":"my phrase"})");
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(b.last("command_result"), "ok")));
+        CHECK(gotPhrase == "my phrase" && gotText == "MACH1");
+        b.command(R"({"type":"command","id":"o3","action":"osd_test"})");
+        CHECK(str(b.last("command_result"), "error") == "Give the goggles' bind phrase.");
+    });
     test("timer: firmware update command is accepted and queued", [] {
         Rig r;
         std::string target, url, sha;
@@ -1140,6 +1159,56 @@ static void usbLinkTests()
     });
 }
 
+static std::string hex(const std::vector<uint8_t>& v)
+{
+    std::string out;
+    char b[3];
+    for (uint8_t x : v) {
+        std::snprintf(b, sizeof b, "%02x", x);
+        out += b;
+    }
+    return out;
+}
+
+static void backpackTests()
+{
+    test("backpack: MSP v2 request frames match the backpack's (verified on a WROOM-32)", [] {
+        CHECK(hex(mspV2Frame(MSP_BACKPACK_VERSION)) == std::string("24583c0010000000ae"));
+        CHECK(hex(mspV2Frame(MSP_SET_OSD, {4})) == std::string("24583c00b600010004df"));
+    });
+    test("backpack: a reply is found after noise; a bad checksum is not", [] {
+        // The reply a Timer Backpack built from master gave on 2026-11-26.
+        std::vector<uint8_t> data = {0x00, 0xff, '$', 'X', '>', 0x00, 0x10, 0x00, 0x06, 0x00, 'm', 'a', 's', 't', 'e', 'r', 0xe4};
+        uint16_t fn = 0;
+        std::vector<uint8_t> payload;
+        CHECK(mspV2FindReply(data, fn, payload));
+        CHECK_EQ(fn, MSP_BACKPACK_VERSION);
+        CHECK(std::string(payload.begin(), payload.end()) == "master");
+        data.back() ^= 1;
+        CHECK(!mspV2FindReply(data, fn, payload));
+    });
+    test("backpack: UID clears bit 0 of byte 0 (md5 done by the caller)", [] {
+        // A digest with bit 0 set (md5 of the "mach1laptimer" phrase is e498a8251ead, already even).
+        const uint8_t digest[6] = {0xe5, 0x98, 0xa8, 0x25, 0x1e, 0xad};
+        uint8_t uid[6];
+        uidFromDigest(digest, uid);
+        CHECK(hex(std::vector<uint8_t>(uid, uid + 6)) == std::string("e498a8251ead"));
+        CHECK(bindPhraseHashInput("x") == "-DMY_BINDING_PHRASE=\"x\"");
+    });
+    test("backpack: an OSD message is uid, clear, centred text, display, own uid", [] {
+        const uint8_t uid[6] = {1, 2, 3, 4, 5, 6};
+        const auto f = osdMessageFrames(uid, 30, "HELLO");
+        CHECK_EQ(f.size(), (size_t)5);
+        CHECK(hex(f[0]).substr(16, 14) == std::string("01010203040506"));
+        CHECK_EQ(f[2][8], (uint8_t)3);
+        CHECK_EQ(f[2][9], (uint8_t)(OSD_ROWS - 1));  // row clamped
+        CHECK_EQ(f[2][10], (uint8_t)((OSD_COLS - 5) / 2));
+        CHECK(hex(f[4]).substr(16, 2) == std::string("00"));
+        const auto m = osdMessageFrames(uid, 0, "Mach1");
+        CHECK(std::string(m[2].begin() + 12, m[2].end() - 1) == "MACH1");  // the font has no lowercase
+    });
+}
+
 int main()
 {
     CHECK(relayConstantsChecked() == 1);
@@ -1149,6 +1218,7 @@ int main()
     settingsTests();
     identityTests();
     usbLinkTests();
+    backpackTests();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

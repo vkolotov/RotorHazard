@@ -60,6 +60,7 @@
 #include "usb_link.h"
 #include "firmware_update.h"
 #include "battery.h"
+#include "osd_backpack.h"
 
 using namespace relay;
 
@@ -117,6 +118,11 @@ static std::atomic<bool> g_linkAlive{false};
 // Which transport the page on the link uses: one page at a time, the first
 // to speak; another is told the relay is busy.
 enum LinkVia : int { ViaNone = 0, ViaUsb = 1, ViaLocal = 2 };
+// The node link's pins: the build's default, or `linkpins` from NVS (set
+// before the timer task starts, read-only afterwards).
+static int g_linkTx = RELAY_LINK_TX;
+static int g_linkRx = RELAY_LINK_RX;
+
 static std::atomic<int> g_linkVia{ViaNone};
 // The local page carrying the relay (its WebSocket), when g_linkVia is ViaLocal.
 static std::atomic<int> g_linkFd{-1};
@@ -231,7 +237,7 @@ public:
         // then the driver. Installing first hung in uart_ll_update() after a
         // software restart (interrupt watchdog, boot loop).
         ESP_ERROR_CHECK(uart_param_config(LINK_UART, &config));
-        ESP_ERROR_CHECK(uart_set_pin(LINK_UART, RELAY_LINK_TX, RELAY_LINK_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+        ESP_ERROR_CHECK(uart_set_pin(LINK_UART, g_linkTx, g_linkRx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
         ESP_ERROR_CHECK(uart_driver_install(LINK_UART, 2048, 0, 0, nullptr, 0));
     }
     void flushInput() override { uart_flush_input(LINK_UART); }
@@ -596,7 +602,7 @@ static void printStatus(const TimerContext& ctx, NodeDriver& driver, Mach1Timer&
 {
     const int64_t now = esp_timer_get_time() / 1000;
     printf(RELAY_BOARD "-relay %s  uid %s  name \"%s\"\n", RELAY_VERSION, ctx.uid.c_str(), ctx.settings.name.c_str());
-    printf("link     UART1 tx %d rx %d @ %d\n", RELAY_LINK_TX, RELAY_LINK_RX, LINK_BAUD);
+    printf("link     UART1 tx %d rx %d @ %d\n", g_linkTx, g_linkRx, LINK_BAUD);
     printf("wifi     %s %s  ssid \"%s\"%s   clock %s\n", networkUp() ? "up" : "down", networkIp().c_str(), ctx.settings.ssid.c_str(), hotspotOn() ? ("  hotspot " + hotspotSsid()).c_str() : "",
            clockValid() ? "synced" : "not synced");
     printf("mach1    %s%s  %s  pending %u%s\n", timer.socketConnected() ? "connected" : "not connected",
@@ -869,6 +875,15 @@ static void timerTask(void* arg)
     };
     timer.send = [](const std::string& text) { queueOut('M', text); };
     timer.systemInfo = addSystemInfo;
+    if (backpackWired())
+        timer.osdTest = [](const std::string& phrase, const std::string& text) -> std::string {
+            if (backpackVersion().empty())
+                return "The OSD backpack does not answer.";
+            if (!backpackOsdSweep(phrase, text))
+                return "An OSD test is already running.";
+            addLog("OSD test \"" + text + "\" sent");
+            return "";
+        };
     timer.relayBatteryCalibrate = [](int mv) -> std::string {
         const Battery b = batteryRead();
         if (!b.wired)
@@ -1269,10 +1284,77 @@ static int cmdVbat(int argc, char** argv)
 static int cmdLink(int, char**)
 {
     printf("UART%d tx %d rx %d @ %d: sent %lu bytes, received %lu since boot; %u waiting\n", (int)LINK_UART,
-           RELAY_LINK_TX, RELAY_LINK_RX, LINK_BAUD, (unsigned long)g_uartTx.load(), (unsigned long)g_uartRx.load(),
+           g_linkTx, g_linkRx, LINK_BAUD, (unsigned long)g_uartTx.load(), (unsigned long)g_uartRx.load(),
            [] { size_t n = 0; uart_get_buffered_data_len(LINK_UART, &n); return (unsigned)n; }());
-    printf("rx pin level now %d\n", gpio_get_level((gpio_num_t)RELAY_LINK_RX));
-    gpio_dump_io_configuration(stdout, (1ULL << RELAY_LINK_TX) | (1ULL << RELAY_LINK_RX));
+    printf("rx pin level now %d\n", gpio_get_level((gpio_num_t)g_linkRx));
+    gpio_dump_io_configuration(stdout, (1ULL << g_linkTx) | (1ULL << g_linkRx));
+    return 0;
+}
+
+// A pin the node link may use: a real output (TX) or input (RX) that is not
+// the native USB, the flash/PSRAM bus or the battery divider.
+static bool linkPinUsable(int pin, bool output)
+{
+    if (output ? !GPIO_IS_VALID_OUTPUT_GPIO(pin) : !GPIO_IS_VALID_GPIO(pin))
+        return false;
+    if (pin == RELAY_VBAT_GPIO)
+        return false;
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (pin == 19 || pin == 20 || (pin >= 26 && pin <= 37))  // USB; flash and octal PSRAM
+        return false;
+#elif CONFIG_IDF_TARGET_ESP32C5
+    if (pin == 13 || pin == 14 || (pin >= 16 && pin <= 22))  // USB; flash
+        return false;
+#endif
+    return true;
+}
+
+// The node link's pins, kept in NVS; `linkpins default` returns to the build's.
+static int cmdLinkPins(int argc, char** argv)
+{
+    if (argc == 2 && strcmp(argv[1], "default") == 0) {
+        nvs_handle_t h;
+        if (nvs_open("relay", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_erase_key(h, "linktx");
+            nvs_erase_key(h, "linkrx");
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        printf("Back to the build's pins (tx %d rx %d); `reboot` to use them.\n", RELAY_LINK_TX, RELAY_LINK_RX);
+        return 0;
+    }
+    if (argc != 3) {
+        printf("linkpins <tx gpio> <rx gpio> | default   (now tx %d rx %d, build default tx %d rx %d)\n", g_linkTx, g_linkRx,
+               RELAY_LINK_TX, RELAY_LINK_RX);
+        return 1;
+    }
+    const int tx = atoi(argv[1]), rx = atoi(argv[2]);
+    if (tx == rx || !linkPinUsable(tx, true) || !linkPinUsable(rx, false)) {
+        printf("Not usable for the node link: tx %d rx %d.\n", tx, rx);
+        return 1;
+    }
+    const bool ok = saveInt("linktx", tx) && saveInt("linkrx", rx);
+    printf(ok ? "Saved; `reboot` to use them.\n" : "Could not save.\n");
+    return ok ? 0 : 1;
+}
+
+// The OSD Timer Backpack: version, wifi, osd <phrase> <text...>, clear <phrase>.
+static int cmdBackpack(int argc, char** argv)
+{
+    const std::string action = argc > 1 ? argv[1] : "";
+    if (action == "version") {
+        const std::string v = backpackVersion();
+        printf("%s\n", v.empty() ? "no answer" : v.c_str());
+    } else if (action == "wifi") {
+        backpackWifi();
+    } else if (action == "osd" && argc > 2) {
+        backpackOsd(argv[2], 8, argc > 3 ? joinArgs(argc, argv, 3) : "MACH1 OSD TEST");
+    } else if (action == "clear" && argc > 2) {
+        backpackOsdClear(argv[2]);
+    } else if (!action.empty()) {
+        printf("backpack [version | wifi | osd <bind phrase> [text] | clear <bind phrase>]\n");
+    }
+    printf("%s\n", backpackSummary().c_str());
     return 0;
 }
 
@@ -1290,6 +1372,8 @@ static const esp_console_cmd_t kCommands[] = {
     {.command = "name", .help = "name <text>: what mach1 calls this timer", .hint = nullptr, .func = cmdName, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "minlap", .help = "minlap <ms>: minimum lap time", .hint = nullptr, .func = cmdMinLap, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "vbat", .help = "vbat [ratio <x1000> | cal <battery mV now>]: the relay's battery", .hint = nullptr, .func = cmdVbat, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "backpack", .help = "backpack [version | wifi | osd <bind phrase> [text] | clear <bind phrase>]: the OSD Timer Backpack", .hint = nullptr, .func = cmdBackpack, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
+    {.command = "linkpins", .help = "linkpins <tx> <rx> | default: the node link's GPIOs (after reboot)", .hint = nullptr, .func = cmdLinkPins, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "link", .help = "The node link's pins and byte counts", .hint = nullptr, .func = cmdLink, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
     {.command = "reboot", .help = "Restart (applies saved settings)", .hint = nullptr, .func = cmdReboot, .argtable = nullptr, .func_w_context = nullptr, .context = nullptr},
 };
@@ -1546,10 +1630,17 @@ extern "C" void app_main(void)
     static TimerContext ctx;
     ctx.settings = loadSettings();
     batteryInit();
+    backpackInit();
     {
         nvs_handle_t h;
         if (nvs_open("relay", NVS_READONLY, &h) == ESP_OK) {
             g_diagBefore = nvsString(h, "lastdiag", "");
+            int32_t tx, rx;
+            if (nvs_get_i32(h, "linktx", &tx) == ESP_OK && nvs_get_i32(h, "linkrx", &rx) == ESP_OK && tx != rx &&
+                linkPinUsable(tx, true) && linkPinUsable(rx, false)) {
+                g_linkTx = tx;
+                g_linkRx = rx;
+            }
             nvs_close(h);
         }
     }

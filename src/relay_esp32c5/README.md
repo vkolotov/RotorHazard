@@ -80,10 +80,13 @@ idf.py -B build-s3 -D SDKCONFIG=build-s3/sdkconfig build
 idf.py -B build-s3 -D SDKCONFIG=build-s3/sdkconfig -p /dev/serial/by-id/<relay> flash
 ```
 
-The link defaults to the board's TX/RX pins, **GPIO43/44** (UART0's pads;
-avoid 35-37, the octal PSRAM's). The COM port's USB-UART bridge is wired to
-the same pins: with the radio connected, leave `COM` unplugged (its TX would
-fight the radio's on GPIO44). The console is on the native `USB` port
+The link defaults to **GPIO15 (TX) / GPIO16 (RX)** on UART1 since 0.3.6
+(0.3.5 and older: GPIO43/44, the COM port's pins). Console
+`linkpins <tx> <rx>` overrides them in NVS (after `reboot`; `linkpins
+default` undoes it), e.g. `linkpins 43 44` for a board still wired the old
+way. S3 pin map: 15/16 radio, 17/18 the OSD Timer Backpack (UART2), 43/44
+left to the COM port (UART0, pairing relays), 1 the battery divider; avoid
+0/3/45/46 (strapping), 19/20 (USB), 26-37 (flash, octal PSRAM). The console is on the native `USB` port
 (`303a:1001`). Flash once over `COM` (auto-reset into download mode, as the
 factory firmware may own the USB port), then over `USB`. On an N16R8 clone
 the `5V IN` pin is input-only until its `IN-OUT` pads are bridged. Names

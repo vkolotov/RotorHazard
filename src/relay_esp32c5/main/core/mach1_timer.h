@@ -41,7 +41,7 @@ struct cJSON;
 
 namespace relay {
 
-constexpr const char* RELAY_VERSION = "0.3.5";
+constexpr const char* RELAY_VERSION = "0.3.9";
 // The relay board's family ("c5", "s3"), set by the build; the host tests are "c5".
 #ifndef RELAY_BOARD
 #define RELAY_BOARD "c5"
@@ -112,6 +112,10 @@ public:
     std::function<std::string(const std::string&, const std::string&, const std::string&, size_t)> firmwareUpdate;
     // Calibrate the relay's own battery divider against a measured voltage (mV): "" or why not.
     std::function<std::string(int mv)> relayBatteryCalibrate;
+    // Runs a text down one pilot's goggle OSD through the relay's Timer
+    // Backpack (pilot = bind phrase): "" or why not. Set only when the relay
+    // has a backpack; hello then lists "osd_test".
+    std::function<std::string(const std::string& phrase, const std::string& text)> osdTest;
 
     // Loaded at boot from the saved settings.
     // The last C5 detection write (WRITE 0x73 payload), written again on every (re)connect.
@@ -203,6 +207,7 @@ private:
     std::string setChannel(cJSON* command);
     std::string nodeIo(cJSON* command, cJSON* result);
     std::string batteryCalibrate(cJSON* command);
+    std::string runOsdTest(cJSON* command);
     std::string rememberC5Input(cJSON* command);
     std::string raceSettings(cJSON* command);
     void adoptNode();

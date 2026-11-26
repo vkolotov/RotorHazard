@@ -28,6 +28,7 @@
 #include "feed_url.h"
 #include "relay.h"
 #include "web_form.h"
+#include "osd_backpack.h"
 
 using namespace relay;
 
@@ -319,6 +320,41 @@ static esp_err_t sendPage(httpd_req_t* req, const std::string& body)
 
 static esp_err_t getRoot(httpd_req_t* req) { return sendPage(req, page()); }
 
+// The OSD Timer Backpack, for testing: /backpack?do=version | wifi | clear&phrase=..
+// | osd&phrase=<bind phrase>&text=<text>[&row=<0-17>]. Plain text answer.
+static esp_err_t getBackpack(httpd_req_t* req)
+{
+    std::string query;
+    const size_t len = httpd_req_get_url_query_len(req);
+    if (len > 0 && len < 512) {
+        query.resize(len + 1);
+        httpd_req_get_url_query_str(req, query.data(), query.size());
+        query.resize(len);
+    }
+    auto q = parseForm(query);
+    const std::string action = q["do"];
+    std::string out;
+    if (action == "version") {
+        const std::string v = backpackVersion();
+        out = v.empty() ? "no answer" : v;
+    } else if (action == "wifi") {
+        out = backpackWifi() ? "sent" : "not ready";
+    } else if (action == "osd" && !q["phrase"].empty()) {
+        const int row = q["row"].empty() ? 8 : atoi(q["row"].c_str());
+        out = backpackOsd(q["phrase"], row, q["text"].empty() ? "MACH1 OSD TEST" : q["text"]) ? "sent" : "not ready";
+    } else if (action == "sweep" && !q["phrase"].empty()) {
+        out = backpackOsdSweep(q["phrase"], q["text"].empty() ? "Mach1" : q["text"]) ? "started" : "busy or not ready";
+    } else if (action == "clear" && !q["phrase"].empty()) {
+        out = backpackOsdClear(q["phrase"]) ? "sent" : "not ready";
+    } else if (!action.empty()) {
+        out = "do=version | wifi | osd&phrase=..&text=..[&row=..] | sweep&phrase=..[&text=..] | clear&phrase=..";
+    }
+    out += (out.empty() ? "" : "\n") + backpackSummary() + "\n";
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out.data(), (ssize_t)out.size());
+}
+
 static esp_err_t getStatus(httpd_req_t* req)
 {
     const std::string json = statusJson();
@@ -526,6 +562,7 @@ static void startHttp()
         uri("/", HTTP_GET, getRoot),
         uri("/status.json", HTTP_GET, getStatus),
         uri("/log.txt", HTTP_GET, getLog),
+        uri("/backpack", HTTP_GET, getBackpack),
         uri("/settings", HTTP_POST, postSettings),
         uri("/link", HTTP_GET, wsLink, true),
         uri("/*", HTTP_GET, getOther),

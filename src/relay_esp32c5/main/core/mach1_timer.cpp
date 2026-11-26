@@ -263,6 +263,8 @@ std::string Mach1Timer::hello() const
     cJSON_AddItemToArray(features, cJSON_CreateString("set_name"));
     cJSON_AddItemToArray(features, cJSON_CreateString("firmware_update"));
     cJSON_AddItemToArray(features, cJSON_CreateString("battery_calibrate"));
+    if (osdTest)
+        cJSON_AddItemToArray(features, cJSON_CreateString("osd_test"));
     // The node this timer is (its id), and the relay reaching it.
     if (driver_ && !driver_->info().nodeId.empty())
         cJSON_AddStringToObject(m, "node_id", driver_->info().nodeId.c_str());
@@ -700,6 +702,8 @@ void Mach1Timer::runCommand(cJSON* command, int64_t now)
         error = setChannel(command);
     else if (action == "battery_calibrate")
         error = batteryCalibrate(command);
+    else if (action == "osd_test")
+        error = runOsdTest(command);
     else if (action == "firmware_update") {
         if (!firmwareUpdate)
             error = "Firmware update is unavailable.";
@@ -1009,6 +1013,20 @@ void Mach1Timer::gateConfig(cJSON* m, int64_t now)
 
 // ---------------------------------------------------------------------------
 // Settings from mission control
+
+// A text run down one pilot's goggle OSD, to test the relay's Timer Backpack.
+std::string Mach1Timer::runOsdTest(cJSON* command)
+{
+    if (!osdTest)
+        return "This relay has no OSD backpack.";
+    const std::string phrase = getStr(command, "phrase");
+    if (phrase.empty() || phrase.size() > 64)
+        return "Give the goggles' bind phrase.";
+    std::string text = getStr(command, "text");
+    if (text.empty())
+        text = "MACH1";
+    return osdTest(phrase, text.substr(0, 50));
+}
 
 // A battery reading set to what a meter measured (mV): the divider ratio
 // becomes measured / pin, saved where the divider is (the relay or the node).
